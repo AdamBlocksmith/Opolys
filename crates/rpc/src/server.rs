@@ -88,6 +88,10 @@ pub struct ChainInfo {
 /// Holds the node's live state behind async RwLocks so RPC
 /// handlers can read current chain state without blocking mining.
 /// The BlockchainStore is thread-safe (RocksDB handles concurrency).
+///
+/// The `block_sender` channel allows `opl_submitSolution` to pass
+/// externally-mined blocks to the node for validation and application.
+/// The response channel lets the handler wait for the result.
 #[derive(Clone)]
 pub struct RpcState {
     /// Snapshot of chain info, updated after each block.
@@ -100,6 +104,26 @@ pub struct RpcState {
     pub mempool: Arc<RwLock<Mempool>>,
     /// Persistent storage (for historical block/tx lookups).
     pub store: Arc<BlockchainStore>,
+    /// Channel for submitting externally-mined blocks to the node.
+    pub block_sender: tokio::sync::mpsc::Sender<BlockSubmission>,
+}
+
+/// A block submitted by an external miner, along with a oneshot channel
+/// to send the result back to the RPC handler.
+pub struct BlockSubmission {
+    /// The deserialized block to apply.
+    pub block: Block,
+    /// Channel to send the result of applying the block back to the caller.
+    pub reply: tokio::sync::oneshot::Sender<BlockSubmissionResult>,
+}
+
+/// Result of applying a submitted block.
+#[derive(Debug)]
+pub struct BlockSubmissionResult {
+    /// The block hash, if application succeeded.
+    pub block_hash: Option<String>,
+    /// Error message, if application failed.
+    pub error: Option<String>,
 }
 
 impl RpcState {
@@ -110,8 +134,9 @@ impl RpcState {
         validators: Arc<RwLock<ValidatorSet>>,
         mempool: Arc<RwLock<Mempool>>,
         store: Arc<BlockchainStore>,
+        block_sender: tokio::sync::mpsc::Sender<BlockSubmission>,
     ) -> Self {
-        RpcState { chain, accounts, validators, mempool, store }
+        RpcState { chain, accounts, validators, mempool, store, block_sender }
     }
 }
 
@@ -433,15 +458,35 @@ async fn handle_get_mining_job(state: &RpcState) -> Result<serde_json::Value, Js
     serde_json::to_value(job).map_err(|e| JsonRpcError::internal_error(&e.to_string()))
 }
 
-async fn handle_submit_solution(_state: &RpcState, params: &serde_json::Value) -> Result<serde_json::Value, JsonRpcError> {
+async fn handle_submit_solution(state: &RpcState, params: &serde_json::Value) -> Result<serde_json::Value, JsonRpcError> {
     let hex_data = require_string_param(params, "block")?;
     let bytes = hex::decode(&hex_data).map_err(|e| JsonRpcError::invalid_params(&format!("Invalid hex: {}", e)))?;
-    let _block: Block = borsh::from_slice(&bytes).map_err(|e| JsonRpcError::invalid_params(&format!("Invalid block: {}", e)))?;
+    let block: Block = borsh::from_slice(&bytes).map_err(|e| JsonRpcError::invalid_params(&format!("Invalid block: {}", e)))?;
 
-    // Validation and application would happen here, but we need write access
-    // to chain state. For now, return a placeholder indicating the endpoint works.
-    // Full implementation requires passing OpolysNode to the RPC handler.
-    Err(JsonRpcError::internal_error("Block submission not yet fully wired — requires node integration"))
+    let height = block.header.height;
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+
+    let submission = BlockSubmission {
+        block,
+        reply: reply_tx,
+    };
+
+    state.block_sender.send(submission).await
+        .map_err(|_| JsonRpcError::internal_error("Node is not accepting blocks — channel closed"))?;
+
+    let result = reply_rx.await
+        .map_err(|_| JsonRpcError::internal_error("Node did not respond to block submission"))?;
+
+    match result.block_hash {
+        Some(hash) => serde_json::to_value(SubmitSolutionResponse {
+            height,
+            block_hash: hash,
+            status: "accepted".to_string(),
+        }).map_err(|e| JsonRpcError::internal_error(&e.to_string())),
+        None => Err(JsonRpcError::internal_error(
+            result.error.as_deref().unwrap_or("Block application failed"),
+        )),
+    }
 }
 
 // ─── Helper functions ───────────────────────────────────────────────
@@ -655,6 +700,13 @@ pub struct MiningJobResponse {
     pub target: u64,
     pub timestamp: u64,
     pub transaction_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubmitSolutionResponse {
+    pub height: u64,
+    pub block_hash: String,
+    pub status: String,
 }
 
 /// Format a flake amount as `X.YYYYYY OPL` (6 decimal places).

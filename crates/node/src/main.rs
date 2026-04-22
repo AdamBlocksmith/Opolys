@@ -1,11 +1,13 @@
 //! Opolys node entry point.
 //!
-//! Starts the full node with two optional subsystems:
+//! Starts the full node with three concurrent subsystems:
 //!
 //! 1. **RPC server** (on by default) — serves JSON-RPC 2.0 queries on `rpc_port`.
 //!    Disable with `--no-rpc`.
 //! 2. **Mining loop** (off by default) — continuously attempts to mine new blocks
 //!    using Autolykos PoW and applies them to chain state. Enable with `--mine`.
+//! 3. **Block submission processor** — receives blocks from external miners via
+//!    `opl_submitSolution`, validates them, applies them, and updates chain state.
 //!
 //! On startup, the node either loads persisted state from RocksDB (resuming
 //! from the last known block) or initializes from genesis (if no state exists).
@@ -19,7 +21,7 @@
 use clap::Parser;
 use opolys_node::{Args, NodeConfig, OpolysNode, ChainState};
 use opolys_rpc::RpcState;
-use opolys_rpc::server::ChainInfo;
+use opolys_rpc::server::{ChainInfo, BlockSubmission, BlockSubmissionResult};
 
 /// Convert live `ChainState` into an RPC-friendly `ChainInfo` snapshot.
 fn chain_state_to_info(chain: &ChainState) -> ChainInfo {
@@ -69,7 +71,7 @@ async fn main() {
     );
 
     // Initialize the node — loads persisted state from disk or starts from genesis
-    let node = OpolysNode::new(config.clone());
+    let node = std::sync::Arc::new(OpolysNode::new(config.clone()));
 
     // Log initial chain state
     {
@@ -98,6 +100,10 @@ async fn main() {
         std::sync::Arc::new(tokio::sync::RwLock::new(chain_state_to_info(&chain)))
     };
 
+    // Channel for externally-submitted blocks (from opl_submitSolution).
+    // The RPC handler sends blocks here; a dedicated task processes them.
+    let (block_sender, mut block_receiver) = tokio::sync::mpsc::channel::<BlockSubmission>(32);
+
     // Optionally start the JSON-RPC server
     let mut rpc_handle: Option<tokio::task::JoinHandle<()>> = None;
     if !config.no_rpc && node.store.is_some() {
@@ -107,6 +113,7 @@ async fn main() {
             node.validators.clone(),
             node.mempool.clone(),
             node.store.as_ref().unwrap().clone(),
+            block_sender,
         );
 
         let rpc_port = config.rpc_port;
@@ -122,19 +129,64 @@ async fn main() {
         tracing::warn!("RPC: disabled — no persistence layer available. Run with a data directory to enable RPC.");
     }
 
+    // Spawn a task that processes blocks submitted by external miners.
+    // This task applies each block and updates the ChainInfo snapshot,
+    // then sends the result back via the oneshot reply channel.
+    let block_processor_chain_info = chain_info.clone();
+    let block_processor_node = node.clone();
+    let block_processor = tokio::spawn(async move {
+        while let Some(submission) = block_receiver.recv().await {
+            let height = submission.block.header.height;
+            let difficulty = submission.block.header.difficulty;
+            let tx_count = submission.block.transactions.len();
+
+            match block_processor_node.apply_block(&submission.block).await {
+                Ok(hash) => {
+                    tracing::info!(
+                        height,
+                        difficulty,
+                        tx_count,
+                        hash = %hash.to_hex(),
+                        "External block applied"
+                    );
+
+                    // Refresh the RPC chain info snapshot
+                    {
+                        let chain = block_processor_node.chain.read().await;
+                        let mut info = block_processor_chain_info.write().await;
+                        *info = chain_state_to_info(&chain);
+                    }
+
+                    let _ = submission.reply.send(BlockSubmissionResult {
+                        block_hash: Some(hash.to_hex()),
+                        error: None,
+                    });
+                }
+                Err(e) => {
+                    tracing::error!(height, error = %e, "Failed to apply external block");
+                    let _ = submission.reply.send(BlockSubmissionResult {
+                        block_hash: None,
+                        error: Some(e),
+                    });
+                }
+            }
+        }
+    });
+
     // Optionally start the mining loop
     let mut mining_handle: Option<tokio::task::JoinHandle<()>> = None;
     if config.mine {
         let chain_info_clone = chain_info.clone();
+        let mining_node = node.clone();
         mining_handle = Some(tokio::spawn(async move {
             loop {
-                match node.mine_block(10_000_000).await {
+                match mining_node.mine_block(10_000_000).await {
                     Some(block) => {
                         let height = block.header.height;
                         let tx_count = block.transactions.len();
                         let difficulty = block.header.difficulty;
 
-                        match node.apply_block(&block).await {
+                        match mining_node.apply_block(&block).await {
                             Ok(hash) => {
                                 tracing::info!(
                                     height,
@@ -147,7 +199,7 @@ async fn main() {
                                 // Refresh the RPC chain info snapshot so queries
                                 // return up-to-date data
                                 {
-                                    let chain = node.chain.read().await;
+                                    let chain = mining_node.chain.read().await;
                                     let mut info = chain_info_clone.write().await;
                                     *info = chain_state_to_info(&chain);
                                 }
@@ -167,20 +219,27 @@ async fn main() {
     }
 
     // Wait for whichever tasks are running
-    // Both the RPC server and mining loop run indefinitely — if both are
-    // active, we wait for either to finish. If neither is active, exit.
+    // The RPC server, mining loop, and block processor all run indefinitely.
+    // If none are active, exit.
     match (rpc_handle, mining_handle) {
         (Some(rpc), Some(mining)) => {
             tokio::select! {
                 _ = rpc => tracing::info!("RPC server stopped"),
                 _ = mining => tracing::info!("Mining stopped"),
+                _ = block_processor => tracing::info!("Block processor stopped"),
             }
         }
         (Some(rpc), None) => {
-            rpc.await.expect("RPC server task panicked");
+            tokio::select! {
+                _ = rpc => tracing::info!("RPC server stopped"),
+                _ = block_processor => tracing::info!("Block processor stopped"),
+            }
         }
         (None, Some(mining)) => {
-            mining.await.expect("Mining task panicked");
+            tokio::select! {
+                _ = mining => tracing::info!("Mining stopped"),
+                _ = block_processor => tracing::info!("Block processor stopped"),
+            }
         }
         (None, None) => {
             tracing::warn!("Node started with --no-rpc and without --mine. Nothing to do. Exiting.");
