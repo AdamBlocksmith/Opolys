@@ -399,7 +399,7 @@ mod tests {
         let loaded = store.load_validators().unwrap();
 
         assert_eq!(loaded.validator_count(), 1);
-        assert_eq!(loaded.get_validator(&id).unwrap().stake, opolys_core::MIN_BOND_STAKE);
+        assert_eq!(loaded.get_validator(&id).unwrap().total_stake(), opolys_core::MIN_BOND_STAKE);
     }
 
     #[test]

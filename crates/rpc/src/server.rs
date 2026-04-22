@@ -372,12 +372,22 @@ async fn handle_get_validators(state: &RpcState) -> Result<serde_json::Value, Js
     let validator_list = validators.all_validators();
     let mut result = Vec::new();
     for v in validator_list {
+        let total_stake = v.total_stake();
+        let total_weight = v.weight(0); // approximate — would need chain timestamp for exact value
+        let entries: Vec<BondEntryResponse> = v.entries.iter().map(|e| BondEntryResponse {
+            bond_id: e.bond_id,
+            stake_flakes: e.stake,
+            stake_opl: format_flake(e.stake),
+            bonded_at_height: e.bonded_at_height,
+            bonded_at_timestamp: e.bonded_at_timestamp,
+        }).collect();
         result.push(ValidatorResponse {
             object_id: v.object_id.to_hex(),
-            stake_flakes: v.stake,
-            stake_opl: format_flake(v.stake),
+            entries,
+            total_stake_flakes: total_stake,
+            total_stake_opl: format_flake(total_stake),
+            total_weight_flakes: total_weight,
             status: format!("{:?}", v.status),
-            bonded_at_timestamp: v.bonded_at_timestamp,
             last_signed_height: v.last_signed_height,
         });
     }
@@ -571,7 +581,7 @@ fn format_action(action: &opolys_core::TransactionAction) -> String {
         opolys_core::TransactionAction::ValidatorBond { amount } => {
             format!("Bond {} flakes ({})", amount, format_flake(*amount))
         }
-        opolys_core::TransactionAction::ValidatorUnbond => "Unbond".to_string(),
+        opolys_core::TransactionAction::ValidatorUnbond { bond_id } => format!("Unbond entry #{}", bond_id),
     }
 }
 
@@ -671,13 +681,25 @@ pub struct DifficultyResponse {
     pub next_retarget_height: u64,
 }
 
+/// A single bond entry within a validator's stake.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BondEntryResponse {
+    pub bond_id: u64,
+    pub stake_flakes: u64,
+    pub stake_opl: String,
+    pub bonded_at_height: u64,
+    pub bonded_at_timestamp: u64,
+}
+
+/// Full validator info response with per-entry bond details.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ValidatorResponse {
     pub object_id: String,
-    pub stake_flakes: u64,
-    pub stake_opl: String,
+    pub entries: Vec<BondEntryResponse>,
+    pub total_stake_flakes: u64,
+    pub total_stake_opl: String,
+    pub total_weight_flakes: u64,
     pub status: String,
-    pub bonded_at_timestamp: u64,
     pub last_signed_height: u64,
 }
 

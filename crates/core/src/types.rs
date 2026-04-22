@@ -111,24 +111,30 @@ impl ObjectId {
 ///
 /// Each variant carries all data needed to execute it:
 /// - **Transfer**: move OPL from sender to recipient; the fee is burned
-/// - **ValidatorBond**: lock `amount` OPL as stake to become a validator
-/// - **ValidatorUnbond**: withdraw all staked OPL (instant, no lockup period)
+/// - **ValidatorBond**: lock `amount` OPL as stake (new entry or top-up)
+/// - **ValidatorUnbond**: withdraw a specific bond entry by its ID
 ///
-/// Opolys has no token contracts, assets, or governance — these three actions
-/// are the only state transitions a transaction can perform.
+/// Validators can hold multiple bond entries, each with its own stake, seniority
+/// clock, and bond_id. Top-up bonding creates a new entry; unbonding removes a
+/// specific one. There are no pool primitives in the protocol — pools are a
+/// market innovation built on top of per-entry bonds.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TransactionAction {
     /// Transfer `amount` Flakes from the sender to `recipient`.
     /// The attached `fee` (set on the Transaction itself) is burned, not collected.
     Transfer { recipient: ObjectId, amount: FlakeAmount },
 
-    /// Bond `amount` Flakes as validator stake. The sender's account must not
-    /// already be bonded. Meeting `MIN_BOND_STAKE` is required.
+    /// Bond `amount` Flakes as validator stake. If the sender is already a
+    /// validator, this creates a new bond entry (top-up) with its own seniority
+    /// clock. If not, this creates the validator with their first bond entry.
+    /// Each entry requires `>= MIN_BOND_STAKE` (100 OPL).
     ValidatorBond { amount: FlakeAmount },
 
-    /// Unbond all staked Flakes. The validator is immediately removed from the
-    /// active set — there is no unbonding delay.
-    ValidatorUnbond,
+    /// Unbond a specific bond entry by its `bond_id`. The entry's stake is
+    /// returned to the sender and the fee is burned. If the validator has no
+    /// remaining entries, they are removed from the validator set entirely.
+    /// If the bond_id doesn't exist, the transaction fails with no fee burn.
+    ValidatorUnbond { bond_id: u64 },
 }
 
 /// The current consensus phase for a given block height.
@@ -331,9 +337,8 @@ mod tests {
             amount: 100,
         };
         let bond = TransactionAction::ValidatorBond { amount: 10_000_000 };
-        let _unbond = TransactionAction::ValidatorUnbond;
-        assert_ne!(transfer, TransactionAction::ValidatorBond { amount: 0 });
-        assert_ne!(bond, TransactionAction::ValidatorUnbond);
+        let unbond = TransactionAction::ValidatorUnbond { bond_id: 0 };
+        assert_ne!(bond, unbond);
     }
 
     #[test]

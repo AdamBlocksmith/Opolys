@@ -12,6 +12,14 @@
 //! Validators do not collect fees — they earn from block rewards only.
 //! This aligns with Opolys' model as decentralized digital gold: supply
 //! expands via emission and contracts via fee burning, with no hard cap.
+//!
+//! # Per-entry validator bonds
+//!
+//! Validators can hold multiple bond entries, each with its own stake amount
+//! and seniority clock. `ValidatorBond` creates a new entry (or the first
+//! one if the validator doesn't exist yet). `ValidatorUnbond { bond_id }`
+//! removes a specific entry. Invalid bond_id results in an error with no
+//! fee burn and no nonce advance.
 
 use opolys_core::{Transaction, TransactionAction, ObjectId, FlakeAmount, OpolysError, MIN_BOND_STAKE};
 use opolys_consensus::account::{AccountStore, TransferResult};
@@ -67,7 +75,7 @@ impl TransactionDispatcher {
     /// handler based on `tx.action`:
     /// - `Transfer` → `apply_transfer`
     /// - `ValidatorBond` → `apply_bond`
-    /// - `ValidatorUnbond` → `apply_unbond`
+    /// - `ValidatorUnbond { bond_id }` → `apply_unbond`
     ///
     /// Returns an `ApplyResult` indicating success or failure, along with the
     /// fee amount that was burned.
@@ -99,8 +107,8 @@ impl TransactionDispatcher {
             TransactionAction::ValidatorBond { amount } => {
                 Self::apply_bond(tx, sender, *amount, accounts, validators, block_height, block_timestamp)
             }
-            TransactionAction::ValidatorUnbond => {
-                Self::apply_unbond(tx, sender, accounts, validators)
+            TransactionAction::ValidatorUnbond { bond_id } => {
+                Self::apply_unbond(tx, sender, *bond_id, accounts, validators)
             }
         }
     }
@@ -125,10 +133,16 @@ impl TransactionDispatcher {
 
     /// Bond OPL as validator stake.
     ///
+    /// If the sender is already a validator, this creates a new bond entry
+    /// (top-up) with its own seniority clock starting from zero. Each entry
+    /// must be at least `MIN_BOND_STAKE` (100 OPL).
+    ///
+    /// If the sender is not yet a validator, this creates a new validator with
+    /// this as their first bond entry (status: Bonding).
+    ///
     /// The sender's balance is debited by `stake + fee`, where `stake` becomes
-    /// locked validator stake and `fee` is burned. Requires `stake >= MIN_BOND_STAKE`
-    /// (100 OPL). If the validator set rejects the bond (e.g. duplicate), the
-    /// full debit is refunded to the sender.
+    /// locked validator stake and `fee` is burned. If the bond fails (e.g.
+    /// insufficient balance), the debit is refunded.
     fn apply_bond(
         tx: &Transaction,
         sender: &ObjectId,
@@ -138,10 +152,10 @@ impl TransactionDispatcher {
         block_height: u64,
         block_timestamp: u64,
     ) -> ApplyResult {
-        // Minimum stake check — must be >= MIN_BOND_STAKE (100 OPL)
+        // Minimum stake per entry — must be >= MIN_BOND_STAKE (100 OPL)
         if stake < MIN_BOND_STAKE {
             return ApplyResult::err(&format!(
-                "Insufficient bond stake: need {}, got {}",
+                "Insufficient bond stake per entry: need {}, got {}",
                 MIN_BOND_STAKE, stake
             ));
         }
@@ -162,7 +176,7 @@ impl TransactionDispatcher {
             return ApplyResult::err(&e.to_string());
         }
 
-        // Register the validator with the staked amount
+        // Register the bond (creates new entry or new validator)
         let sender_clone = sender.clone();
         if let Err(e) = validators.bond(sender_clone, stake, block_height, block_timestamp) {
             // Refund on failure
@@ -170,35 +184,52 @@ impl TransactionDispatcher {
             return ApplyResult::err(&e);
         }
 
+        // Increment the sender's nonce to prevent replay
+        if let Some(account) = accounts.get_account_mut(sender) {
+            account.nonce += 1;
+        }
+
         // Fee is burned (already debited from sender, not credited to anyone)
         ApplyResult::ok(tx.fee)
     }
 
-    /// Unbond a validator, returning all staked OPL to the sender's balance.
+    /// Unbond a specific bond entry, returning that entry's stake to the sender.
     ///
-    /// The full stake is credited back. The transaction fee is then burned
-    /// (debited) from the sender's balance. The sender's nonce is incremented
-    /// manually here (unlike transfers, the account store does not handle it).
-    /// There is no lockup period — unbonding is immediate.
+    /// The specific entry's stake is credited back to the sender. The transaction
+    /// fee is then burned from the sender's balance. If the validator has no
+    /// remaining entries after this unbond, they are removed from the set.
+    ///
+    /// If the bond_id doesn't exist, the transaction fails with no fee burn
+    /// and no nonce advance — honest mistakes shouldn't cost money.
     fn apply_unbond(
         tx: &Transaction,
         sender: &ObjectId,
+        bond_id: u64,
         accounts: &mut AccountStore,
         validators: &mut ValidatorSet,
     ) -> ApplyResult {
-        let validator = validators.get_validator(sender);
-        let stake = match validator {
-            Some(v) => v.stake,
-            None => return ApplyResult::err("Validator not bonded"),
+        // Look up the entry stake for the specified bond_id
+        let entry_stake = {
+            let validator = match validators.get_validator(sender) {
+                Some(v) => v,
+                None => return ApplyResult::err("Validator not bonded"),
+            };
+            match validator.get_entry(bond_id) {
+                Some(entry) => entry.stake,
+                None => return ApplyResult::err(&format!("Bond entry {} not found", bond_id)),
+            }
         };
 
-        // Remove the validator from the set
-        if let Err(e) = validators.unbond(sender) {
-            return ApplyResult::err(&e);
-        }
+        // Remove the specific entry and return the stake
+        let returned_stake = match validators.unbond_entry(sender, bond_id) {
+            Ok(stake) => stake,
+            Err(e) => return ApplyResult::err(&e),
+        };
 
-        // Return the full stake to the sender
-        if let Err(e) = accounts.credit(sender, stake) {
+        debug_assert_eq!(entry_stake, returned_stake, "Entry stake mismatch during unbond");
+
+        // Return the entry's stake to the sender
+        if let Err(e) = accounts.credit(sender, returned_stake) {
             return ApplyResult::err(&format!("Failed to return stake: {}", e));
         }
 
@@ -241,7 +272,7 @@ pub fn validate_transaction_basic(tx: &Transaction, sender_balance: FlakeAmount,
     let total_cost = match &tx.action {
         TransactionAction::Transfer { amount, .. } => amount.saturating_add(tx.fee),
         TransactionAction::ValidatorBond { amount } => amount.saturating_add(tx.fee),
-        TransactionAction::ValidatorUnbond => tx.fee,
+        TransactionAction::ValidatorUnbond { .. } => tx.fee,
     };
 
     if sender_balance < total_cost {
@@ -280,6 +311,18 @@ mod tests {
             tx_id: hash_to_object_id(format!("{:?}_bond_{}", sender, nonce).as_bytes()),
             sender: sender.clone(),
             action: TransactionAction::ValidatorBond { amount },
+            fee,
+            signature: vec![],
+            nonce,
+            data: vec![],
+        }
+    }
+
+    fn make_unbond(sender: &ObjectId, bond_id: u64, fee: FlakeAmount, nonce: u64) -> Transaction {
+        Transaction {
+            tx_id: hash_to_object_id(format!("{:?}_unbond_{}", sender, nonce).as_bytes()),
+            sender: sender.clone(),
+            action: TransactionAction::ValidatorUnbond { bond_id },
             fee,
             signature: vec![],
             nonce,
@@ -346,7 +389,7 @@ mod tests {
         // Alice's balance: 200 - 100 (stake) - 1 (fee) = 99 OPL
         assert_eq!(accounts.get_account(&alice).unwrap().balance, opl_to_flake(99));
         // Validator should have 100 OPL staked
-        assert_eq!(validators.get_validator(&alice).unwrap().stake, bond_amount);
+        assert_eq!(validators.get_validator(&alice).unwrap().total_stake(), bond_amount);
     }
 
     /// Bond validator with insufficient stake — should fail.
@@ -365,6 +408,127 @@ mod tests {
             &tx, &mut accounts, &mut validators, 1, 100,
         );
         assert!(!result.success);
+    }
+
+    /// Top-up: existing validator bonds again, creating a second entry.
+    #[test]
+    fn bond_top_up_creates_new_entry() {
+        let mut accounts = AccountStore::new();
+        let mut validators = ValidatorSet::new();
+        let alice = hash_to_object_id(b"alice");
+
+        accounts.create_account(alice.clone()).unwrap();
+        accounts.credit(&alice, opl_to_flake(500)).unwrap();
+
+        // First bond: 100 OPL
+        let tx1 = make_bond(&alice, MIN_BOND_STAKE, opl_to_flake(1), 0);
+        let result1 = TransactionDispatcher::apply_transaction(
+            &tx1, &mut accounts, &mut validators, 1, 100,
+        );
+        assert!(result1.success);
+
+        // Second bond (top-up): 200 OPL
+        let tx2 = make_bond(&alice, MIN_BOND_STAKE * 2, opl_to_flake(1), 1);
+        let result2 = TransactionDispatcher::apply_transaction(
+            &tx2, &mut accounts, &mut validators, 2, 200,
+        );
+        assert!(result2.success, "Top-up bond should succeed: {:?}", result2.error);
+
+        let v = validators.get_validator(&alice).unwrap();
+        assert_eq!(v.entries.len(), 2);
+        assert_eq!(v.total_stake(), MIN_BOND_STAKE * 3);
+        // Still one validator
+        assert_eq!(validators.validator_count(), 1);
+    }
+
+    /// Unbond a specific entry — should return only that entry's stake.
+    #[test]
+    fn unbond_specific_entry() {
+        let mut accounts = AccountStore::new();
+        let mut validators = ValidatorSet::new();
+        let alice = hash_to_object_id(b"alice");
+
+        accounts.create_account(alice.clone()).unwrap();
+        accounts.credit(&alice, opl_to_flake(500)).unwrap();
+
+        // Bond entry #0: 100 OPL
+        let tx1 = make_bond(&alice, MIN_BOND_STAKE, opl_to_flake(1), 0);
+        let r1 = TransactionDispatcher::apply_transaction(&tx1, &mut accounts, &mut validators, 1, 100);
+        assert!(r1.success, "First bond should succeed: {:?}", r1.error);
+
+        // Bond entry #1: 200 OPL
+        let tx2 = make_bond(&alice, MIN_BOND_STAKE * 2, opl_to_flake(1), 1);
+        let r2 = TransactionDispatcher::apply_transaction(&tx2, &mut accounts, &mut validators, 2, 200);
+        assert!(r2.success, "Second bond (top-up) should succeed: {:?}", r2.error);
+
+        // Alice balance: 500 - 100 - 1 - 200 - 1 = 198 OPL
+        assert_eq!(accounts.get_account(&alice).unwrap().balance, opl_to_flake(198));
+
+        // Unbond entry #0 (100 OPL)
+        let tx3 = make_unbond(&alice, 0, opl_to_flake(1), 2);
+        let result = TransactionDispatcher::apply_transaction(
+            &tx3, &mut accounts, &mut validators, 3, 300,
+        );
+        assert!(result.success, "Unbond should succeed: {:?}", result.error);
+
+        // Alice got 100 OPL back, paid 1 OPL fee: 198 + 100 - 1 = 297
+        assert_eq!(accounts.get_account(&alice).unwrap().balance, opl_to_flake(297));
+
+        let v = validators.get_validator(&alice).unwrap();
+        assert_eq!(v.entries.len(), 1);
+        assert_eq!(v.total_stake(), MIN_BOND_STAKE * 2);
+    }
+
+    /// Unbond a non-existent bond_id — should fail with no fee burn.
+    #[test]
+    fn unbond_nonexistent_bond_id() {
+        let mut accounts = AccountStore::new();
+        let mut validators = ValidatorSet::new();
+        let alice = hash_to_object_id(b"alice");
+
+        accounts.create_account(alice.clone()).unwrap();
+        accounts.credit(&alice, opl_to_flake(200)).unwrap();
+
+        let tx1 = make_bond(&alice, MIN_BOND_STAKE, opl_to_flake(1), 0);
+        let r = TransactionDispatcher::apply_transaction(&tx1, &mut accounts, &mut validators, 1, 100);
+        assert!(r.success, "Bond should succeed: {:?}", r.error);
+
+        // Try to unbond a non-existent bond entry
+        let tx2 = make_unbond(&alice, 999, opl_to_flake(1), 1);
+        let result = TransactionDispatcher::apply_transaction(
+            &tx2, &mut accounts, &mut validators, 2, 200,
+        );
+        assert!(!result.success);
+        assert_eq!(result.fee_burned, 0);
+        // No nonce advance on failure
+        assert_eq!(accounts.get_account(&alice).unwrap().nonce, 1);
+        // Validator still exists
+        assert_eq!(validators.validator_count(), 1);
+    }
+
+    /// Unbond the last entry — should remove validator entirely.
+    #[test]
+    fn unbond_last_entry_removes_validator() {
+        let mut accounts = AccountStore::new();
+        let mut validators = ValidatorSet::new();
+        let alice = hash_to_object_id(b"alice");
+
+        accounts.create_account(alice.clone()).unwrap();
+        accounts.credit(&alice, opl_to_flake(200)).unwrap();
+
+        let tx1 = make_bond(&alice, MIN_BOND_STAKE, opl_to_flake(1), 0);
+        let r = TransactionDispatcher::apply_transaction(&tx1, &mut accounts, &mut validators, 1, 100);
+        assert!(r.success, "Bond should succeed: {:?}", r.error);
+
+        // Unbond the only entry (bond_id 0)
+        let tx2 = make_unbond(&alice, 0, opl_to_flake(1), 1);
+        let result = TransactionDispatcher::apply_transaction(
+            &tx2, &mut accounts, &mut validators, 2, 200,
+        );
+        assert!(result.success);
+        assert_eq!(validators.validator_count(), 0);
+        // Alice got her 100 OPL back, minus 1 fee: (200 - 100 - 1) + 100 - 1 = 198
+        assert_eq!(accounts.get_account(&alice).unwrap().balance, opl_to_flake(198));
     }
 
     #[test]

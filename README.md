@@ -160,7 +160,7 @@ OPL transitions smoothly from PoW to PoS as validators bond stake:
 - **Stake coverage** = `total_bonded / total_issued`
 - When stake coverage > 0, validators begin producing blocks alongside miners
 - The PoW/PoS reward split tracks stake coverage continuously — no thresholds, no governance votes
-- Validators earn proportional to **weight** = `stake × (1 + ln(1 + age_years))` — logarithmic seniority, no compounding
+- Validators earn proportional to **weight** = `Σ entry.stake × (1 + ln(1 + entry.age_years))` — each bond entry has its own seniority clock
 
 ---
 
@@ -199,8 +199,8 @@ Block hashes are computed as `Blake3-256(header_bytes)` where `header_bytes` is 
 | Action | Description |
 |---|---|
 | `Transfer { recipient, amount }` | Move OPL from sender to recipient |
-| `ValidatorBond { amount }` | Lock OPL as validator stake (minimum 100 OPL) |
-| `ValidatorUnbond` | Return staked OPL to sender balance (no lockup period) |
+| `ValidatorBond { amount }` | Lock OPL as validator stake, or top-up existing validator (min 100 OPL per entry) |
+| `ValidatorUnbond { bond_id }` | Unbond a specific entry by `bond_id`, returning that entry's stake to sender |
 
 ### Transaction Lifecycle
 
@@ -210,8 +210,8 @@ Block hashes are computed as `Blake3-256(header_bytes)` where `header_bytes` is 
 4. **Include**: Miner/validator selects transactions into a block
 5. **Execute**: Dispatcher applies state transitions atomically:
    - **Transfer**: Debit sender, credit recipient, burn fee
-   - **Bond**: Debit sender, credit validator stake, burn fee
-   - **Unbond**: Return validator stake to sender balance, burn fee
+   - **Bond**: Debit sender, create new bond entry (or top-up existing validator), burn fee
+   - **Unbond**: Return specific entry's stake to sender balance, remove entry, burn fee
 6. **Persist**: Block and state written to RocksDB atomically
 
 ### Fee Model
@@ -244,7 +244,7 @@ The node exposes a JSON-RPC 2.0 server on port 4171.
 | `opl_getMempoolStatus` | _(none)_ | Pending transaction count and size |
 | `opl_getSupply` | _(none)_ | Issued, burned, and circulating breakdown |
 | `opl_getDifficulty` | _(none)_ | Current difficulty and retarget info |
-| `opl_getValidators` | _(none)_ | Active validator set with stakes |
+| `opl_getValidators` | _(none)_ | Active validator set with per-entry bond details |
 
 ### Write
 
@@ -404,10 +404,12 @@ new_difficulty = max(new_difficulty, MIN_DIFFICULTY)
 ### Validator Weight
 
 ```
-weight = stake × (1 + ln(1 + age_years))
+weight = Σ entry.stake × (1 + ln(1 + entry.age_years))
 ```
 
-Logarithmic seniority — validators earn proportionally more over time, but never exponentially.
+Each validator can hold multiple bond entries, each with its own `bond_id`, stake, and seniority clock. Seniority starts at zero for each new entry (top-up bonds earn no bonus initially). Logarithmic — the marginal gain diminishes over time, so early validators earn more per-coin but never dominate permanently.
+
+To unbond, specify which entry by `bond_id`. Invalid bond IDs fail with no fee burn. Pools are a market innovation — the protocol provides per-entry bonds, community builds pooling off-chain.
 
 ---
 

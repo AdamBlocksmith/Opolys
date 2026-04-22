@@ -8,8 +8,10 @@
 //!   diminishing returns of real-world gold extraction.
 //! - **Discovery bonus** amplifies the reward when a miner finds an
 //!   exceptionally good hash (far below target), rewarding luck and effort.
-//! - **Validator weight** = `stake × (1 + ln(1 + age_years))`, giving a
-//!   logarithmic seniority bonus rather than linear stake dominance.
+//! - **Validator weight** = `Σ entry.stake × (1 + ln(1 + entry.age_years))`,
+//!   computed per bond entry. Each entry has its own seniority clock, so
+//!   older entries earn proportionally more, but the marginal gain diminishes
+//!   logarithmically over time, preventing permanent dominance by early stakers.
 //! - **Stake coverage** — the ratio of bonded stake to total issued supply —
 //!   determines how much of each block reward flows to miners vs. validators.
 //!   At 0% coverage, all rewards go to miners; at 100%, all go to validators.
@@ -50,11 +52,11 @@ pub fn compute_miner_reward(difficulty: u64, discovery_bonus: u64) -> FlakeAmoun
     compute_block_reward(difficulty, discovery_bonus)
 }
 
-/// Compute a validator's share of the block reward based on their weighted
-/// stake relative to the total weight of all active validators.
+/// Compute a validator's share of the block reward based on their total weight
+/// relative to all active validators. Weight is the sum of per-entry weights.
 ///
-/// Weight is `stake × (1 + ln(1 + age_years))`, giving a logarithmic
-/// seniority bonus. Rewards are distributed proportionally to weight.
+/// Each entry's weight = `stake × (1 + ln(1 + age_years))`, giving a logarithmic
+/// seniority bonus. Rewards are distributed proportionally to total weight.
 pub fn compute_validator_reward(
     block_reward: FlakeAmount,
     validator_stake: FlakeAmount,
@@ -69,11 +71,14 @@ pub fn compute_validator_reward(
     ((block_reward as u128 * weight as u128) / total_weight as u128) as FlakeAmount
 }
 
-/// Compute a validator's weighting factor: `stake × (1 + ln(1 + age_years))`.
+/// Compute a single entry's weighting factor: `stake × (1 + ln(1 + age_years))`.
 ///
-/// This gives a logarithmic — not linear — seniority bonus. Validators who
-/// stay bonded longer earn proportionally more, but the marginal gain
-/// diminishes over time, preventing permanent dominance by early stakers.
+/// This gives a logarithmic — not linear — seniority bonus. Each bond entry
+/// accrues seniority independently — a fresh top-up starts at zero age, earning
+/// no bonus until time passes. Older entries earn proportionally more per-coin,
+/// but the marginal gain diminishes over time, preventing permanent dominance.
+///
+/// A validator's total weight is the sum of this value across all their entries.
 pub fn compute_validator_weight(stake: FlakeAmount, age_years: f64) -> FlakeAmount {
     let multiplier = 1.0_f64 + (1.0_f64 + age_years).ln();
     (stake as f64 * multiplier) as FlakeAmount

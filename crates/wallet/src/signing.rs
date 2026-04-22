@@ -5,10 +5,10 @@
 //! the transaction data with Borsh, signs it with the sender's ed25519 key,
 //! and computes a deterministic transaction ID via Blake3-256.
 //!
-//!.transactions are:
+//! Transactions are:
 //! - **Transfer** — move OPL between accounts (fees are burned, not collected)
-//! - **ValidatorBond** — lock OPL as stake to become a validator (min 100 OPL)
-//! - **ValidatorUnbond** — release staked OPL back to the validator's balance
+//! - **ValidatorBond** — lock OPL as stake to become a validator (min 100 OPL per entry)
+//! - **ValidatorUnbond** — release a specific bond entry's stake back to balance
 
 use opolys_core::{FlakeAmount, ObjectId, Transaction, TransactionAction};
 use crate::key::KeyPair;
@@ -54,10 +54,10 @@ impl TransactionSigner {
 
     /// Create a signed validator bond transaction.
     ///
-    /// Locks `amount` OPL (in flakes) as validator stake. The sender must have
-    /// at least `amount + fee` in balance. `amount` must be `>=` MIN_BOND_STAKE
-    /// (100 OPL). Only double-sign slashing exists in Opolys — no governance,
-    /// no schedules, no fixed percentages.
+    /// Locks `amount` OPL (in flakes) as validator stake. If the sender is
+    /// already a validator, this creates a new bond entry (top-up) with its
+    /// own seniority clock starting from zero. Each entry must be at least
+    /// `MIN_BOND_STAKE` (100 OPL).
     pub fn create_validator_bond(
         sender: &KeyPair,
         amount: FlakeAmount,
@@ -82,17 +82,18 @@ impl TransactionSigner {
         }
     }
 
-/// Create a signed validator unbond transaction.
+    /// Create a signed validator unbond transaction for a specific bond entry.
     ///
-    /// Returns the full staked amount to the sender's balance. The fee is
-    /// burned from the sender's balance. There is no lockup period —
-    /// unbonding takes effect immediately upon block inclusion.
+    /// Releases the stake from bond entry `bond_id` back to the sender's balance.
+    /// The fee is burned. If the validator has no remaining entries after this
+    /// unbond, they are removed from the validator set entirely.
     pub fn create_validator_unbond(
         sender: &KeyPair,
+        bond_id: u64,
         fee: FlakeAmount,
         nonce: u64,
     ) -> Transaction {
-        let action = TransactionAction::ValidatorUnbond;
+        let action = TransactionAction::ValidatorUnbond { bond_id };
         let sender_id = sender.object_id().clone();
 
         let tx_id = Self::compute_tx_id(&sender_id, &action, fee, nonce);
@@ -110,10 +111,10 @@ impl TransactionSigner {
         }
     }
 
-    /// Deterministic transaction ID derived from sender, fee, and nonce via Blake3-256.
+    /// Deterministic transaction ID derived from sender, action, fee, and nonce via Blake3-256.
     ///
     /// Ensures each transaction has a unique identifier without relying on
-    /// randomness. Two transactions with the same sender, fee, and nonce
+    /// randomness. Two transactions with the same sender, action, fee, and nonce
     /// will have the same ID — which is correct because the nonce prevents
     /// replay.
     fn compute_tx_id(
@@ -153,7 +154,7 @@ mod tests {
     #[test]
     fn create_bond_transaction() {
         let keypair = KeyPair::generate();
-        let bond_amount = 100 * FLAKES_PER_OPL; // 100 OPL
+        let bond_amount = 100 * FLAKES_PER_OPL;
         let tx = TransactionSigner::create_validator_bond(
             &keypair,
             bond_amount,
@@ -164,14 +165,15 @@ mod tests {
     }
 
     #[test]
-    fn create_unbond_transaction() {
+    fn create_unbond_transaction_with_bond_id() {
         let keypair = KeyPair::generate();
         let tx = TransactionSigner::create_validator_unbond(
             &keypair,
+            0,
             FLAKES_PER_OPL / 100,
             1,
         );
-        assert!(matches!(tx.action, TransactionAction::ValidatorUnbond));
+        assert!(matches!(tx.action, TransactionAction::ValidatorUnbond { bond_id } if bond_id == 0));
         assert_eq!(tx.nonce, 1);
     }
 }
