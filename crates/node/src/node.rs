@@ -223,7 +223,7 @@ pub struct OpolysNode {
     /// Live validator set (stake, bonding status).
     pub validators: Arc<RwLock<ValidatorSet>>,
     /// Persistent RocksDB storage (None if running without persistence).
-    pub store: Option<BlockchainStore>,
+    pub store: Option<Arc<BlockchainStore>>,
     /// Node configuration (ports, data directory, etc.).
     pub config: NodeConfig,
 }
@@ -240,6 +240,7 @@ impl OpolysNode {
 
         let (chain_state, accounts, validators, store) = match store_result {
             Ok(store) => {
+                let store = Arc::new(store);
                 // Try to load persisted state
                 match store.load_chain_state() {
                     Ok(Some(persisted)) => {
@@ -438,6 +439,7 @@ impl OpolysNode {
         block: &Block,
     ) -> Result<(), String> {
         store.save_block(block)?;
+        store.save_block_indexes(block)?;
         store.save_chain_state(&chain.to_persisted())?;
         store.save_accounts(accounts)?;
         store.save_validators(validators)?;

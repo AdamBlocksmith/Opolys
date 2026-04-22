@@ -31,6 +31,7 @@ fn chain_state_to_info(chain: &ChainState) -> ChainInfo {
         circulating_supply: chain.circulating_supply(),
         latest_block_hash: chain.latest_block_hash.to_hex(),
         phase: format!("{:?}", chain.phase),
+        block_timestamps: chain.block_timestamps.clone(),
     }
 }
 
@@ -90,9 +91,9 @@ async fn main() {
         tracing::info!("RPC: disabled (run without --no-rpc to enable)");
     }
 
-    // Optionally start the JSON-RPC server
+// Optionally start the JSON-RPC server
     let mut rpc_handle: Option<tokio::task::JoinHandle<()>> = None;
-    if !config.no_rpc {
+    if !config.no_rpc && node.store.is_some() {
         // Build the RPC ChainInfo snapshot from the current chain state
         let chain_info = {
             let chain = node.chain.read().await;
@@ -102,6 +103,8 @@ async fn main() {
             std::sync::Arc::new(tokio::sync::RwLock::new(chain_info)),
             node.accounts.clone(),
             node.validators.clone(),
+            node.mempool.clone(),
+            node.store.as_ref().unwrap().clone(),
         );
 
         let rpc_port = config.rpc_port;
@@ -111,6 +114,10 @@ async fn main() {
             }
         }));
         tracing::info!(port = config.rpc_port, "RPC server starting");
+    } else if config.no_rpc {
+        tracing::info!("RPC: disabled (run without --no-rpc to enable)");
+    } else {
+        tracing::warn!("RPC: disabled — no persistence layer available. Run with a data directory to enable RPC.");
     }
 
     // Optionally start the mining loop

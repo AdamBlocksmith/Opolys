@@ -15,7 +15,7 @@
 //! Serialization uses [Borsh](https://borsh.io) for deterministic binary encoding.
 //! Compression is enabled with LZ4 to reduce disk footprint.
 
-use opolys_core::Block;
+use opolys_core::{Block, ObjectId, Hash, Transaction};
 use opolys_consensus::account::{Account, AccountStore};
 use opolys_consensus::pos::{ValidatorInfo, ValidatorSet};
 use borsh::{BorshSerialize, BorshDeserialize};
@@ -134,6 +134,93 @@ impl BlockchainStore {
             }
             Ok(None) => Ok(None),
             Err(e) => Err(format!("Latest block height get failed: {}", e)),
+        }
+    }
+
+    // ─── Block indexes ─────────────────────────────────────────────
+
+    /// Save reverse indexes for a block: hash→height and per-tx lookups.
+    ///
+    /// Must be called after `save_block()` for each new block. These indexes
+    /// enable RPC queries like "get block by hash" and "get transaction by id".
+    pub fn save_block_indexes(&self, block: &Block) -> Result<(), String> {
+        let block_hash = opolys_consensus::block::compute_block_hash(&block.header);
+
+        // hash → height (for block-by-hash lookups)
+        let blocks_cf = self.db.cf_handle("blocks")
+            .ok_or_else(|| "Column family 'blocks' not found".to_string())?;
+        let hash_key = format!("hash_{}", block_hash.to_hex());
+        self.db.put_cf(&blocks_cf, hash_key.as_bytes(), &block.header.height.to_be_bytes())
+            .map_err(|e| format!("Block hash index put failed: {}", e))?;
+
+        // tx_id → (height, index) for each transaction in the block
+        let tx_cf = self.db.cf_handle("transactions")
+            .ok_or_else(|| "Column family 'transactions' not found".to_string())?;
+        for (idx, tx) in block.transactions.iter().enumerate() {
+            let mut val = Vec::new();
+            val.extend_from_slice(&block.header.height.to_be_bytes());
+            val.extend_from_slice(&(idx as u32).to_be_bytes());
+            let tx_key = format!("tx_{}", tx.tx_id.to_hex());
+            self.db.put_cf(&tx_cf, tx_key.as_bytes(), &val)
+                .map_err(|e| format!("Tx index put failed: {}", e))?;
+        }
+
+        Ok(())
+    }
+
+    /// Load a block by its Blake3 hash (hex-encoded).
+    pub fn load_block_by_hash(&self, hash: &Hash) -> Result<Option<Block>, String> {
+        let blocks_cf = self.db.cf_handle("blocks")
+            .ok_or_else(|| "Column family 'blocks' not found".to_string())?;
+        let hash_key = format!("hash_{}", hash.to_hex());
+
+        match self.db.get_cf(&blocks_cf, hash_key.as_bytes()) {
+            Ok(Some(data)) => {
+                let height = u64::from_be_bytes(data.as_slice().try_into()
+                    .map_err(|_| "Invalid height in hash index")?);
+                self.load_block(height)
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(format!("Block hash lookup failed: {}", e)),
+        }
+    }
+
+    /// Load a transaction by its ObjectId.
+    ///
+    /// Returns `Some((block_height, Transaction))` if found, `None` otherwise.
+    pub fn load_transaction(&self, tx_id: &ObjectId) -> Result<Option<(u64, Transaction)>, String> {
+        let tx_cf = self.db.cf_handle("transactions")
+            .ok_or_else(|| "Column family 'transactions' not found".to_string())?;
+        let tx_key = format!("tx_{}", tx_id.to_hex());
+
+        match self.db.get_cf(&tx_cf, tx_key.as_bytes()) {
+            Ok(Some(data)) => {
+                if data.len() < 12 {
+                    return Err("Invalid transaction index data".to_string());
+                }
+                let height = u64::from_be_bytes(data[..8].try_into()
+                    .map_err(|_| "Invalid height in tx index")?);
+                let _index = u32::from_be_bytes(data[8..12].try_into()
+                    .map_err(|_| "Invalid index in tx index")?);
+
+                // Load the block that contains this transaction
+                let block = self.load_block(height)?;
+                match block {
+                    Some(b) => {
+                        // Find the transaction within the block
+                        for tx in &b.transactions {
+                            if &tx.tx_id == tx_id {
+                                return Ok(Some((height, tx.clone())));
+                            }
+                        }
+                        // Index says it should be here but transaction not found
+                        Ok(None)
+                    }
+                    None => Ok(None),
+                }
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(format!("Tx lookup failed: {}", e)),
         }
     }
 
