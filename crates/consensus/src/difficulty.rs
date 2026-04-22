@@ -69,9 +69,7 @@ fn compute_retarget(current_difficulty: u64, current_height: BlockHeight, block_
     let denominator = expected_time as u128;
     let new_difficulty = (numerator / denominator) as u64;
 
-    let max_ratio = 4u64;
-    let min_ratio = 1u64 / 4;
-    let max_new = current_difficulty.saturating_mul(max_ratio);
+    let max_new = current_difficulty.saturating_mul(4);
     let min_new = current_difficulty / 4;
 
     new_difficulty.clamp(min_new, max_new).max(MIN_DIFFICULTY)

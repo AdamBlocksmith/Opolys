@@ -1,35 +1,35 @@
-use opolys_core::{BASE_REWARD, FleckAmount, BlockHeight, MIN_DIFFICULTY};
+use opolys_core::{BASE_REWARD, FlakeAmount, BlockHeight, MIN_DIFFICULTY};
 
-pub fn compute_block_reward(difficulty: u64, discovery_bonus: u64) -> FleckAmount {
+pub fn compute_block_reward(difficulty: u64, discovery_bonus: u64) -> FlakeAmount {
     let effective_difficulty = difficulty.max(MIN_DIFFICULTY);
     BASE_REWARD / effective_difficulty * discovery_bonus
 }
 
-pub fn compute_base_reward(difficulty: u64) -> FleckAmount {
+pub fn compute_base_reward(difficulty: u64) -> FlakeAmount {
     let effective_difficulty = difficulty.max(MIN_DIFFICULTY);
     BASE_REWARD / effective_difficulty
 }
 
-pub fn compute_miner_reward(difficulty: u64, discovery_bonus: u64) -> FleckAmount {
+pub fn compute_miner_reward(difficulty: u64, discovery_bonus: u64) -> FlakeAmount {
     compute_block_reward(difficulty, discovery_bonus)
 }
 
 pub fn compute_validator_reward(
-    block_reward: FleckAmount,
-    validator_stake: FleckAmount,
+    block_reward: FlakeAmount,
+    validator_stake: FlakeAmount,
     validator_age_years: f64,
-    total_weight: FleckAmount,
-) -> FleckAmount {
+    total_weight: FlakeAmount,
+) -> FlakeAmount {
     if total_weight == 0 {
         return 0;
     }
     let weight = compute_validator_weight(validator_stake, validator_age_years);
-    ((block_reward as u128 * weight as u128) / total_weight as u128) as FleckAmount
+    ((block_reward as u128 * weight as u128) / total_weight as u128) as FlakeAmount
 }
 
-pub fn compute_validator_weight(stake: FleckAmount, age_years: f64) -> FleckAmount {
+pub fn compute_validator_weight(stake: FlakeAmount, age_years: f64) -> FlakeAmount {
     let multiplier = 1.0_f64 + (1.0_f64 + age_years).ln();
-    (stake as f64 * multiplier) as FleckAmount
+    (stake as f64 * multiplier) as FlakeAmount
 }
 
 pub fn compute_pow_share(stake_coverage: f64) -> f64 {
@@ -40,7 +40,7 @@ pub fn compute_pos_share(stake_coverage: f64) -> f64 {
     stake_coverage
 }
 
-pub fn compute_stake_coverage(total_bonded: FleckAmount, total_issued: FleckAmount) -> f64 {
+pub fn compute_stake_coverage(total_bonded: FlakeAmount, total_issued: FlakeAmount) -> f64 {
     if total_issued == 0 {
         return 0.0;
     }
@@ -110,5 +110,10 @@ mod tests {
         let miner_reward = compute_miner_reward(10, 3);
         let block_reward = compute_block_reward(10, 3);
         assert_eq!(miner_reward, block_reward);
+    }
+
+    #[test]
+    fn base_reward_is_440_opl() {
+        assert_eq!(BASE_REWARD, 440 * opolys_core::FLAKES_PER_OPL);
     }
 }

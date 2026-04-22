@@ -17,10 +17,9 @@ impl Blake3Hasher {
 
     pub fn finalize(&self) -> Hash {
         let hash = self.hasher.finalize();
-        let mut bytes = [0u8; 64];
-        bytes[..32].copy_from_slice(hash.as_bytes());
-        bytes[32..].copy_from_slice(hash.as_bytes());
-        Hash::from_bytes(bytes)
+        let mut result = [0u8; 32];
+        result.copy_from_slice(hash.as_bytes());
+        Hash::from_bytes(result)
     }
 }
 
@@ -73,5 +72,12 @@ mod tests {
 
         let h2 = hash(b"hello world");
         assert_eq!(r1, h2);
+    }
+
+    #[test]
+    fn hash_is_32_bytes() {
+        let h = hash(b"test");
+        assert_eq!(h.as_bytes().len(), 32);
+        assert_eq!(h.to_hex().len(), 64);
     }
 }

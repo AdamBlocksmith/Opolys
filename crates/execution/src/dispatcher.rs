@@ -1,16 +1,16 @@
-use opolys_core::{Transaction, TransactionAction, ObjectId, FleckAmount, OpolysError};
+use opolys_core::{Transaction, TransactionAction, ObjectId, FlakeAmount, OpolysError, MIN_BOND_STAKE};
 use opolys_consensus::account::{AccountStore, TransferResult};
 use opolys_consensus::pos::ValidatorSet;
 
 #[derive(Debug)]
 pub struct ApplyResult {
     pub success: bool,
-    pub fee_burned: FleckAmount,
+    pub fee_burned: FlakeAmount,
     pub error: Option<String>,
 }
 
 impl ApplyResult {
-    pub fn ok(fee_burned: FleckAmount) -> Self {
+    pub fn ok(fee_burned: FlakeAmount) -> Self {
         ApplyResult {
             success: true,
             fee_burned,
@@ -67,7 +67,7 @@ impl TransactionDispatcher {
         tx: &Transaction,
         sender: &ObjectId,
         recipient: &ObjectId,
-        amount: FleckAmount,
+        amount: FlakeAmount,
         accounts: &mut AccountStore,
     ) -> ApplyResult {
         match accounts.transfer(sender, recipient, amount, tx.fee) {
@@ -84,13 +84,12 @@ impl TransactionDispatcher {
         block_height: u64,
         block_timestamp: u64,
     ) -> ApplyResult {
-        let stake = Self::extract_bond_amount(tx)
-            .unwrap_or(0);
+        let stake = Self::extract_bond_amount(tx).unwrap_or(0);
 
-        if stake < opolys_core::MIN_BOND_STAKE {
+        if stake < MIN_BOND_STAKE {
             return ApplyResult::err(&format!(
                 "Insufficient bond stake: need {}, got {}",
-                opolys_core::MIN_BOND_STAKE, stake
+                MIN_BOND_STAKE, stake
             ));
         }
 
@@ -153,8 +152,8 @@ impl TransactionDispatcher {
         ApplyResult::ok(fee)
     }
 
-    fn extract_bond_amount(tx: &Transaction) -> Option<FleckAmount> {
-        let total_outflow = match &tx.action {
+    fn extract_bond_amount(tx: &Transaction) -> Option<FlakeAmount> {
+        let _total_outflow = match &tx.action {
             TransactionAction::Transfer { amount, .. } => *amount + tx.fee,
             TransactionAction::ValidatorBond => tx.fee,
             TransactionAction::ValidatorUnbond => tx.fee,
@@ -164,7 +163,7 @@ impl TransactionDispatcher {
     }
 }
 
-pub fn validate_transaction_basic(tx: &Transaction, sender_balance: FleckAmount, sender_nonce: u64) -> Result<(), OpolysError> {
+pub fn validate_transaction_basic(tx: &Transaction, sender_balance: FlakeAmount, sender_nonce: u64) -> Result<(), OpolysError> {
     if tx.nonce != sender_nonce {
         return Err(OpolysError::InvalidNonce {
             expected: sender_nonce,
@@ -174,10 +173,7 @@ pub fn validate_transaction_basic(tx: &Transaction, sender_balance: FleckAmount,
 
     let total_cost = match &tx.action {
         TransactionAction::Transfer { amount, .. } => amount.saturating_add(tx.fee),
-        TransactionAction::ValidatorBond => {
-            // Bond amount deducted from balance, fee is also deducted
-            tx.fee
-        }
+        TransactionAction::ValidatorBond => tx.fee,
         TransactionAction::ValidatorUnbond => tx.fee,
     };
 
@@ -195,10 +191,9 @@ pub fn validate_transaction_basic(tx: &Transaction, sender_balance: FleckAmount,
 mod tests {
     use super::*;
     use opolys_crypto::hash_to_object_id;
-    use opolys_core::opl_to_fleck;
-    use opolys_core::MIN_BOND_STAKE;
+    use opolys_core::opl_to_flake;
 
-    fn make_transfer(sender: &ObjectId, recipient: &ObjectId, amount: FleckAmount, fee: FleckAmount, nonce: u64) -> Transaction {
+    fn make_transfer(sender: &ObjectId, recipient: &ObjectId, amount: FlakeAmount, fee: FlakeAmount, nonce: u64) -> Transaction {
         Transaction {
             tx_id: hash_to_object_id(format!("{:?}_{:?}_{}", sender, recipient, nonce).as_bytes()),
             sender: sender.clone(),
@@ -213,7 +208,7 @@ mod tests {
         }
     }
 
-    fn make_bond(sender: &ObjectId, _stake: FleckAmount, fee: FleckAmount, nonce: u64) -> Transaction {
+    fn make_bond(sender: &ObjectId, _stake: FlakeAmount, fee: FlakeAmount, nonce: u64) -> Transaction {
         Transaction {
             tx_id: hash_to_object_id(format!("{:?}_bond_{}", sender, nonce).as_bytes()),
             sender: sender.clone(),
@@ -233,16 +228,16 @@ mod tests {
         let bob = hash_to_object_id(b"bob");
 
         accounts.create_account(alice.clone()).unwrap();
-        accounts.credit(&alice, opl_to_fleck(1000)).unwrap();
+        accounts.credit(&alice, opl_to_flake(1000)).unwrap();
 
-        let tx = make_transfer(&alice, &bob, opl_to_fleck(10), opl_to_fleck(1), 0);
+        let tx = make_transfer(&alice, &bob, opl_to_flake(10), opl_to_flake(1), 0);
         let result = TransactionDispatcher::apply_transaction(
             &tx, &mut accounts, &mut validators, 1, 100,
         );
         assert!(result.success);
-        assert_eq!(result.fee_burned, opl_to_fleck(1));
-        assert_eq!(accounts.get_account(&alice).unwrap().balance, opl_to_fleck(989));
-        assert_eq!(accounts.get_account(&bob).unwrap().balance, opl_to_fleck(10));
+        assert_eq!(result.fee_burned, opl_to_flake(1));
+        assert_eq!(accounts.get_account(&alice).unwrap().balance, opl_to_flake(989));
+        assert_eq!(accounts.get_account(&bob).unwrap().balance, opl_to_flake(10));
     }
 
     #[test]
@@ -269,12 +264,9 @@ mod tests {
         let alice = hash_to_object_id(b"alice");
 
         accounts.create_account(alice.clone()).unwrap();
-        accounts.credit(&alice, opl_to_fleck(200)).unwrap();
+        accounts.credit(&alice, opl_to_flake(200)).unwrap();
 
         let tx = make_bond(&alice, 0, MIN_BOND_STAKE, 0);
-        // For bond tx, the stake comes from the fee field conceptually,
-        // but in our simplified model, we need the balance to cover bond amount + fee
-        // This test demonstrates the flow works
         assert!(validators.validator_count() == 0);
     }
 }

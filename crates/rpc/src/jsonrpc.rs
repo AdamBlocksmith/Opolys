@@ -1,9 +1,7 @@
-use opolys_core::{BlockHeight, FleckAmount, ObjectId};
+use opolys_core::{FlakeAmount, ObjectId};
 use opolys_consensus::account::AccountStore;
 use opolys_consensus::pos::ValidatorSet;
-use serde::{Deserialize, Serialize, de::Error as SerdeError};
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -19,7 +17,7 @@ pub struct BlockResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BalanceResponse {
     pub object_id: String,
-    pub balance_flecks: u64,
+    pub balance_flakes: u64,
     pub balance_opl: String,
     pub nonce: u64,
 }
@@ -53,7 +51,7 @@ pub struct PeerInfoResponse {
 
 pub trait RpcContext: Send + Sync {
     fn get_block_height(&self) -> u64;
-    fn get_balance(&self, account_id: &ObjectId) -> Option<FleckAmount>;
+    fn get_balance(&self, account_id: &ObjectId) -> Option<FlakeAmount>;
     fn get_nonce(&self, account_id: &ObjectId) -> Option<u64>;
     fn get_chain_info(&self) -> ChainInfoResponse;
 }
@@ -128,6 +126,10 @@ pub struct JsonRpcServer<C: RpcContext> {
     context: Arc<RwLock<C>>,
     rate_limiter: RateLimiter,
 }
+
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use serde::de::Error as SerdeError;
 
 impl<C: RpcContext + 'static> JsonRpcServer<C> {
     pub fn new(context: Arc<RwLock<C>>) -> Self {

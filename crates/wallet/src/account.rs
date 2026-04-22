@@ -1,4 +1,4 @@
-use opolys_core::{ObjectId, FLECKS_PER_OPL};
+use opolys_core::{FlakeAmount, ObjectId, FLAKES_PER_OPL};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -51,10 +51,10 @@ impl Default for AccountStore {
     }
 }
 
-pub fn format_fleck_as_opl(flecks: u64) -> String {
-    let opl = flecks / FLECKS_PER_OPL;
-    let frac = flecks % FLECKS_PER_OPL;
-    format!("{}.{:07} OPL", opl, frac)
+pub fn format_flake_as_opl(flakes: u64) -> String {
+    let opl = flakes / FLAKES_PER_OPL;
+    let frac = flakes % FLAKES_PER_OPL;
+    format!("{}.{:06} OPL", opl, frac)
 }
 
 #[cfg(test)]
@@ -76,9 +76,10 @@ mod tests {
     }
 
     #[test]
-    fn format_fleck_amounts() {
-        assert_eq!(format_fleck_as_opl(10_000_000), "1.0000000 OPL");
-        assert_eq!(format_fleck_as_opl(0), "0.0000000 OPL");
-        assert_eq!(format_fleck_as_opl(1), "0.0000001 OPL");
+    fn format_flake_amounts() {
+        assert_eq!(format_flake_as_opl(1_000_000), "1.000000 OPL");
+        assert_eq!(format_flake_as_opl(0), "0.000000 OPL");
+        assert_eq!(format_flake_as_opl(1), "0.000001 OPL");
+        assert_eq!(format_flake_as_opl(440_000_000), "440.000000 OPL");
     }
 }

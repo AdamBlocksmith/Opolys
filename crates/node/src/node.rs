@@ -1,15 +1,14 @@
 use opolys_core::*;
 use opolys_consensus::{
     account::AccountStore,
-    difficulty::DifficultyTarget,
     emission,
     mempool::Mempool,
     pos::ValidatorSet,
     pow,
     genesis::GenesisConfig,
 };
-use opolys_consensus::difficulty::{compute_next_difficulty, compute_consensus_floor, compute_discovery_bonus};
-use opolys_consensus::block::{compute_transaction_root, BlockInfo};
+use opolys_consensus::difficulty::{compute_next_difficulty, compute_discovery_bonus};
+use opolys_consensus::block::compute_transaction_root;
 use opolys_execution::TransactionDispatcher;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -59,8 +58,8 @@ impl Default for NodeConfig {
 pub struct ChainState {
     pub current_height: u64,
     pub current_difficulty: u64,
-    pub total_issued: FleckAmount,
-    pub total_burned: FleckAmount,
+    pub total_issued: FlakeAmount,
+    pub total_burned: FlakeAmount,
     pub block_timestamps: Vec<u64>,
     pub latest_block_hash: Hash,
     pub state_root: Hash,
@@ -82,7 +81,7 @@ impl ChainState {
         }
     }
 
-    pub fn circulating_supply(&self) -> FleckAmount {
+    pub fn circulating_supply(&self) -> FlakeAmount {
         self.total_issued.saturating_sub(self.total_burned)
     }
 
@@ -142,7 +141,7 @@ impl OpolysNode {
 
         let difficulty = diff_target.effective_difficulty();
 
-        let mut header = BlockHeader {
+        let header = BlockHeader {
             height: chain.current_height + 1,
             previous_hash: chain.latest_block_hash.clone(),
             state_root: chain.state_root.clone(),
@@ -161,9 +160,7 @@ impl OpolysNode {
         drop(validators);
         drop(mempool);
 
-        let block = pow::mine_block(header, difficulty, max_attempts)?;
-
-        Some(block)
+        pow::mine_block(header, difficulty, max_attempts)
     }
 
     pub async fn apply_block(&self, block: &Block) -> Result<(), String> {
@@ -173,7 +170,7 @@ impl OpolysNode {
         let mut mempool = self.mempool.write().await;
 
         let bonded_stake = validators.total_bonded_stake();
-        let stake_coverage = emission::compute_stake_coverage(bonded_stake, chain.total_issued);
+        let _stake_coverage = emission::compute_stake_coverage(bonded_stake, chain.total_issued);
 
         let pow_hash = if let Some(ref proof) = block.header.pow_proof {
             let nonce = u64::from_be_bytes(proof[..8].try_into().unwrap_or([0u8; 8]));
@@ -190,10 +187,10 @@ impl OpolysNode {
         chain.total_issued = chain.total_issued.saturating_add(block_reward);
         chain.current_height = block.header.height;
         chain.current_difficulty = block.header.difficulty;
-        chain.latest_block_hash = Hash::from_bytes([0u8; 64]);
+        chain.latest_block_hash = Hash::from_bytes([0u8; 32]);
         chain.block_timestamps.push(block.header.timestamp);
 
-        let mut total_fees_burned: FleckAmount = 0;
+        let mut total_fees_burned: FlakeAmount = 0;
         for tx in &block.transactions {
             let result = TransactionDispatcher::apply_transaction(
                 tx,
@@ -210,12 +207,10 @@ impl OpolysNode {
 
         chain.total_burned = chain.total_burned.saturating_add(total_fees_burned);
 
-        
-
         Ok(())
     }
 
-    pub fn get_block(&self, height: u64) -> Option<Block> {
+    pub fn get_block(&self, _height: u64) -> Option<Block> {
         None
     }
 }

@@ -52,7 +52,7 @@ pub fn autolykos_hash(
     header: &BlockHeader,
     nonce: u64,
 ) -> Hash {
-    let mut mixer = [0u8; 64];
+    let mut mixer = [0u8; 32];
     {
         let mut hasher = Blake3Hasher::new();
         hasher.update(&header.previous_hash.0);
@@ -90,7 +90,7 @@ pub fn autolykos_hash(
 }
 
 pub fn mine_block(
-    mut header: BlockHeader,
+    header: BlockHeader,
     difficulty: u64,
     max_nonce_attempts: u64,
 ) -> Option<Block> {
@@ -114,6 +114,7 @@ pub fn mine_block(
         if hash_int < target {
             let mut proof_buf = Vec::with_capacity(8);
             proof_buf.extend_from_slice(&nonce.to_be_bytes());
+            let mut header = header;
             header.pow_proof = Some(proof_buf);
 
             return Some(Block {

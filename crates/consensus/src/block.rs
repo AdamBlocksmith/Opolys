@@ -1,7 +1,6 @@
-use opolys_core::{Hash, Block, BlockHeader, ConsensusPhase, FLECKS_PER_OPL, POS_FINALITY_BLOCKS};
+use opolys_core::{Hash, Block, BlockHeader, ConsensusPhase, FLAKES_PER_OPL, POS_FINALITY_BLOCKS};
 use borsh::{BorshSerialize, BorshDeserialize};
 use serde::{Deserialize, Serialize};
-use opolys_crypto::Blake3Hasher;
 
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize, Serialize, Deserialize)]
 pub struct BlockInfo {
@@ -39,10 +38,10 @@ pub fn compute_transaction_root(transactions: &[opolys_core::Transaction]) -> Ha
     hasher.finalize()
 }
 
-pub fn format_opl(flecks: u64) -> String {
-    let whole = flecks / FLECKS_PER_OPL;
-    let frac = flecks % FLECKS_PER_OPL;
-    format!("{}.{:07} OPL", whole, frac)
+pub fn format_opl(flakes: u64) -> String {
+    let whole = flakes / FLAKES_PER_OPL;
+    let frac = flakes % FLAKES_PER_OPL;
+    format!("{}.{:06} OPL", whole, frac)
 }
 
 #[cfg(test)]
@@ -78,9 +77,9 @@ mod tests {
 
     #[test]
     fn format_opl_amounts() {
-        assert_eq!(format_opl(10_000_000), "1.0000000 OPL");
-        assert_eq!(format_opl(0), "0.0000000 OPL");
-        assert_eq!(format_opl(1), "0.0000001 OPL");
-        assert_eq!(format_opl(555_555_000_000_000), "55555500.0000000 OPL");
+        assert_eq!(format_opl(1_000_000), "1.000000 OPL");
+        assert_eq!(format_opl(0), "0.000000 OPL");
+        assert_eq!(format_opl(1), "0.000001 OPL");
+        assert_eq!(format_opl(440 * 1_000_000), "440.000000 OPL");
     }
 }

@@ -1,5 +1,5 @@
 use opolys_core::{
-    Transaction, TransactionAction, ObjectId, FleckAmount, OpolysError,
+    Transaction, TransactionAction, ObjectId, FlakeAmount, OpolysError,
     TX_MAX_SIZE_BYTES, MEMPOOL_MAX_SIZE_BYTES, MEMPOOL_MAX_TXS_PER_ACCOUNT,
 };
 use std::collections::HashMap;
@@ -141,7 +141,7 @@ mod tests {
     use super::*;
     use opolys_crypto::hash_to_object_id;
 
-    fn make_tx(sender_seed: &[u8], nonce: u64, fee: FleckAmount) -> Transaction {
+    fn make_tx(sender_seed: &[u8], nonce: u64, fee: FlakeAmount) -> Transaction {
         Transaction {
             tx_id: hash_to_object_id(format!("{:?}_{}", sender_seed, nonce).as_bytes()),
             sender: hash_to_object_id(sender_seed),

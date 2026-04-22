@@ -1,9 +1,9 @@
-use opolys_core::{FleckAmount, ObjectId, OpolysError, Hash};
+use opolys_core::{FlakeAmount, ObjectId, OpolysError, Hash};
 
 #[derive(Debug, Clone)]
 pub struct Account {
     pub object_id: ObjectId,
-    pub balance: FleckAmount,
+    pub balance: FlakeAmount,
     pub nonce: u64,
 }
 
@@ -16,7 +16,7 @@ impl Account {
         }
     }
 
-    pub fn can_spend(&self, amount: FleckAmount) -> bool {
+    pub fn can_spend(&self, amount: FlakeAmount) -> bool {
         self.balance >= amount
     }
 }
@@ -49,14 +49,14 @@ impl AccountStore {
         self.accounts.get_mut(object_id)
     }
 
-    pub fn credit(&mut self, object_id: &ObjectId, amount: FleckAmount) -> Result<(), OpolysError> {
+    pub fn credit(&mut self, object_id: &ObjectId, amount: FlakeAmount) -> Result<(), OpolysError> {
         let account = self.accounts.get_mut(object_id)
             .ok_or_else(|| OpolysError::AccountNotFound(object_id.to_hex()))?;
         account.balance = account.balance.saturating_add(amount);
         Ok(())
     }
 
-    pub fn debit(&mut self, object_id: &ObjectId, amount: FleckAmount) -> Result<(), OpolysError> {
+    pub fn debit(&mut self, object_id: &ObjectId, amount: FlakeAmount) -> Result<(), OpolysError> {
         let account = self.accounts.get_mut(object_id)
             .ok_or_else(|| OpolysError::AccountNotFound(object_id.to_hex()))?;
         if account.balance < amount {
@@ -73,8 +73,8 @@ impl AccountStore {
         &mut self,
         from: &ObjectId,
         to: &ObjectId,
-        amount: FleckAmount,
-        fee: FleckAmount,
+        amount: FlakeAmount,
+        fee: FlakeAmount,
     ) -> Result<TransferResult, OpolysError> {
         let total_needed = amount.saturating_add(fee);
         let from_account = self.accounts.get(from)
@@ -113,8 +113,8 @@ impl AccountStore {
 
 #[derive(Debug, Clone)]
 pub struct TransferResult {
-    pub amount: FleckAmount,
-    pub fee_burned: FleckAmount,
+    pub amount: FlakeAmount,
+    pub fee_burned: FlakeAmount,
     pub new_nonce: u64,
 }
 

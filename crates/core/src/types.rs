@@ -1,13 +1,13 @@
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-pub type FleckAmount = u64;
+pub type FlakeAmount = u64;
 pub type BlockHeight = u64;
 pub type PublicKey = Vec<u8>;
 pub type Signature = Vec<u8>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, BorshSerialize, BorshDeserialize)]
-pub struct Hash(pub [u8; 64]);
+pub struct Hash(pub [u8; 32]);
 
 impl Serialize for Hash {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -19,10 +19,10 @@ impl<'de> Deserialize<'de> for Hash {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let s = <String as Deserialize>::deserialize(deserializer)?;
         let bytes = hex::decode(s).map_err(serde::de::Error::custom)?;
-        if bytes.len() != 64 {
-            return Err(serde::de::Error::custom("Hash must be 64 bytes"));
+        if bytes.len() != 32 {
+            return Err(serde::de::Error::custom("Hash must be 32 bytes"));
         }
-        let mut arr = [0u8; 64];
+        let mut arr = [0u8; 32];
         arr.copy_from_slice(&bytes);
         Ok(Hash(arr))
     }
@@ -30,10 +30,10 @@ impl<'de> Deserialize<'de> for Hash {
 
 impl Hash {
     pub fn zero() -> Self {
-        Hash([0u8; 64])
+        Hash([0u8; 32])
     }
 
-    pub fn as_bytes(&self) -> &[u8; 64] {
+    pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 
@@ -41,7 +41,7 @@ impl Hash {
         hex::encode(self.0)
     }
 
-    pub fn from_bytes(bytes: [u8; 64]) -> Self {
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
         Hash(bytes)
     }
 }
@@ -61,7 +61,7 @@ impl ObjectId {
 
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TransactionAction {
-    Transfer { recipient: ObjectId, amount: FleckAmount },
+    Transfer { recipient: ObjectId, amount: FlakeAmount },
     ValidatorBond,
     ValidatorUnbond,
 }
@@ -98,7 +98,7 @@ pub struct Transaction {
     pub tx_id: ObjectId,
     pub sender: ObjectId,
     pub action: TransactionAction,
-    pub fee: FleckAmount,
+    pub fee: FlakeAmount,
     pub signature: Vec<u8>,
     pub nonce: u64,
     pub data: Vec<u8>,
@@ -110,30 +110,62 @@ pub struct Block {
     pub transactions: Vec<Transaction>,
 }
 
-pub fn opl_to_fleck(opl: u64) -> FleckAmount {
-    opl.saturating_mul(crate::FLECKS_PER_OPL)
+pub fn opl_to_flake(opl: u64) -> FlakeAmount {
+    opl.saturating_mul(crate::FLAKES_PER_OPL)
 }
 
-pub fn fleck_to_opl(flecks: FleckAmount) -> u64 {
-    flecks / crate::FLECKS_PER_OPL
+pub fn flake_to_opl(flakes: FlakeAmount) -> u64 {
+    flakes / crate::FLAKES_PER_OPL
+}
+
+pub fn flakes_to_pennyweight(flakes: FlakeAmount) -> u64 {
+    flakes / (crate::FLAKES_PER_OPL / crate::PENNYWEIGHTS_PER_OPL)
+}
+
+pub fn flakes_to_grain(flakes: FlakeAmount) -> u64 {
+    flakes / (crate::FLAKES_PER_OPL / crate::GRAINS_PER_OPL)
+}
+
+pub fn format_flake_as_opl(flakes: u64) -> String {
+    let opl = flakes / crate::FLAKES_PER_OPL;
+    let frac = flakes % crate::FLAKES_PER_OPL;
+    format!("{}.{:06} OPL", opl, frac)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{FLAKES_PER_OPL, GRAINS_PER_OPL, PENNYWEIGHTS_PER_OPL};
 
     #[test]
     fn hash_zero_is_deterministic() {
         let h1 = Hash::zero();
         let h2 = Hash::zero();
         assert_eq!(h1, h2);
+        assert_eq!(h1.0.len(), 32);
     }
 
     #[test]
-    fn opl_fleck_roundtrip() {
-        assert_eq!(opl_to_fleck(1), 10_000_000);
-        assert_eq!(fleck_to_opl(opl_to_fleck(1)), 1);
-        assert_eq!(opl_to_fleck(0), 0);
+    fn opl_flake_roundtrip() {
+        assert_eq!(opl_to_flake(1), 1_000_000);
+        assert_eq!(flake_to_opl(opl_to_flake(1)), 1);
+        assert_eq!(opl_to_flake(0), 0);
+    }
+
+    #[test]
+    fn pennyweight_conversion() {
+        assert_eq!(PENNYWEIGHTS_PER_OPL, 100);
+        // 1 OPL = 100 pennyweight, so 1,000,000 flakes / 10,000 flakes per pennyweight = 100
+        assert_eq!(flakes_to_pennyweight(FLAKES_PER_OPL), 100);
+        assert_eq!(flakes_to_pennyweight(10_000), 1);
+    }
+
+    #[test]
+    fn grain_conversion() {
+        assert_eq!(GRAINS_PER_OPL, 10_000);
+        // 1 OPL = 10,000 grains, so 1,000,000 flakes / 100 flakes per grain = 10,000
+        assert_eq!(flakes_to_grain(FLAKES_PER_OPL), 10_000);
+        assert_eq!(flakes_to_grain(100), 1);
     }
 
     #[test]
@@ -149,18 +181,19 @@ mod tests {
     }
 
     #[test]
-    fn hash_hex_serialization() {
-        let h = Hash::zero();
-        let hex = h.to_hex();
-        assert_eq!(hex.len(), 128);
-        assert!(hex.chars().all(|c| c.is_ascii_hexdigit()));
-    }
-
-    #[test]
-    fn hash_serde_roundtrip() {
-        let h = Hash::from_bytes([42u8; 64]);
+    fn hash_hex_roundtrip() {
+        let h = Hash::from_bytes([42u8; 32]);
         let json = serde_json::to_string(&h).unwrap();
         let h2: Hash = serde_json::from_str(&json).unwrap();
         assert_eq!(h, h2);
+        assert_eq!(h.to_hex().len(), 64);
+    }
+
+    #[test]
+    fn format_flake_amounts() {
+        assert_eq!(format_flake_as_opl(1_000_000), "1.000000 OPL");
+        assert_eq!(format_flake_as_opl(0), "0.000000 OPL");
+        assert_eq!(format_flake_as_opl(1), "0.000001 OPL");
+        assert_eq!(format_flake_as_opl(440 * 1_000_000), "440.000000 OPL");
     }
 }

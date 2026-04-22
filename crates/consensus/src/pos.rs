@@ -1,10 +1,10 @@
-use opolys_core::{FleckAmount, ObjectId, ValidatorStatus, MIN_BOND_STAKE};
+use opolys_core::{FlakeAmount, ObjectId, ValidatorStatus, MIN_BOND_STAKE};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub struct ValidatorInfo {
     pub object_id: ObjectId,
-    pub stake: FleckAmount,
+    pub stake: FlakeAmount,
     pub bonded_at_height: u64,
     pub bonded_at_timestamp: u64,
     pub status: ValidatorStatus,
@@ -36,7 +36,7 @@ impl ValidatorSet {
     pub fn bond(
         &mut self,
         object_id: ObjectId,
-        stake: FleckAmount,
+        stake: FlakeAmount,
         height: u64,
         timestamp: u64,
     ) -> Result<(), String> {
@@ -80,7 +80,7 @@ impl ValidatorSet {
         Ok(())
     }
 
-    pub fn slash(&mut self, object_id: &ObjectId) -> Result<FleckAmount, String> {
+    pub fn slash(&mut self, object_id: &ObjectId) -> Result<FlakeAmount, String> {
         let validator = self.validators.get_mut(object_id)
             .ok_or_else(|| "Validator not found".to_string())?;
         let slashed_amount = validator.stake;
@@ -93,7 +93,7 @@ impl ValidatorSet {
         self.validators.get(object_id)
     }
 
-    pub fn total_bonded_stake(&self) -> FleckAmount {
+    pub fn total_bonded_stake(&self) -> FlakeAmount {
         self.validators.values()
             .filter(|v| v.status == ValidatorStatus::Active || v.status == ValidatorStatus::Bonding)
             .map(|v| v.stake)
@@ -106,7 +106,7 @@ impl ValidatorSet {
             .collect()
     }
 
-    pub fn total_weight(&self, current_timestamp: u64) -> FleckAmount {
+    pub fn total_weight(&self, current_timestamp: u64) -> FlakeAmount {
         self.validators.values()
             .filter(|v| v.status == ValidatorStatus::Active)
             .map(|v| crate::emission::compute_validator_weight(v.stake, v.age_years(current_timestamp)))
@@ -130,7 +130,7 @@ impl ValidatorSet {
             return None;
         }
 
-        let total_weight: FleckAmount = active.iter()
+        let total_weight: FlakeAmount = active.iter()
             .map(|v| crate::emission::compute_validator_weight(v.stake, v.age_years(current_timestamp)))
             .sum();
 

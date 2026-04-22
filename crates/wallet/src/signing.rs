@@ -1,4 +1,4 @@
-use opolys_core::{FleckAmount, ObjectId, Transaction, TransactionAction};
+use opolys_core::{FlakeAmount, ObjectId, Transaction, TransactionAction, FLAKES_PER_OPL};
 use crate::key::KeyPair;
 use opolys_crypto::hash_to_object_id;
 
@@ -8,8 +8,8 @@ impl TransactionSigner {
     pub fn create_transfer(
         sender: &KeyPair,
         recipient: ObjectId,
-        amount: FleckAmount,
-        fee: FleckAmount,
+        amount: FlakeAmount,
+        fee: FlakeAmount,
         nonce: u64,
     ) -> Transaction {
         let action = TransactionAction::Transfer { recipient, amount };
@@ -32,7 +32,7 @@ impl TransactionSigner {
 
     pub fn create_validator_bond(
         sender: &KeyPair,
-        fee: FleckAmount,
+        fee: FlakeAmount,
         nonce: u64,
     ) -> Transaction {
         let action = TransactionAction::ValidatorBond;
@@ -55,7 +55,7 @@ impl TransactionSigner {
 
     pub fn create_validator_unbond(
         sender: &KeyPair,
-        fee: FleckAmount,
+        fee: FlakeAmount,
         nonce: u64,
     ) -> Transaction {
         let action = TransactionAction::ValidatorUnbond;
@@ -79,7 +79,7 @@ impl TransactionSigner {
     fn compute_tx_id(
         sender: &ObjectId,
         action: &TransactionAction,
-        fee: FleckAmount,
+        fee: FlakeAmount,
         nonce: u64,
     ) -> ObjectId {
         let mut data = sender.0.to_hex().as_bytes().to_vec();
@@ -92,7 +92,7 @@ impl TransactionSigner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opolys_core::FLECKS_PER_OPL;
+    use opolys_core::FLAKES_PER_OPL;
 
     #[test]
     fn create_transfer_transaction() {
@@ -101,12 +101,12 @@ mod tests {
         let tx = TransactionSigner::create_transfer(
             &keypair,
             recipient,
-            FLECKS_PER_OPL,
-            FLECKS_PER_OPL / 10,
+            FLAKES_PER_OPL,
+            FLAKES_PER_OPL / 10,
             0,
         );
         assert_eq!(tx.nonce, 0);
-        assert_eq!(tx.fee, FLECKS_PER_OPL / 10);
+        assert_eq!(tx.fee, FLAKES_PER_OPL / 10);
         assert!(matches!(tx.action, TransactionAction::Transfer { .. }));
     }
 
@@ -115,7 +115,7 @@ mod tests {
         let keypair = KeyPair::generate();
         let tx = TransactionSigner::create_validator_bond(
             &keypair,
-            FLECKS_PER_OPL,
+            FLAKES_PER_OPL,
             0,
         );
         assert!(matches!(tx.action, TransactionAction::ValidatorBond));
@@ -126,7 +126,7 @@ mod tests {
         let keypair = KeyPair::generate();
         let tx = TransactionSigner::create_validator_unbond(
             &keypair,
-            FLECKS_PER_OPL / 100,
+            FLAKES_PER_OPL / 100,
             1,
         );
         assert!(matches!(tx.action, TransactionAction::ValidatorUnbond));
