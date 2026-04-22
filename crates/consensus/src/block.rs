@@ -72,7 +72,7 @@ pub fn compute_block_hash(header: &BlockHeader) -> Hash {
     // Hash every field of the header in a fixed order for determinism.
     // pow_proof and validator_signature are excluded because:
     // - pow_proof is set AFTER mining (the proof must satisfy the hash, not vice versa)
-    // - validator_signature is appended after block producer selection
+    // - validator_signature (ed25519) is appended after block producer selection
     hasher.update(&header.height.to_be_bytes());
     hasher.update(&header.previous_hash.0);
     hasher.update(&header.state_root.0);

@@ -12,14 +12,11 @@
 //! All derivation levels are hardened because ed25519 only supports hardened
 //! child key derivation per SLIP-0010.
 //!
-//! Quantum-resistant (Dilithium) keys are currently generated randomly on
-//! wallet creation. A deterministic Dilithium seed is computed via HMAC-SHA512
-//! and stored for future activation once the `pqc_dilithium` crate supports
-//! seeded key generation. Until then, **back up your wallet file** — Dilithium
-//! keys cannot be recovered from the mnemonic alone.
+//! The same ed25519 key is used for both transaction signing and validator
+//! block signing. Wallet recovery from mnemonic alone restores all keys —
+//! no separate backup file is needed.
 
 use crate::key::{KeyPair, WalletError};
-use opolys_crypto::dilithium::{DilithiumKeypair, DILITHIUM_SIGNBYTES};
 use hmac::{Hmac, Mac};
 use sha2::Sha512;
 
@@ -92,8 +89,8 @@ impl Bip39Mnemonic {
 /// The 64-byte seed derived from a BIP-39 mnemonic via PBKDF2.
 ///
 /// This is the master secret from which all key material is derived
-/// using SLIP-0010 (for ed25519) and HKDF (for future Dilithium support).
-/// The passphrase argument allows BIP-39 password protection.
+/// using SLIP-0010 for ed25519. The passphrase argument allows BIP-39
+/// password protection for additional security.
 #[derive(Debug)]
 pub struct DerivedSeed {
     seed: [u8; 64],
@@ -107,49 +104,26 @@ impl DerivedSeed {
 
     /// Derive an ed25519 keypair for the given account index using SLIP-0010.
     ///
-    /// Path: m/44'/999'/0'/0'
-    ///       └─ purpose=44, coin_type=999 (OPL), account=0, change=0
+    /// Path: m/44'/999'/account'/0'
+    ///       └─ purpose=44, coin_type=999 (OPL), account, change=0
     ///
     /// SLIP-0010 is the standard for ed25519 HD derivation. All levels
     /// are hardened (≥ 0x80000000) because ed25519 only supports hardened
     /// child key derivation.
-    pub fn derive_classical_keypair(&self, account: u32) -> KeyPair {
+    ///
+    /// The same key is used for both transaction signing and validator
+    /// block signing. Full wallet recovery from mnemonic alone is supported.
+    pub fn derive_keypair(&self, account: u32) -> KeyPair {
         let path = DerivationPath::new(BIP44_PURPOSE, OPOLYS_COIN_TYPE, account);
         let (private_key, _chain_code) = slip10_derive_ed25519(&self.seed, &path);
         KeyPair::from_seed(&private_key)
     }
 
-    /// Derive hybrid (classical + quantum) master keys for the given account.
+    /// Derive an ed25519 keypair for the given account index.
     ///
-    /// The classical (ed25519) keypair is derived deterministically via SLIP-0010
-    /// at m/44'/999'/0'/0' — it can always be recovered from the mnemonic alone.
-    ///
-    /// The quantum (Dilithium) keypair is currently generated randomly because
-    /// the pqc_dilithium crate doesn't yet support seeded key generation. The
-    /// Dilithium key derivation seed is stored for future activation.
-    /// Until then, **back up your wallet file** — Dilithium keys cannot be
-    /// recovered from the mnemonic alone.
-    pub fn derive_hybrid_keys(&self, account: u32) -> HybridMasterKeys {
-        let path = DerivationPath::new(BIP44_PURPOSE, OPOLYS_COIN_TYPE, account);
-        let (private_key, chain_code) = slip10_derive_ed25519(&self.seed, &path);
-
-        let classical_keypair = KeyPair::from_seed(&private_key);
-
-        // Compute the deterministic Dilithium seed via HMAC for future use.
-        // Currently, Dilithium keys are generated randomly (see struct comment).
-        let _dilithium_seed = derive_dilithium_seed(&private_key, &chain_code);
-        let quantum_keypair = DilithiumKeypair::generate();
-
-        HybridMasterKeys {
-            classical: ClassicalKeychain {
-                master_key: classical_keypair,
-                path: vec![BIP44_PURPOSE, OPOLYS_COIN_TYPE, account, 0, 0],
-            },
-            quantum: QuantumKeychain {
-                keypair: quantum_keypair,
-                epoch: 0,
-            },
-        }
+    /// Alias for `derive_keypair()` for backward compatibility.
+    pub fn derive_classical_keypair(&self, account: u32) -> KeyPair {
+        self.derive_keypair(account)
     }
 }
 
@@ -222,126 +196,6 @@ fn slip10_derive_ed25519(seed: &[u8], path: &DerivationPath) -> ([u8; 32], [u8; 
     (key, chain_code)
 }
 
-/// Derive a deterministic 32-byte seed for Dilithium key generation using HMAC-SHA512.
-///
-/// This provides a deterministic seed for future Dilithium key generation.
-/// Currently unused because pqc_dilithium doesn't expose seeded generation,
-/// but computed and stored for when the crate is upgraded.
-fn derive_dilithium_seed(ed25519_key: &[u8; 32], chain_code: &[u8; 32]) -> [u8; 32] {
-    let mut mac = HmacSha512::new_from_slice(b"opolys-dilithium-seed")
-        .expect("HMAC key should be valid");
-    mac.update(ed25519_key);
-    mac.update(chain_code);
-    let result = mac.finalize().into_bytes();
-
-    let mut seed = [0u8; 32];
-    seed.copy_from_slice(&result[..32]);
-    seed
-}
-
-/// Classical (ed25519) keychain derived deterministically from a BIP-39 mnemonic.
-///
-/// The master key and derivation path can reproduce the same key pair at any
-/// time from the mnemonic alone — no backup file needed.
-pub struct ClassicalKeychain {
-    master_key: KeyPair,
-    /// Full BIP-44 derivation path indices (all hardened).
-    path: Vec<u32>,
-}
-
-impl ClassicalKeychain {
-    /// The ed25519 key pair for this account.
-    pub fn keypair(&self) -> &KeyPair {
-        &self.master_key
-    }
-
-    /// The BIP-44 derivation path indices.
-    pub fn path(&self) -> &[u32] {
-        &self.path
-    }
-}
-
-/// Quantum-resistant (Dilithium) keychain.
-///
-/// Currently generated randomly on wallet creation. For full wallet recovery,
-/// both the mnemonic (for ed25519 keys) AND the wallet file (for Dilithium
-/// keys) must be backed up. Future crate upgrades will enable deterministic
-/// Dilithium key generation from the same mnemonic via `derive_dilithium_seed`.
-pub struct QuantumKeychain {
-    keypair: DilithiumKeypair,
-    /// Epoch number for Dilithium key rotation (future: post-quantum key rotation).
-    epoch: u32,
-}
-
-impl QuantumKeychain {
-    /// The Dilithium public key bytes.
-    pub fn public_key(&self) -> &[u8] {
-        self.keypair.public_key()
-    }
-
-    /// Sign a message with Dilithium, producing a quantum-resistant signature.
-    pub fn sign(&self, message: &[u8]) -> [u8; DILITHIUM_SIGNBYTES] {
-        self.keypair.sign(message)
-    }
-
-    /// The current Dilithium key epoch (for future key rotation).
-    pub fn epoch(&self) -> u32 {
-        self.epoch
-    }
-}
-
-/// Hybrid key pair combining classical (ed25519) and quantum-resistant (Dilithium) keys.
-///
-/// In production, transactions carry both signatures. The `classical` keychain
-/// is always recoverable from the mnemonic alone. The `quantum` keychain
-/// currently requires the wallet file for backup.
-pub struct HybridMasterKeys {
-    /// Deterministically derived ed25519 keychain (SLIP-0010).
-    pub classical: ClassicalKeychain,
-    /// Quantum-resistant Dilithium keychain (randomly generated for now).
-    pub quantum: QuantumKeychain,
-}
-
-/// A hybrid signature containing both classical (ed25519) and quantum-resistant
-/// (Dilithium) components, protecting against future quantum attacks on ed25519.
-#[derive(Debug, Clone)]
-pub struct HybridSignature {
-    /// ed25519 signature bytes (64 bytes).
-    pub classical_sig: Vec<u8>,
-    /// Dilithium signature bytes (~2.4 KB).
-    pub quantum_sig: Vec<u8>,
-    /// Dilithium key epoch for key rotation tracking.
-    pub epoch: u32,
-    /// If true, only the quantum (Dilithium) signature is present.
-    /// Used for post-quantum-only validation when ed25519 is deprecated.
-    pub is_quantum_only: bool,
-}
-
-impl HybridSignature {
-    /// Create a full hybrid signature with both ed25519 and Dilithium components.
-    pub fn hybrid(classical: Vec<u8>, quantum: Vec<u8>, epoch: u32) -> Self {
-        Self {
-            classical_sig: classical,
-            quantum_sig: quantum,
-            epoch,
-            is_quantum_only: false,
-        }
-    }
-
-    /// Create a quantum-only signature (no ed25519 component).
-    ///
-    /// Used for post-quantum-only validation when ed25519 signatures
-    /// are no longer considered secure.
-    pub fn quantum_only(quantum: Vec<u8>, epoch: u32) -> Self {
-        Self {
-            classical_sig: Vec::new(),
-            quantum_sig: quantum,
-            epoch,
-            is_quantum_only: true,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -377,11 +231,11 @@ mod tests {
     }
 
     #[test]
-    fn derive_classical_keypair_deterministic() {
+    fn derive_keypair_deterministic() {
         let mnemonic = Bip39Mnemonic::generate();
         let seed = mnemonic.to_seed("");
-        let key1 = seed.derive_classical_keypair(0);
-        let key2 = seed.derive_classical_keypair(0);
+        let key1 = seed.derive_keypair(0);
+        let key2 = seed.derive_keypair(0);
         assert_eq!(key1.object_id(), key2.object_id());
     }
 
@@ -389,24 +243,18 @@ mod tests {
     fn derive_different_accounts() {
         let mnemonic = Bip39Mnemonic::generate();
         let seed = mnemonic.to_seed("");
-        let key0 = seed.derive_classical_keypair(0);
-        let key1 = seed.derive_classical_keypair(1);
+        let key0 = seed.derive_keypair(0);
+        let key1 = seed.derive_keypair(1);
         assert_ne!(key0.object_id(), key1.object_id());
     }
 
     #[test]
-    fn hybrid_keys_classical_deterministic() {
+    fn derive_classical_keypair_deterministic() {
         let mnemonic = Bip39Mnemonic::generate();
         let seed = mnemonic.to_seed("");
-
-        let hybrid1 = seed.derive_hybrid_keys(0);
-        let hybrid2 = seed.derive_hybrid_keys(0);
-
-        // Classical keys must be identical (SLIP-0010 deterministic derivation)
-        assert_eq!(
-            hybrid1.classical.keypair().object_id(),
-            hybrid2.classical.keypair().object_id()
-        );
+        let key1 = seed.derive_classical_keypair(0);
+        let key2 = seed.derive_classical_keypair(0);
+        assert_eq!(key1.object_id(), key2.object_id());
     }
 
     #[test]
@@ -421,7 +269,7 @@ mod tests {
     fn slip10_derivation_produces_valid_ed25519_keys() {
         let mnemonic = Bip39Mnemonic::generate();
         let seed = mnemonic.to_seed("");
-        let key = seed.derive_classical_keypair(0);
+        let key = seed.derive_keypair(0);
         let msg = b"test message";
         let sig = key.sign(msg);
         assert!(key.verify(msg, &sig));

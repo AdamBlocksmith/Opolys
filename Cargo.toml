@@ -30,7 +30,7 @@ opolys-rpc = { path = "crates/rpc" }
 borsh = { version = "1.5", features = ["derive"] }
 blake3 = "1.8"
 ed25519-dalek = { version = "2.1", features = ["serde"] }
-pqc_dilithium = "0.2"
+
 rocksdb = "0.22"
 libp2p = { version = "0.54", features = [
     "tcp", "noise", "yamux", "gossipsub", "kad", "identify",
@@ -52,7 +52,6 @@ clap = { version = "4.5", features = ["derive"] }
 sha2 = "0.10"
 hmac = "0.12"
 bip39 = { version = "2.2", features = ["rand"] }
-hkdf = "0.12"
 axum = "0.8"
 tower-http = { version = "0.6", features = ["cors"] }
 tempfile = "3"

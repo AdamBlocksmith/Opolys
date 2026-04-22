@@ -86,12 +86,12 @@ The smallest on-chain unit is the **Flake** (1/1,000,000 OPL). All internal arit
 Opolys
 ├── crates/
 │   ├── core/        — Shared types, constants, error types
-│   ├── crypto/      — Blake3-256, ed25519, Dilithium
+│   ├── crypto/      — Blake3-256, ed25519
 │   ├── consensus/  — PoW, PoS, difficulty, emission, mempool, genesis
 │   ├── execution/   — Transaction dispatcher (Transfer, Bond, Unbond)
 │   ├── storage/     — RocksDB persistence layer
 │   ├── networking/  — libp2p gossip/sync/discovery (scaffold)
-│   ├── wallet/      — BIP-39, SLIP-0010, HybridKeypair, TxSigner
+│   ├── wallet/      — BIP-39, SLIP-0010, TxSigner
 │   ├── rpc/         — Axum JSON-RPC 2.0 server
 │   └── node/        — Miner, state machine, CLI entrypoint
 ```
@@ -112,8 +112,7 @@ core ← crypto ← consensus ← execution ← node → rpc
 | Layer | Algorithm | Purpose |
 |---|---|---|
 | **Hashing** | Blake3-256 (32 bytes) | Block hashes, transaction IDs, ObjectIds, state roots |
-| **Wallet Signing** | ed25519 (via ed25519-dalek) | Transaction authentication |
-| **Quantum Resistance** | Dilithium-5 (via pqc_dilithium) | Future-proof validator signatures |
+| **Signing** | ed25519 (via ed25519-dalek) | Transaction authentication and validator block signing |
 | **Key Derivation** | SLIP-0010 + HMAC-SHA512 | BIP-44 path m/44'/999'/0'/0' |
 | **Mnemonic** | BIP-39 (24-word, 256-bit entropy) | Wallet recovery |
 
@@ -121,12 +120,9 @@ core ← crypto ← consensus ← execution ← node → rpc
 
 Account addresses are **Blake3-256 hashes of ed25519 public keys** — not the public keys themselves. This provides a 32-byte uniform address space and an extra hash layer.
 
-### Dual Signature Model
+### Key Derivation
 
-Every transaction can carry two signatures:
-
-1. **Classical (ed25519)** — Deterministic from BIP-39 mnemonic via SLIP-0010. Always recoverable from the mnemonic alone.
-2. **Quantum (Dilithium-5)** — Currently generated randomly because `pqc_dilithium` doesn't expose seeded key generation. The deterministic seed is computed via HMAC and stored for future activation. **Back up your wallet file** — Dilithium keys cannot be recovered from the mnemonic alone yet.
+A single ed25519 keypair — derived deterministically from the BIP-39 mnemonic via SLIP-0010 — handles both transaction signing and validator block signing. Full wallet recovery is possible from the mnemonic alone; no separate backup file is needed.
 
 ---
 
@@ -180,7 +176,7 @@ Block {
         timestamp: u64,               // UNIX epoch seconds
         difficulty: u64,               // Effective difficulty for this block
         pow_proof: Option<Vec<u8>>,   // Autolykos nonce (None for genesis/PoS)
-        validator_signature: Option<Vec<u8>>, // Dilithium or ed25519 sig
+        validator_signature: Option<Vec<u8>>, // ed25519 signature
     },
     transactions: Vec<Transaction>,
 }
@@ -208,7 +204,7 @@ Block hashes are computed as `Blake3-256(header_bytes)` where `header_bytes` is 
 
 ### Transaction Lifecycle
 
-1. **Create**: Wallet signs transaction with ed25519 (and optionally Dilithium)
+1. **Create**: Wallet signs transaction with ed25519
 2. **Submit**: Transaction enters the mempool via RPC
 3. **Order**: Mempool sorts by fee priority (market-driven, no minimum)
 4. **Include**: Miner/validator selects transactions into a block
@@ -276,8 +272,7 @@ m / 44' / 999' / account' / 0'
 
 | Key Type | Recoverable from Mnemonic? | Backup Required |
 |---|---|---|
-| ed25519 (classical) | **Yes** — deterministic SLIP-0010 derivation | Mnemonic phrase only |
-| Dilithium (quantum) | **Not yet** — seed is computed but `pqc_dilithium` lacks seeded generation | **Wallet file required** |
+| ed25519 | **Yes** — deterministic SLIP-0010 derivation | Mnemonic phrase only |
 
 ### Mnemonic Format
 
@@ -391,12 +386,12 @@ Each crate has a clear responsibility:
 | Crate | Purpose | Key Types |
 |---|---|---|
 | `opolys-core` | Shared types, constants, errors | `Hash`, `ObjectId`, `Transaction`, `Block`, `FlakeAmount` |
-| `opolys-crypto` | Cryptographic primitives | `Blake3Hasher`, `verify_ed25519`, `DilithiumKeypair` |
+| `opolys-crypto` | Cryptographic primitives | `Blake3Hasher`, `verify_ed25519` |
 | `opolys-consensus` | Consensus engine | `AccountStore`, `ValidatorSet`, `Mempool`, difficulty, emission, genesis |
 | `opolys-execution` | Transaction dispatch | `TransactionDispatcher`, `ApplyResult` |
 | `opolys-storage` | RocksDB persistence | `BlockchainStore`, `PersistedChainState` |
 | `opolys-networking` | P2P networking | `GossipConfig`, `SyncConfig`, `DiscoveryConfig` |
-| `opolys-wallet` | Key management | `KeyPair`, `Bip39Mnemonic`, `TransactionSigner`, `HybridMasterKeys` |
+| `opolys-wallet` | Key management | `KeyPair`, `Bip39Mnemonic`, `TransactionSigner` |
 | `opolys-rpc` | JSON-RPC server | `RpcState`, `ChainInfo`, `handle_jsonrpc` |
 | `opolys-node` | Node orchestration | `OpolysNode`, `ChainState`, `NodeConfig`, mining loop |
 

@@ -15,7 +15,7 @@
 //! Validators earn from block rewards only. Only double-signing gets slashed. There
 //! is no governance, no schedules, and no fixed percentages.
 //!
-//! Hashing: Blake3-256. Signatures: ed25519 + Dilithium (quantum-resistant).
+//! Hashing: Blake3-256. Signatures: ed25519.
 //! Key derivation: BIP-39 24-word mnemonics, SLIP-0010 ed25519.
 
 use opolys_core::*;

@@ -187,7 +187,7 @@ pub struct BlockHeader {
     pub difficulty: u64,
     /// The nonce/solution that satisfies the difficulty target (present in PoW phases).
     pub pow_proof: Option<Vec<u8>>,
-    /// The validator's signature over the header (present in PoS phases).
+    /// The validator's ed25519 signature over the header (present in PoS phases).
     pub validator_signature: Option<Vec<u8>>,
 }
 
