@@ -1,20 +1,58 @@
+//! Core type definitions for the Opolys ($OPL) blockchain.
+//!
+//! This module defines the fundamental data types used throughout the Opolys ecosystem:
+//! - **Primitives**: Amounts, block heights, public keys, and signatures
+//! - **Hash**: A Blake3-256 hash wrapper with serialization support
+//! - **ObjectId**: A typed identifier for accounts and entities on-chain
+//! - **TransactionAction**: The payload enum describing what a transaction does
+//! - **ConsensusPhase & ValidatorStatus**: Consensus and staking state machines
+//! - **BlockHeader, Transaction, Block**: The wire-format ledger structures
+//! - **Currency conversion helpers**: Functions to convert between OPL sub-units
+//!
+//! All hashes in Opolys are 32 bytes (Blake3-256). Amounts are represented as
+//! `FlakeAmount` (u64) in the smallest unit (Flake), with 6 decimal places per OPL.
+
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+/// Smallest indivisible unit of currency (1 OPL = 1,000,000 Flakes).
+///
+/// All on-chain amounts are stored and computed in Flakes to avoid floating-point error.
+/// 1 Flake = 0.000001 OPL.
 pub type FlakeAmount = u64;
+
+/// Block height — the 0-indexed sequence number of a block in the chain.
+///
+/// Genesis block has height 0. Each subsequent block increments by 1.
 pub type BlockHeight = u64;
+
+/// Public key bytes for a validator or account.
+///
+/// In Opolys this is a raw byte vector whose interpretation depends on the
+/// cryptographic scheme in use (e.g., Ed25519).
 pub type PublicKey = Vec<u8>;
+
+/// Cryptographic signature bytes.
+///
+/// Produced by signing a transaction hash with the sender's private key.
 pub type Signature = Vec<u8>;
 
+/// A Blake3-256 hash (32 bytes) used throughout Opolys for block hashes,
+/// transaction IDs, Merkle roots, and state roots.
+///
+/// Wraps a fixed-size byte array rather than a `Vec<u8>` to enforce the 32-byte
+/// invariant at the type level.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, BorshSerialize, BorshDeserialize)]
 pub struct Hash(pub [u8; 32]);
 
+// Serde: serialize as lowercase hex string for human readability (JSON, REST, etc.)
 impl Serialize for Hash {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&hex::encode(self.0))
     }
 }
 
+// Serde: deserialize from hex string, rejecting anything that isn't exactly 32 bytes.
 impl<'de> Deserialize<'de> for Hash {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let s = <String as Deserialize>::deserialize(deserializer)?;
@@ -29,103 +67,221 @@ impl<'de> Deserialize<'de> for Hash {
 }
 
 impl Hash {
+    /// Returns the all-zero hash, used as a sentinel value (e.g., genesis previous_hash).
     pub fn zero() -> Self {
         Hash([0u8; 32])
     }
 
+    /// Returns a reference to the inner 32-byte array.
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 
+    /// Returns the hash as a 64-character lowercase hex string.
     pub fn to_hex(&self) -> String {
         hex::encode(self.0)
     }
 
+    /// Constructs a `Hash` from a raw 32-byte array.
     pub fn from_bytes(bytes: [u8; 32]) -> Self {
         Hash(bytes)
     }
 }
 
+/// A unique on-chain identifier for an account, transaction, or other entity.
+///
+/// Wraps a [`Hash`] to provide type safety — an `ObjectId` is conceptually distinct
+/// from a raw content hash even though they share the same 32-byte representation.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, BorshSerialize, BorshDeserialize, Serialize, Deserialize)]
 pub struct ObjectId(pub Hash);
 
 impl ObjectId {
+    /// Returns the all-zero ObjectId, used as a sentinel (e.g., coinbase sender).
     pub fn zero() -> Self {
         ObjectId(Hash::zero())
     }
 
+    /// Returns the ObjectId as a 64-character lowercase hex string.
     pub fn to_hex(&self) -> String {
         self.0.to_hex()
     }
 }
 
+/// The action payload of a transaction.
+///
+/// Each variant carries all data needed to execute it:
+/// - **Transfer**: move OPL from sender to recipient; the fee is burned
+/// - **ValidatorBond**: lock `amount` OPL as stake to become a validator
+/// - **ValidatorUnbond**: withdraw all staked OPL (instant, no lockup period)
+///
+/// Opolys has no token contracts, assets, or governance — these three actions
+/// are the only state transitions a transaction can perform.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TransactionAction {
+    /// Transfer `amount` Flakes from the sender to `recipient`.
+    /// The attached `fee` (set on the Transaction itself) is burned, not collected.
     Transfer { recipient: ObjectId, amount: FlakeAmount },
-    ValidatorBond,
+
+    /// Bond `amount` Flakes as validator stake. The sender's account must not
+    /// already be bonded. Meeting `MIN_BOND_STAKE` is required.
+    ValidatorBond { amount: FlakeAmount },
+
+    /// Unbond all staked Flakes. The validator is immediately removed from the
+    /// active set — there is no unbonding delay.
     ValidatorUnbond,
 }
 
+/// The current consensus phase for a given block height.
+///
+/// Opolys uses a hybrid PoW/PoS model:
+/// - **ProofOfWork**: miners compete to find a valid nonce (difficult block heights)
+/// - **ProofOfStake**: validators take turns producing blocks (easier block heights)
+///
+/// The phase is deterministic based on block height and difficulty.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ConsensusPhase {
+    /// Miners produce this block by finding a hash below the difficulty target.
     ProofOfWork,
+    /// A selected validator produces this block by signing it.
     ProofOfStake,
 }
 
+/// The bonding status of a validator account.
+///
+/// Transitions:
+/// - `None` → `Bonding` (on `ValidatorBond` tx)
+/// - `Bonding` → `Active` (once the validator is included in the active set)
+/// - `Active` → `Unbonding` (on `ValidatorUnbond` tx, instant removal)
+/// - Any → `Slashed` (if the validator signs conflicting blocks)
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ValidatorStatus {
+    /// The account is not a validator.
     None,
+    /// The validator has bonded stake but is not yet in the active set.
     Bonding,
+    /// The validator is actively producing and attesting blocks.
     Active,
+    /// The validator has unbonded and stake is being returned.
     Unbonding,
+    /// The validator was caught signing conflicting blocks; stake is forfeited.
     Slashed,
 }
 
+/// Header metadata for a block — everything that is hashed to produce the block hash.
+///
+/// The header is separated from transaction data so that validators can verify
+/// proof-of-work and state roots without downloading the full block body.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize, Serialize, Deserialize)]
 pub struct BlockHeader {
+    /// The sequential height of this block (0 for genesis).
     pub height: BlockHeight,
+    /// The hash of the previous block's header. `Hash::zero()` for genesis.
     pub previous_hash: Hash,
+    /// Merkle root of the post-execution application state (accounts, stakes, etc.).
     pub state_root: Hash,
+    /// Merkle root of all transactions in this block's body.
     pub transaction_root: Hash,
+    /// Unix timestamp (seconds since epoch) when the block was produced.
     pub timestamp: u64,
+    /// The difficulty target for this block — lower values mean harder PoW.
     pub difficulty: u64,
+    /// The nonce/solution that satisfies the difficulty target (present in PoW phases).
     pub pow_proof: Option<Vec<u8>>,
+    /// The validator's signature over the header (present in PoS phases).
     pub validator_signature: Option<Vec<u8>>,
 }
 
+/// A signed transaction that transitions the ledger state.
+///
+/// Every transaction carries a fee (in Flakes) that is **burned**, not collected.
+/// This implements Opolys' market-driven fee model — users set whatever fee they
+/// choose, and the fee permanently removes OPL from circulation.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize, Serialize, Deserialize)]
 pub struct Transaction {
+    /// Unique identifier for this transaction (hash of its content).
     pub tx_id: ObjectId,
+    /// The account sending this transaction (pays the fee, signs the tx).
     pub sender: ObjectId,
+    /// The action this transaction performs (transfer, bond, or unbond).
     pub action: TransactionAction,
+    /// Fee in Flakes — burned permanently, incentivizing miners/validators to include this tx.
     pub fee: FlakeAmount,
+    /// Cryptographic signature over the transaction body by the sender.
     pub signature: Vec<u8>,
+    /// Sender's nonce for replay protection — must equal the account's current nonce + 1.
     pub nonce: u64,
+    /// Arbitrary data attachment (e.g., memos). Not interpreted by consensus.
     pub data: Vec<u8>,
 }
 
+/// A complete block: header + ordered list of transactions.
+///
+/// Blocks are the atomic unit of the chain. The first transaction in a block
+/// is always a coinbase (reward) transaction crediting the block producer
+/// with `BASE_REWARD` Flakes plus any burned fees.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize, Serialize, Deserialize)]
 pub struct Block {
+    /// The header containing consensus-critical metadata.
     pub header: BlockHeader,
+    /// The ordered list of transactions in this block.
     pub transactions: Vec<Transaction>,
 }
 
+/// Converts whole OPL to Flakes (the smallest on-chain unit).
+///
+/// Uses saturating multiplication — if the result overflows u64, it returns `u64::MAX`
+/// rather than panicking.
+///
+/// # Examples
+///
+/// ```
+/// use opolys_core::opl_to_flake;
+/// assert_eq!(opl_to_flake(1), 1_000_000);
+/// assert_eq!(opl_to_flake(440), 440_000_000);
+/// ```
 pub fn opl_to_flake(opl: u64) -> FlakeAmount {
     opl.saturating_mul(crate::FLAKES_PER_OPL)
 }
 
+/// Converts Flakes to whole OPL, truncating the fractional part.
+///
+/// This is a lossy conversion — remainder Flakes are discarded.
+///
+/// # Examples
+///
+/// ```
+/// use opolys_core::flake_to_opl;
+/// assert_eq!(flake_to_opl(1_000_000), 1);
+/// assert_eq!(flake_to_opl(1_499_999), 1);
+/// ```
 pub fn flake_to_opl(flakes: FlakeAmount) -> u64 {
     flakes / crate::FLAKES_PER_OPL
 }
 
+/// Converts Flakes to Pennyweights (dwt), the second-smallest display unit.
+///
+/// 1 Pennyweight = 10,000 Flakes = 0.01 OPL.
 pub fn flakes_to_pennyweight(flakes: FlakeAmount) -> u64 {
     flakes / (crate::FLAKES_PER_OPL / crate::PENNYWEIGHTS_PER_OPL)
 }
 
+/// Converts Flakes to Grains (gr), the third-smallest display unit.
+///
+/// 1 Grain = 100 Flakes = 0.0001 OPL.
 pub fn flakes_to_grain(flakes: FlakeAmount) -> u64 {
     flakes / (crate::FLAKES_PER_OPL / crate::GRAINS_PER_OPL)
 }
 
+/// Formats a Flake amount as a human-readable string with 6 decimal places.
+///
+/// # Examples
+///
+/// ```
+/// use opolys_core::format_flake_as_opl;
+/// assert_eq!(format_flake_as_opl(1_000_000), "1.000000 OPL");
+/// assert_eq!(format_flake_as_opl(1), "0.000001 OPL");
+/// assert_eq!(format_flake_as_opl(440 * 1_000_000), "440.000000 OPL");
+/// ```
 pub fn format_flake_as_opl(flakes: u64) -> String {
     let opl = flakes / crate::FLAKES_PER_OPL;
     let frac = flakes % crate::FLAKES_PER_OPL;
@@ -174,9 +330,9 @@ mod tests {
             recipient: ObjectId::zero(),
             amount: 100,
         };
-        let bond = TransactionAction::ValidatorBond;
-        let unbond = TransactionAction::ValidatorUnbond;
-        assert_ne!(transfer, TransactionAction::ValidatorBond);
+        let bond = TransactionAction::ValidatorBond { amount: 10_000_000 };
+        let _unbond = TransactionAction::ValidatorUnbond;
+        assert_ne!(transfer, TransactionAction::ValidatorBond { amount: 0 });
         assert_ne!(bond, TransactionAction::ValidatorUnbond);
     }
 

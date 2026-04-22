@@ -11,6 +11,7 @@ opolys-consensus.workspace = true
 opolys-storage.workspace = true
 opolys-execution.workspace = true
 opolys-networking.workspace = true
+opolys-rpc.workspace = true
 borsh.workspace = true
 tokio.workspace = true
 clap.workspace = true
@@ -23,6 +24,5 @@ anyhow.workspace = true
 hex.workspace = true
 rand.workspace = true
 
-[[bin]]
-name = "opolys"
-path = "src/main.rs"
+[dev-dependencies]
+tempfile.workspace = true

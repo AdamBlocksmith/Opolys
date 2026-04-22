@@ -1,13 +1,33 @@
-use opolys_core::{FlakeAmount, ObjectId, OpolysError, Hash};
+//! # Account management for the Opolys ledger.
+//!
+//! Every participant in the Opolys network is represented by an [`Account`]
+//! identified by its Blake3 `ObjectId`. Accounts carry a balance (denominated
+//! in flakes, the smallest unit of $OPL) and a monotonically-increasing nonce
+//! for replay protection.
+//!
+//! The [`AccountStore`] provides in-memory CRUD operations including credits,
+//! debits, and atomic transfers. Transfer fees are **burned** — they leave the
+//! circulating supply entirely, aligning with Opolys' market-driven fee model.
 
-#[derive(Debug, Clone)]
+use opolys_core::{FlakeAmount, ObjectId, OpolysError};
+use borsh::{BorshSerialize, BorshDeserialize};
+
+/// A single account in the Opolys ledger.
+///
+/// Every account has a balance (in flakes), a nonce (for replay protection),
+/// and is identified by its ObjectId (Blake3 hash of the public key).
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct Account {
+    /// Blake3-based unique identifier derived from the account's public key.
     pub object_id: ObjectId,
+    /// Balance in flakes (1 OPL = 1,000,000 flakes).
     pub balance: FlakeAmount,
+    /// Monotonically-increasing nonce used to prevent transaction replay.
     pub nonce: u64,
 }
 
 impl Account {
+    /// Create a new account with zero balance and zero nonce.
     pub fn new(object_id: ObjectId) -> Self {
         Account {
             object_id,
@@ -16,23 +36,45 @@ impl Account {
         }
     }
 
+    /// Returns `true` if the account holds at least `amount` flakes.
     pub fn can_spend(&self, amount: FlakeAmount) -> bool {
         self.balance >= amount
     }
 }
 
-#[derive(Debug)]
+/// In-memory store for all Opolys accounts, backed by a `HashMap`.
+///
+/// Supports persistence via [`all_accounts`] and [`load_from_accounts`], and
+/// provides atomic transfer semantics where the sender's balance and nonce
+/// are updated in a single logical operation.
+#[derive(Debug, Clone)]
 pub struct AccountStore {
     accounts: std::collections::HashMap<ObjectId, Account>,
 }
 
 impl AccountStore {
+    /// Create an empty account store.
     pub fn new() -> Self {
         AccountStore {
             accounts: std::collections::HashMap::new(),
         }
     }
 
+    /// Return all accounts as a serializable Vec. Used for persistence.
+    pub fn all_accounts(&self) -> Vec<Account> {
+        self.accounts.values().cloned().collect()
+    }
+
+    /// Load accounts from a serialized Vec. Used for state restoration.
+    pub fn load_from_accounts(accounts: Vec<Account>) -> Self {
+        let mut store = AccountStore::new();
+        for account in accounts {
+            store.accounts.insert(account.object_id.clone(), account);
+        }
+        store
+    }
+
+    /// Register a brand-new account. Fails if the ObjectId already exists.
     pub fn create_account(&mut self, object_id: ObjectId) -> Result<&Account, OpolysError> {
         if self.accounts.contains_key(&object_id) {
             return Err(OpolysError::AccountNotFound(format!("Account already exists: {}", object_id.to_hex())));
@@ -41,14 +83,18 @@ impl AccountStore {
         Ok(self.accounts.get(&object_id).unwrap())
     }
 
+    /// Look up an account by its ObjectId. Returns `None` if not found.
     pub fn get_account(&self, object_id: &ObjectId) -> Option<&Account> {
         self.accounts.get(object_id)
     }
 
+    /// Look up an account by ObjectId with mutable access. Returns `None` if not found.
     pub fn get_account_mut(&mut self, object_id: &ObjectId) -> Option<&mut Account> {
         self.accounts.get_mut(object_id)
     }
 
+    /// Add `amount` flakes to the account's balance. Uses saturating arithmetic
+    /// to prevent overflow.
     pub fn credit(&mut self, object_id: &ObjectId, amount: FlakeAmount) -> Result<(), OpolysError> {
         let account = self.accounts.get_mut(object_id)
             .ok_or_else(|| OpolysError::AccountNotFound(object_id.to_hex()))?;
@@ -56,6 +102,8 @@ impl AccountStore {
         Ok(())
     }
 
+    /// Subtract `amount` flakes from the account's balance. Fails if the
+    /// account doesn't exist or holds insufficient funds.
     pub fn debit(&mut self, object_id: &ObjectId, amount: FlakeAmount) -> Result<(), OpolysError> {
         let account = self.accounts.get_mut(object_id)
             .ok_or_else(|| OpolysError::AccountNotFound(object_id.to_hex()))?;
@@ -69,6 +117,14 @@ impl AccountStore {
         Ok(())
     }
 
+    /// Atomically transfer `amount` flakes from one account to another,
+    /// burning `fee` flakes from the sender (not delivered to the recipient).
+    ///
+    /// The sender must hold `amount + fee` flakes. On success the sender's
+    /// nonce increments by one and a [`TransferResult`] is returned.
+    ///
+    /// If the recipient does not yet exist, it is auto-created with zero
+    /// balance — consistent with Opolys' permissionless account model.
     pub fn transfer(
         &mut self,
         from: &ObjectId,
@@ -76,6 +132,7 @@ impl AccountStore {
         amount: FlakeAmount,
         fee: FlakeAmount,
     ) -> Result<TransferResult, OpolysError> {
+        // The sender must cover both the transfer amount and the burned fee.
         let total_needed = amount.saturating_add(fee);
         let from_account = self.accounts.get(from)
             .ok_or_else(|| OpolysError::AccountNotFound(from.to_hex()))?;
@@ -89,14 +146,18 @@ impl AccountStore {
 
         let from_nonce = from_account.nonce;
 
+        // Auto-create the recipient account if it doesn't exist yet.
         let to_exists = self.accounts.contains_key(to);
         if !to_exists {
             self.accounts.insert(to.clone(), Account::new(to.clone()));
         }
 
+        // Debit the sender (amount + fee) and increment nonce for replay protection.
         let from_balance_before = self.accounts.get(from).unwrap().balance;
         self.accounts.get_mut(from).unwrap().balance = from_balance_before.saturating_sub(total_needed);
         self.accounts.get_mut(from).unwrap().nonce += 1;
+
+        // Credit only the transfer amount to the recipient; the fee is burned.
         self.accounts.get_mut(to).unwrap().balance = self.accounts.get(to).unwrap().balance.saturating_add(amount);
 
         Ok(TransferResult {
@@ -106,15 +167,23 @@ impl AccountStore {
         })
     }
 
+    /// Returns the total number of accounts in the store.
     pub fn account_count(&self) -> usize {
         self.accounts.len()
     }
 }
 
+/// Result of a successful transfer between two accounts.
+///
+/// The `fee_burned` field records how many flakes were permanently removed
+/// from circulation, enforcing Opolys' market-driven fee-burn model.
 #[derive(Debug, Clone)]
 pub struct TransferResult {
+    /// Amount of flakes transferred to the recipient.
     pub amount: FlakeAmount,
+    /// Fees burned (removed from circulating supply entirely).
     pub fee_burned: FlakeAmount,
+    /// The sender's new nonce after this transaction.
     pub new_nonce: u64,
 }
 
