@@ -1,0 +1,13 @@
+[package]
+name = "opolys-execution"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+opolys-core.workspace = true
+opolys-consensus.workspace = true
+opolys-crypto.workspace = true
+borsh.workspace = true
+serde.workspace = true
+thiserror.workspace = true

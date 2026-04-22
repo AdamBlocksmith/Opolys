@@ -1,0 +1,54 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/crypto",
+    "crates/consensus",
+    "crates/storage",
+    "crates/execution",
+    "crates/networking",
+    "crates/node",
+    "crates/wallet",
+    "crates/rpc",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+opolys-core = { path = "crates/core" }
+opolys-crypto = { path = "crates/crypto" }
+opolys-consensus = { path = "crates/consensus" }
+opolys-storage = { path = "crates/storage" }
+opolys-execution = { path = "crates/execution" }
+opolys-networking = { path = "crates/networking" }
+opolys-node = { path = "crates/node" }
+opolys-wallet = { path = "crates/wallet" }
+opolys-rpc = { path = "crates/rpc" }
+borsh = { version = "1.5", features = ["derive"] }
+blake3 = "1.8"
+ed25519-dalek = { version = "2.1", features = ["serde"] }
+pqc_dilithium = "0.2"
+rocksdb = "0.22"
+libp2p = { version = "0.54", features = [
+    "tcp", "noise", "yamux", "gossipsub", "kad", "identify",
+    "ping", "dns", "macros", "serde", "quic", "rsa", "ecdsa", "ed25519",
+    "secp256k1", "tokio", "request-response", "relay"
+] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+hex = "0.4"
+rand = "0.9"
+futures = "0.3"
+async-trait = "0.1"
+clap = { version = "4.5", features = ["derive"] }
+sha2 = "0.10"
+hmac = "0.12"
+pbkdf2 = "0.12"

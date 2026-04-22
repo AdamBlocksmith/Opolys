@@ -1,0 +1,15 @@
+[package]
+name = "opolys-crypto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+opolys-core.workspace = true
+borsh.workspace = true
+blake3.workspace = true
+ed25519-dalek.workspace = true
+pqc_dilithium.workspace = true
+rand.workspace = true
+hex.workspace = true
+thiserror.workspace = true

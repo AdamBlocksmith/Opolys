@@ -1,0 +1,28 @@
+[package]
+name = "opolys-node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+opolys-core.workspace = true
+opolys-crypto.workspace = true
+opolys-consensus.workspace = true
+opolys-storage.workspace = true
+opolys-execution.workspace = true
+opolys-networking.workspace = true
+borsh.workspace = true
+tokio.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+hex.workspace = true
+rand.workspace = true
+
+[[bin]]
+name = "opolys"
+path = "src/main.rs"

@@ -1,0 +1,22 @@
+[package]
+name = "opolys-wallet"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+opolys-core.workspace = true
+opolys-crypto.workspace = true
+opolys-consensus.workspace = true
+borsh.workspace = true
+ed25519-dalek.workspace = true
+pqc_dilithium.workspace = true
+sha2.workspace = true
+hmac.workspace = true
+pbkdf2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+hex.workspace = true
+rand.workspace = true
+thiserror.workspace = true
+clap.workspace = true
