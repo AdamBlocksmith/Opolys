@@ -1,10 +1,11 @@
 //! Opolys node entry point.
 //!
-//! Starts the full node, which comprises two concurrent tasks:
+//! Starts the full node with two optional subsystems:
 //!
-//! 1. **RPC server** — serves JSON-RPC 2.0 queries on `rpc_port`
-//! 2. **Mining loop** — continuously attempts to mine new blocks using
-//!    Autolykos PoW and applies them to chain state
+//! 1. **RPC server** (on by default) — serves JSON-RPC 2.0 queries on `rpc_port`.
+//!    Disable with `--no-rpc`.
+//! 2. **Mining loop** (off by default) — continuously attempts to mine new blocks
+//!    using Autolykos PoW and applies them to chain state. Enable with `--mine`.
 //!
 //! On startup, the node either loads persisted state from RocksDB (resuming
 //! from the last known block) or initializes from genesis (if no state exists).
@@ -35,7 +36,7 @@ fn chain_state_to_info(chain: &ChainState) -> ChainInfo {
 
 #[tokio::main]
 async fn main() {
-    // Parse CLI arguments (port, data directory, log level, etc.)
+    // Parse CLI arguments (port, data directory, log level, --mine, --no-rpc, etc.)
     let args = Args::parse();
 
     // Initialize structured logging with the configured level
@@ -53,9 +54,18 @@ async fn main() {
         data_dir: args.data_dir.unwrap_or_else(|| "./data".to_string()),
         bootstrap_peers: args.bootstrap.map(|s| vec![s]).unwrap_or_default(),
         log_level: args.log_level,
+        mine: args.mine,
+        no_rpc: args.no_rpc,
     };
 
-    tracing::info!(port = config.listen_port, rpc_port = config.rpc_port, data_dir = %config.data_dir, "Starting Opolys node");
+    tracing::info!(
+        port = config.listen_port,
+        rpc_port = config.rpc_port,
+        data_dir = %config.data_dir,
+        mining = config.mine,
+        rpc = !config.no_rpc,
+        "Starting Opolys node"
+    );
 
     // Initialize the node — loads persisted state from disk or starts from genesis
     let node = OpolysNode::new(config.clone());
@@ -73,62 +83,90 @@ async fn main() {
         );
     }
 
-    // Build the RPC ChainInfo snapshot from the current chain state
-    let chain_info = {
-        let chain = node.chain.read().await;
-        chain_state_to_info(&chain)
-    };
-    let rpc_state = RpcState::new(
-        std::sync::Arc::new(tokio::sync::RwLock::new(chain_info)),
-        node.accounts.clone(),
-        node.validators.clone(),
-    );
+    if !config.mine {
+        tracing::info!("Mining: disabled (run with --mine to enable block production)");
+    }
+    if config.no_rpc {
+        tracing::info!("RPC: disabled (run without --no-rpc to enable)");
+    }
 
-    // Start the JSON-RPC server on the configured port
-    let rpc_port = config.rpc_port;
-    let rpc_handle = tokio::spawn(async move {
-        if let Err(e) = opolys_rpc::start_server(rpc_state, rpc_port).await {
-            tracing::error!("RPC server error: {}", e);
-        }
-    });
+    // Optionally start the JSON-RPC server
+    let mut rpc_handle: Option<tokio::task::JoinHandle<()>> = None;
+    if !config.no_rpc {
+        // Build the RPC ChainInfo snapshot from the current chain state
+        let chain_info = {
+            let chain = node.chain.read().await;
+            chain_state_to_info(&chain)
+        };
+        let rpc_state = RpcState::new(
+            std::sync::Arc::new(tokio::sync::RwLock::new(chain_info)),
+            node.accounts.clone(),
+            node.validators.clone(),
+        );
 
-    // Mine blocks in a tight loop — each successful mine applies the block,
-    // burns transaction fees, emits the block reward, and adjusts difficulty
-    let mining_handle = tokio::spawn(async move {
-        loop {
-            match node.mine_block(10_000_000).await {
-                Some(block) => {
-                    let height = block.header.height;
-                    let tx_count = block.transactions.len();
-                    let difficulty = block.header.difficulty;
+        let rpc_port = config.rpc_port;
+        rpc_handle = Some(tokio::spawn(async move {
+            if let Err(e) = opolys_rpc::start_server(rpc_state, rpc_port).await {
+                tracing::error!("RPC server error: {}", e);
+            }
+        }));
+        tracing::info!(port = config.rpc_port, "RPC server starting");
+    }
 
-                    match node.apply_block(&block).await {
-                        Ok(hash) => {
-                            tracing::info!(
-                                height,
-                                difficulty,
-                                tx_count,
-                                hash = %hash.to_hex(),
-                                "Block mined and applied"
-                            );
-                        }
-                        Err(e) => {
-                            tracing::error!(height, error = %e, "Failed to apply mined block");
+    // Optionally start the mining loop
+    let mut mining_handle: Option<tokio::task::JoinHandle<()>> = None;
+    if config.mine {
+        mining_handle = Some(tokio::spawn(async move {
+            loop {
+                match node.mine_block(10_000_000).await {
+                    Some(block) => {
+                        let height = block.header.height;
+                        let tx_count = block.transactions.len();
+                        let difficulty = block.header.difficulty;
+
+                        match node.apply_block(&block).await {
+                            Ok(hash) => {
+                                tracing::info!(
+                                    height,
+                                    difficulty,
+                                    tx_count,
+                                    hash = %hash.to_hex(),
+                                    "Block mined and applied"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::error!(height, error = %e, "Failed to apply mined block");
+                            }
                         }
                     }
-                }
-                None => {
-                    // No block found within the attempt limit — continue trying
+                    None => {
+                        // No block found within the attempt limit — continue trying
+                    }
                 }
             }
+        }));
+        tracing::info!("Mining loop active");
+    }
+
+    // Wait for whichever tasks are running
+    // Both the RPC server and mining loop run indefinitely — if both are
+    // active, we wait for either to finish. If neither is active, exit.
+    match (rpc_handle, mining_handle) {
+        (Some(rpc), Some(mining)) => {
+            tokio::select! {
+                _ = rpc => tracing::info!("RPC server stopped"),
+                _ = mining => tracing::info!("Mining stopped"),
+            }
         }
-    });
-
-    tracing::info!("Opolys node running. Mining + RPC active.");
-
-    // Wait for either task to finish (both run indefinitely)
-    tokio::select! {
-        _ = rpc_handle => tracing::info!("RPC server stopped"),
-        _ = mining_handle => tracing::info!("Mining stopped"),
+        (Some(rpc), None) => {
+            rpc.await.expect("RPC server task panicked");
+        }
+        (None, Some(mining)) => {
+            mining.await.expect("Mining task panicked");
+        }
+        (None, None) => {
+            tracing::warn!("Node started with --no-rpc and without --mine. Nothing to do. Exiting.");
+            tracing::info!("Tip: run with --mine to enable block production, or without --no-rpc to enable the RPC server.");
+        }
     }
 }

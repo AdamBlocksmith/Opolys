@@ -58,6 +58,22 @@ pub struct Args {
     /// Log level: trace, debug, info, warn, error (default: info).
     #[arg(long, default_value = "info")]
     pub log_level: String,
+
+    /// Enable mining loop (default: disabled).
+    ///
+    /// Without this flag, the node runs in read-only mode — it syncs chain
+    /// state and serves RPC queries but does not produce blocks. Pass --mine
+    /// to start the Autolykos PoW mining loop.
+    #[arg(long)]
+    pub mine: bool,
+
+    /// Disable the JSON-RPC server.
+    ///
+    /// By default, the node listens for JSON-RPC connections on rpc_port.
+    /// Pass --no-rpc to skip starting the server (useful for solo mining
+    /// without network exposure).
+    #[arg(long)]
+    pub no_rpc: bool,
 }
 
 /// Configuration for an Opolys node, derived from CLI arguments or defaults.
@@ -73,6 +89,10 @@ pub struct NodeConfig {
     pub bootstrap_peers: Vec<String>,
     /// Logging verbosity level.
     pub log_level: String,
+    /// Whether the mining loop is active.
+    pub mine: bool,
+    /// Whether the RPC server is disabled.
+    pub no_rpc: bool,
 }
 
 impl Default for NodeConfig {
@@ -83,6 +103,8 @@ impl Default for NodeConfig {
             data_dir: "./data".to_string(),
             bootstrap_peers: vec![],
             log_level: "info".to_string(),
+            mine: false,
+            no_rpc: false,
         }
     }
 }
@@ -442,6 +464,8 @@ mod tests {
             data_dir: dir.path().to_string_lossy().to_string(),
             bootstrap_peers: vec![],
             log_level: "warn".to_string(),
+            mine: true,
+            no_rpc: true,
         };
         (config, dir)
     }
