@@ -226,17 +226,40 @@ All fees are **permanently burned** — not transferred to validators or miners.
 
 ## RPC API
 
-The node exposes a JSON-RPC 2.0 server:
+The node exposes a JSON-RPC 2.0 server on port 4171.
+
+### Read
 
 | Method | Parameters | Description |
 |---|---|---|
 | `opl_getBlockHeight` | _(none)_ | Current chain height |
-| `opl_getChainInfo` | _(none)_ | Chain statistics (difficulty, supply, phase) |
+| `opl_getChainInfo` | _(none)_ | Chain statistics (height, difficulty, supply, validators) |
 | `opl_getNetworkVersion` | _(none)_ | Protocol version string |
-| `opl_getBalance` | `["object_id_hex"]` | Account balance in flakes and OPL |
+| `opl_getBalance` | `["object_id_hex"]` | Account balance (flakes and OPL) |
 | `opl_getAccount` | `["object_id_hex"]` | Full account details (balance, nonce) |
+| `opl_getBlockByHeight` | `[height]` | Full block at given height |
+| `opl_getBlockByHash` | `["hex_hash"]` | Full block by Blake3 hash |
+| `opl_getLatestBlocks` | `[count]` or `null` | Recent blocks (default 10) |
+| `opl_getTransaction` | `["tx_id_hex"]` | Transaction by ID with status |
+| `opl_getMempoolStatus` | _(none)_ | Pending transaction count and size |
+| `opl_getSupply` | _(none)_ | Issued, burned, and circulating breakdown |
+| `opl_getDifficulty` | _(none)_ | Current difficulty and retarget info |
+| `opl_getValidators` | _(none)_ | Active validator set with stakes |
 
-### Example
+### Write
+
+| Method | Parameters | Description |
+|---|---|---|
+| `opl_sendTransaction` | `["borsh_hex_string"]` | Submit a Borsh-hex-encoded signed transaction |
+
+### Mining
+
+| Method | Parameters | Description |
+|---|---|---|
+| `opl_getMiningJob` | _(none)_ | Block template for external miners |
+| `opl_submitSolution` | `["borsh_hex_string"]` | Submit mined block _(placeholder — not yet fully wired)_ |
+
+### Examples
 
 ```bash
 # Get chain info
@@ -248,6 +271,36 @@ curl -X POST http://localhost:4171/rpc \
 curl -X POST http://localhost:4171/rpc \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"opl_getBalance","params":["<hex_object_id>"],"id":2}'
+
+# Get block by height
+curl -X POST http://localhost:4171/rpc \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"opl_getBlockByHeight","params":[42],"id":3}'
+
+# Get latest 5 blocks
+curl -X POST http://localhost:4171/rpc \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"opl_getLatestBlocks","params":[5],"id":4}'
+
+# Get a transaction
+curl -X POST http://localhost:4171/rpc \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"opl_getTransaction","params":["<tx_id_hex>"],"id":5}'
+
+# Get mempool status
+curl -X POST http://localhost:4171/rpc \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"opl_getMempoolStatus","params":null,"id":6}'
+
+# Get supply breakdown
+curl -X POST http://localhost:4171/rpc \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"opl_getSupply","params":null,"id":7}'
+
+# Get mining job
+curl -X POST http://localhost:4171/rpc \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"opl_getMiningJob","params":null,"id":8}'
 
 # Health check
 curl http://localhost:4171/health

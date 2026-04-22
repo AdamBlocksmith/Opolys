@@ -10,7 +10,7 @@
 //! On startup, the node either loads persisted state from RocksDB (resuming
 //! from the last known block) or initializes from genesis (if no state exists).
 //! Chain info is shared with the RPC server via an `Arc<RwLock<ChainInfo>>`
-//! snapshot that is refreshed after each block.
+//! snapshot that is refreshed after each block is applied.
 //!
 //! Opolys ($OPL) is a blockchain built as decentralized digital gold with no
 //! hard cap. Difficulty and rewards emerge from chain state. Fees are
@@ -91,16 +91,18 @@ async fn main() {
         tracing::info!("RPC: disabled (run without --no-rpc to enable)");
     }
 
-// Optionally start the JSON-RPC server
+    // Build the shared ChainInfo snapshot — both the RPC server and the mining
+    // loop update this after each block is applied so RPC queries stay current.
+    let chain_info: std::sync::Arc<tokio::sync::RwLock<ChainInfo>> = {
+        let chain = node.chain.read().await;
+        std::sync::Arc::new(tokio::sync::RwLock::new(chain_state_to_info(&chain)))
+    };
+
+    // Optionally start the JSON-RPC server
     let mut rpc_handle: Option<tokio::task::JoinHandle<()>> = None;
     if !config.no_rpc && node.store.is_some() {
-        // Build the RPC ChainInfo snapshot from the current chain state
-        let chain_info = {
-            let chain = node.chain.read().await;
-            chain_state_to_info(&chain)
-        };
         let rpc_state = RpcState::new(
-            std::sync::Arc::new(tokio::sync::RwLock::new(chain_info)),
+            chain_info.clone(),
             node.accounts.clone(),
             node.validators.clone(),
             node.mempool.clone(),
@@ -123,6 +125,7 @@ async fn main() {
     // Optionally start the mining loop
     let mut mining_handle: Option<tokio::task::JoinHandle<()>> = None;
     if config.mine {
+        let chain_info_clone = chain_info.clone();
         mining_handle = Some(tokio::spawn(async move {
             loop {
                 match node.mine_block(10_000_000).await {
@@ -140,6 +143,14 @@ async fn main() {
                                     hash = %hash.to_hex(),
                                     "Block mined and applied"
                                 );
+
+                                // Refresh the RPC chain info snapshot so queries
+                                // return up-to-date data
+                                {
+                                    let chain = node.chain.read().await;
+                                    let mut info = chain_info_clone.write().await;
+                                    *info = chain_state_to_info(&chain);
+                                }
                             }
                             Err(e) => {
                                 tracing::error!(height, error = %e, "Failed to apply mined block");
