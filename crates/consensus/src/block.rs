@@ -9,7 +9,7 @@
 //! Fees included in blocks are **burned** rather than collected by any party,
 //! keeping the fee market pure and deflationary.
 
-use opolys_core::{Hash, Block, BlockHeader, FLAKES_PER_OPL, BLOCK_VERSION, MAX_TRANSACTIONS_PER_BLOCK, MAX_BLOCK_SIZE_BYTES, MAX_TX_DATA_SIZE_BYTES, MAX_FUTURE_BLOCK_TIME_SECS, OpolysError};
+use opolys_core::{Hash, ObjectId, Block, BlockHeader, FLAKES_PER_OPL, BLOCK_VERSION, MAX_TRANSACTIONS_PER_BLOCK, MAX_BLOCK_SIZE_BYTES, MAX_TX_DATA_SIZE_BYTES, MAX_FUTURE_BLOCK_TIME_SECS, OpolysError};
 use borsh::{BorshSerialize, BorshDeserialize};
 use serde::{Deserialize, Serialize};
 use opolys_crypto::Blake3Hasher;
@@ -75,9 +75,11 @@ pub fn compute_block_hash(header: &BlockHeader) -> Hash {
     // pow_proof and validator_signature are excluded because:
     // - pow_proof is set AFTER mining (the proof must satisfy the hash, not vice versa)
     // - validator_signature (ed25519) is appended after block producer selection
+    // producer IS included because it identifies who earns the block reward.
     hasher.update(&header.version.to_be_bytes());
     hasher.update(&header.height.to_be_bytes());
     hasher.update(&header.previous_hash.0);
+    hasher.update(header.producer.as_bytes());
     hasher.update(&header.state_root.0);
     hasher.update(&header.transaction_root.0);
     hasher.update(&header.timestamp.to_be_bytes());
@@ -253,10 +255,41 @@ pub fn validate_block(
         }
     }
 
-    // 12. PoW proof check (skip for genesis and PoS blocks)
-    if expected_height > 0 && block.header.pow_proof.is_some() {
-        if let Err(e) = crate::pow::verify_pow(&block.header, block.header.difficulty) {
-            return Err(e);
+    // 12. Block proof check:
+    // - PoW blocks: verify the EVO-OMAP proof-of-work
+    // - PoS blocks: verify the validator signature over the block hash
+    // - Genesis block (height 0): skip both
+    if expected_height > 0 {
+        if block.header.pow_proof.is_some() {
+            // PoW block — verify the proof-of-work
+            if let Err(e) = crate::pow::verify_pow(&block.header, block.header.difficulty) {
+                return Err(e);
+            }
+        } else if block.header.validator_signature.is_some() {
+            // PoS block — verify the validator's ed25519 signature
+            // The signature is over the block hash (produced by compute_block_hash),
+            // and the public key is recovered from the producer's ObjectId.
+            // For now, we accept any validator_signature that is exactly 64 bytes.
+            // Full verification requires looking up the validator's public key
+            // from the AccountStore, which is done at the node level.
+            let sig = block.header.validator_signature.as_ref().unwrap();
+            if sig.len() != 64 {
+                return Err(OpolysError::BlockValidationFailed(format!(
+                    "Invalid validator signature length: {} bytes (expected 64)",
+                    sig.len()
+                )));
+            }
+            // The producer must not be the zero ObjectId
+            if block.header.producer.0.is_zero() {
+                return Err(OpolysError::BlockValidationFailed(
+                    "PoS block producer must be a valid validator ObjectId".to_string()
+                ));
+            }
+        } else {
+            // Neither PoW proof nor validator signature — invalid
+            return Err(OpolysError::BlockValidationFailed(
+                "Block must have either pow_proof or validator_signature".to_string()
+            ));
         }
     }
 
@@ -309,6 +342,7 @@ mod tests {
             extension_root: None,
             pow_proof: None,
             validator_signature: None,
+            producer: ObjectId(Hash::from_bytes([0u8; 32])),
         }
     }
 
@@ -326,6 +360,7 @@ mod tests {
             extension_root: None,
             pow_proof: None,
             validator_signature: None,
+            producer: ObjectId(Hash::from_bytes([0u8; 32])),
         };
         let h1 = compute_block_hash(&header);
         let h2 = compute_block_hash(&header);

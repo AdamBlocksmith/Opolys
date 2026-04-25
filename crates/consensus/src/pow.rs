@@ -230,7 +230,7 @@ pub fn mine_block(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opolys_core::{Hash, BLOCK_VERSION};
+    use opolys_core::{Hash, ObjectId, BLOCK_VERSION};
 
     fn make_header(height: BlockHeight, difficulty: u64) -> BlockHeader {
         BlockHeader {
@@ -243,6 +243,7 @@ mod tests {
             difficulty,
             suggested_fee: 1,
             extension_root: None,
+            producer: ObjectId(Hash::zero()),
             pow_proof: None,
             validator_signature: None,
         }

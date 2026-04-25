@@ -72,6 +72,11 @@ impl Hash {
         Hash([0u8; 32])
     }
 
+    /// Returns `true` if every byte is zero.
+    pub fn is_zero(&self) -> bool {
+        self.0 == [0u8; 32]
+    }
+
     /// Returns a reference to the inner 32-byte array.
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
@@ -121,6 +126,11 @@ impl ObjectId {
     /// Returns the ObjectId as a 64-character lowercase hex string.
     pub fn to_hex(&self) -> String {
         self.0.to_hex()
+    }
+
+    /// Returns a reference to the inner 32-byte array.
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0 .0
     }
 }
 
@@ -229,9 +239,16 @@ pub struct BlockHeader {
     /// Optional Merkle root of extension data (e.g., rollup anchors).
     /// `None` for normal blocks. Reserved for future protocol extensions.
     pub extension_root: Option<Hash>,
+    /// The ObjectId of the block producer — the miner (PoW) or validator (PoS)
+    /// who earns the block reward. Set to `ObjectId::zero()` for the genesis block.
+    /// In PoW mode, this is the miner's address. In PoS mode, this is the
+    /// validator's on-chain identity.
+    pub producer: ObjectId,
     /// The nonce/solution that satisfies the difficulty target (present in PoW phases).
+    /// `None` for PoS blocks and the genesis block.
     pub pow_proof: Option<Vec<u8>>,
-    /// The validator's ed25519 signature over the header (present in PoS phases).
+    /// The validator's ed25519 signature over the block hash (present in PoS phases).
+    /// `None` for PoW blocks and the genesis block.
     pub validator_signature: Option<Vec<u8>>,
 }
 

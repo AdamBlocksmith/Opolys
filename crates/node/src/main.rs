@@ -19,6 +19,7 @@
 //! Validators earn from block rewards only.
 
 use clap::Parser;
+use opolys_core::ObjectId;
 use opolys_node::{Args, NodeConfig, OpolysNode, ChainState};
 use opolys_rpc::RpcState;
 use opolys_rpc::server::{ChainInfo, BlockSubmission, BlockSubmissionResult};
@@ -53,6 +54,30 @@ async fn main() {
         .init();
 
     // Construct node configuration from CLI arguments
+    let miner_id = if let Some(key_path) = &args.key_file {
+        match std::fs::read(key_path) {
+            Ok(seed_bytes) if seed_bytes.len() == 32 => {
+                let mut seed = [0u8; 32];
+                seed.copy_from_slice(&seed_bytes);
+                let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
+                let verifying_key = signing_key.verifying_key();
+                let id = opolys_crypto::ed25519_public_key_to_object_id(verifying_key.as_bytes());
+                tracing::info!(miner_id = %id.to_hex(), "Loaded miner/validator identity from key file");
+                id
+            }
+            Ok(bytes) => {
+                tracing::error!("Key file must be exactly 32 bytes, got {}", bytes.len());
+                ObjectId(opolys_core::Hash::zero())
+            }
+            Err(e) => {
+                tracing::warn!("Failed to read key file {:?}: {}. Using zero miner_id.", key_path, e);
+                ObjectId(opolys_core::Hash::zero())
+            }
+        }
+    } else {
+        ObjectId(opolys_core::Hash::zero())
+    };
+
     let config = NodeConfig {
         listen_port: args.port,
         rpc_port: args.rpc_port.unwrap_or(args.port + 1),
@@ -62,6 +87,7 @@ async fn main() {
         mine: args.mine,
         no_rpc: args.no_rpc,
         validate: args.validate,
+        miner_id,
     };
 
     tracing::info!(

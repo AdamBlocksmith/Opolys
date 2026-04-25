@@ -36,6 +36,7 @@ use opolys_storage::BlockchainStore;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use clap::Parser;
+use ed25519_dalek::Signer;
 
 /// Command-line arguments for the Opolys node.
 #[derive(Parser, Debug)]
@@ -84,6 +85,15 @@ pub struct Args {
     /// This flag is separate from --mine (both can be active simultaneously).
     #[arg(long)]
     pub validate: bool,
+
+    /// Path to the miner/validator key file (32-byte ed25519 seed).
+    ///
+    /// The ObjectId (Blake3 hash of the public key) derived from this key
+    /// is used as the block producer identity. If not provided, the miner_id
+    /// defaults to zero (rewards are not credited to any account).
+    /// For production use, generate a key with `opl keygen` and provide the path.
+    #[arg(long)]
+    pub key_file: Option<String>,
 }
 
 /// Configuration for an Opolys node, derived from CLI arguments or defaults.
@@ -97,6 +107,10 @@ pub struct NodeConfig {
     pub mine: bool,
     pub no_rpc: bool,
     pub validate: bool,
+    /// The miner/validator's on-chain identity (Blake3 hash of their ed25519 public key).
+    /// Defaults to a zero ObjectId if not set. For mining and validating, this
+    /// determines who receives block rewards.
+    pub miner_id: ObjectId,
 }
 
 impl Default for NodeConfig {
@@ -110,6 +124,7 @@ impl Default for NodeConfig {
             mine: false,
             no_rpc: false,
             validate: false,
+            miner_id: ObjectId(Hash::zero()),
         }
     }
 }
@@ -235,6 +250,10 @@ pub struct OpolysNode {
     pub config: NodeConfig,
     /// EVO-OMAP mining context with dataset cache for efficient mining.
     pow_context: Arc<RwLock<PowContext>>,
+    /// The miner's on-chain identity (Blake3 hash of their public key).
+    /// For PoW blocks, this identifies who earns the block reward.
+    /// For PoS blocks, this must match an active validator's ObjectId.
+    pub miner_id: ObjectId,
 }
 
 impl OpolysNode {
@@ -294,8 +313,9 @@ impl OpolysNode {
             mempool: Arc::new(RwLock::new(Mempool::new())),
             validators: Arc::new(RwLock::new(validators)),
             store,
-            config,
+            config: config.clone(),
             pow_context: Arc::new(RwLock::new(PowContext::new())),
+            miner_id: config.miner_id.clone(),
         }
     }
 
@@ -346,6 +366,7 @@ impl OpolysNode {
             difficulty,
             suggested_fee: chain.suggested_fee,
             extension_root: None,
+            producer: self.miner_id.clone(),
             pow_proof: None,
             validator_signature: None,
         };
@@ -361,6 +382,88 @@ impl OpolysNode {
 
         let mut ctx = self.pow_context.write().await;
         ctx.mine_parallel(header, difficulty, max_attempts, num_threads)
+    }
+
+    /// Produce a PoS block as a validator.
+    ///
+    /// When `--validate` is enabled and this node's `miner_id` is an active
+    /// validator with bonded stake, this method builds and signs a block.
+    /// The block contains no PoW proof; instead, the validator signs the
+    /// block hash with their ed25519 key, and the signature is stored in
+    /// `validator_signature`.
+    ///
+    /// Returns `Some(Block)` if the node is an eligible validator, or `None`
+    /// if the miner_id is not an active validator.
+    pub async fn produce_pos_block(&self, signing_key: &ed25519_dalek::SigningKey) -> Option<Block> {
+        let chain = self.chain.read().await;
+        let validators = self.validators.read().await;
+        let mempool = self.mempool.read().await;
+
+        // Check if this node is an active validator
+        let validator = validators.get_validator(&self.miner_id)?;
+        if validator.status != opolys_core::ValidatorStatus::Active {
+            tracing::debug!(miner_id = %self.miner_id.to_hex(), "Not an active validator, skipping PoS block production");
+            return None;
+        }
+
+        // Build block from mempool transactions
+        let transactions: Vec<Transaction> = mempool.get_ordered_transactions()
+            .into_iter()
+            .take(MAX_TRANSACTIONS_PER_BLOCK)
+            .cloned()
+            .collect();
+
+        let transaction_root = compute_transaction_root(&transactions);
+        let bonded_stake = validators.total_bonded_stake();
+
+        let diff_target = compute_next_difficulty(
+            chain.current_difficulty,
+            chain.current_height,
+            &chain.block_timestamps,
+            chain.total_issued,
+            bonded_stake,
+        );
+        let difficulty = diff_target.effective_difficulty();
+
+        // Build the block header (no PoW proof)
+        let header = BlockHeader {
+            version: BLOCK_VERSION,
+            height: chain.current_height + 1,
+            previous_hash: chain.latest_block_hash.clone(),
+            state_root: chain.state_root.clone(),
+            transaction_root,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            difficulty,
+            suggested_fee: chain.suggested_fee,
+            extension_root: None,
+            producer: self.miner_id.clone(),
+            pow_proof: None,
+            validator_signature: None,
+        };
+
+        // Compute the block hash and sign it with the validator's ed25519 key
+        let block_hash = compute_block_hash(&header);
+        let signature: ed25519_dalek::Signature = signing_key.sign(block_hash.0.as_ref());
+        let validator_signature = signature.to_bytes().to_vec();
+
+        let block = Block {
+            header: BlockHeader {
+                validator_signature: Some(validator_signature),
+                ..header
+            },
+            transactions,
+        };
+
+        tracing::info!(
+            height = block.header.height,
+            producer = %self.miner_id.to_hex(),
+            "Produced PoS block"
+        );
+
+        Some(block)
     }
 
     /// Apply a mined or received block to the chain state.
@@ -413,6 +516,18 @@ impl OpolysNode {
 
         // Block reward uses vein yield: BASE_REWARD / difficulty * vein_yield
         let block_reward = emission::compute_block_reward(block.header.difficulty, pow_hash_value);
+
+        // Credit the block reward to the producer's account.
+        // The producer is the miner (PoW) or validator (PoS) identified by
+        // block.header.producer. If the producer account doesn't exist yet,
+        // it is auto-created with zero balance before crediting.
+        let producer = &block.header.producer;
+        if !producer.0.is_zero() && block_reward > 0 {
+            if accounts.get_account(producer).is_none() {
+                accounts.create_account(producer.clone()).ok();
+            }
+            accounts.credit(producer, block_reward).ok();
+        }
 
         // Compute the block hash — this is the new chain tip
         let block_hash = compute_block_hash(&block.header);
@@ -508,6 +623,7 @@ mod tests {
             mine: true,
             no_rpc: true,
             validate: false,
+            miner_id: ObjectId(Hash::zero()),
         };
         (config, dir)
     }
