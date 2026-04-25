@@ -353,7 +353,6 @@ pub fn format_flake_as_opl(flakes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::FLAKES_PER_OPL;
 
     #[test]
     fn hash_zero_is_deterministic() {

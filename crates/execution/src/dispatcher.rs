@@ -24,7 +24,7 @@
 //! keep their original `bonded_at_timestamp`. Invalid amounts (below
 //! MIN_FEE floor or exceeding total stake) result in an error.
 
-use opolys_core::{Transaction, TransactionAction, ObjectId, FlakeAmount, OpolysError, MIN_BOND_STAKE, MIN_FEE, SIGNATURE_TYPE_ED25519};
+use opolys_core::{Transaction, TransactionAction, ObjectId, FlakeAmount, OpolysError, MIN_BOND_STAKE, MIN_FEE, SIGNATURE_TYPE_ED25519, EPOCH};
 use opolys_consensus::account::{AccountStore, TransferResult};
 use opolys_consensus::pos::ValidatorSet;
 use opolys_crypto::hash_to_object_id;
@@ -125,7 +125,7 @@ impl TransactionDispatcher {
                 Self::apply_bond(tx, sender, *amount, accounts, validators, block_height, block_timestamp)
             }
             TransactionAction::ValidatorUnbond { amount } => {
-                Self::apply_unbond(tx, sender, *amount, accounts, validators)
+                Self::apply_unbond(tx, sender, *amount, accounts, validators, block_height)
             }
         };
 
@@ -227,44 +227,39 @@ impl TransactionDispatcher {
     ///
     /// The oldest entries are consumed first. If the amount exceeds an entry's
     /// stake, that entry is fully consumed and the remainder comes from the
-    /// next oldest. The actual unbonded amount is returned to the sender.
-    /// The transaction fee is burned from the sender's balance.
+    /// next oldest. The unbonded stake enters the unbonding queue and is
+    /// returned after `UNBONDING_DELAY_BLOCKS` (1,024 blocks = one epoch).
     ///
-    /// After unbonding, the stake enters a `UNBONDING_DELAY_BLOCKS` delay
-    /// (1 epoch = 1,024 blocks). During this period, the unbonding stake
-    /// still earns rewards. After the delay, the stake is returned to the
-    /// sender's wallet.
-    ///
+    /// The transaction fee is burned from the sender's balance immediately.
     /// If the validator has insufficient stake, the transaction fails with
-    /// no fee burn and no nonce advance — honest mistakes shouldn't cost money.
+    /// no fee burn and no nonce advance.
+    ///
     fn apply_unbond(
         tx: &Transaction,
         sender: &ObjectId,
         amount: FlakeAmount,
         accounts: &mut AccountStore,
         validators: &mut ValidatorSet,
+        block_height: u64,
     ) -> ApplyResult {
         // Check that the validator exists
         if validators.get_validator(sender).is_none() {
             return ApplyResult::err("Validator not bonded");
         }
 
-        // Perform FIFO unbond — oldest entries consumed first
-        let returned_stake = match validators.unbond_amount(sender, amount) {
+        // Perform FIFO unbond — oldest entries consumed first, queued for delayed return
+        let unbonded = match validators.unbond_amount(sender, amount, block_height) {
             Ok(stake) => stake,
             Err(e) => return ApplyResult::err(&e),
         };
 
-        if returned_stake == 0 {
+        if unbonded == 0 {
             return ApplyResult::err("No stake unbonded");
         }
 
-        // Return the unbonded stake to the sender
-        // Note: In a full implementation, this would enter a UNBONDING_DELAY_BLOCKS
-        // delay. For now, we return it immediately.
-        if let Err(e) = accounts.credit(sender, returned_stake) {
-            return ApplyResult::err(&format!("Failed to return stake: {}", e));
-        }
+        // The unbonded stake enters the unbonding queue and will be returned
+        // after UNBONDING_DELAY_BLOCKS (1,024 blocks). It is NOT credited
+        // to the sender's account immediately.
 
         // Burn the fee from the sender's balance
         let fee = tx.fee;
@@ -623,6 +618,15 @@ mod tests {
         assert_eq!(v.entries.len(), 1);
         // Remaining: 2 - 0.5 = 1.5 OPL
         assert_eq!(v.total_stake(), MIN_BOND_STAKE * 3 / 2);
+
+        // Unbonded stake goes into the unbonding queue, not immediately returned
+        assert_eq!(validators.unbonding_queue.len(), 1);
+        assert_eq!(validators.unbonding_queue[0].amount, MIN_BOND_STAKE + MIN_BOND_STAKE / 2);
+        assert_eq!(validators.unbonding_queue[0].matures_at, 3 + EPOCH as u64);
+
+        // Alice's balance: 500 - 1 - 1 (bond1) - 2 - 1 (bond2) - 1 (unbond fee) = 494 OPL
+        // (Unbonded stake is in the queue, not credited yet)
+        assert_eq!(accounts.get_account(&alice).unwrap().balance, opl_to_flake(494));
     }
 
     /// Unbond more than total stake — unbonds all available.
@@ -647,6 +651,8 @@ mod tests {
         assert!(result.success);
         // Validator removed because all stake unbonded
         assert_eq!(validators.validator_count(), 0);
+        // But the unbonded stake is in the queue, not immediately credited
+        assert_eq!(validators.unbonding_queue.len(), 1);
     }
 
     /// Unbond a non-existent validator — should fail.

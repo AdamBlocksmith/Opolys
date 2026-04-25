@@ -27,10 +27,29 @@
 //! is derived from on-chain entropy. There are no rounds, no schedules, and
 //! no fixed validator sets — just continuous weighted selection.
 
-use opolys_core::{FlakeAmount, ObjectId, ValidatorStatus, MIN_BOND_STAKE};
+use opolys_core::{FlakeAmount, ObjectId, ValidatorStatus, MIN_BOND_STAKE, EPOCH};
 use borsh::{BorshSerialize, BorshDeserialize};
 use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
+
+/// A pending unbonding entry that matures after a delay of EPOCH blocks.
+///
+/// When a validator unbonds, the stake is not returned immediately. Instead,
+/// it enters the unbonding queue and matures after `UNBONDING_DELAY_BLOCKS`
+/// (1,024 blocks = one epoch). Once matured, the stake is returned to the
+/// account that originally bonded it.
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize, Serialize, Deserialize)]
+pub struct PendingUnbond {
+    /// The account that will receive the unbonded stake.
+    pub account: ObjectId,
+    /// Amount of Flakes to return when this entry matures.
+    pub amount: FlakeAmount,
+    /// Block height at which this entry matures and can be claimed.
+    pub matures_at: BlockHeight,
+}
+
+/// Block height type alias — re-exported from core for convenience.
+pub type BlockHeight = u64;
 
 /// A single bond entry within a validator's stake.
 ///
@@ -193,6 +212,8 @@ impl ValidatorInfo {
 #[derive(Debug)]
 pub struct ValidatorSet {
     validators: HashMap<ObjectId, ValidatorInfo>,
+    /// Pending unbonding entries that mature after EPOCH blocks.
+    pub unbonding_queue: Vec<PendingUnbond>,
 }
 
 impl ValidatorSet {
@@ -200,6 +221,7 @@ impl ValidatorSet {
     pub fn new() -> Self {
         ValidatorSet {
             validators: HashMap::new(),
+            unbonding_queue: Vec::new(),
         }
     }
 
@@ -239,19 +261,16 @@ impl ValidatorSet {
     ///
     /// The oldest entries are consumed first. If the amount exceeds an entry's
     /// stake, that entry is fully consumed and the remainder comes from the
-    /// next oldest. The actual unbonded amount is returned (may be less than
-    /// requested if total stake is insufficient).
-    ///
-    /// After a `UNBONDING_DELAY_BLOCKS` delay (1 epoch = 1,024 blocks),
-    /// the unbonded stake is returned to the sender. Unbonding stake still
-    /// earns rewards during the delay period.
+    /// next oldest. The unbonded stake enters the unbonding queue and will
+    /// mature after `UNBONDING_DELAY_BLOCKS` (1,024 blocks = one epoch).
     ///
     /// If the validator has no remaining entries after unbonding, they are
-    /// removed from the set entirely.
+    /// removed from the validator set but not slashed.
     pub fn unbond_amount(
         &mut self,
         object_id: &ObjectId,
         amount: FlakeAmount,
+        current_height: u64,
     ) -> Result<FlakeAmount, String> {
         let validator = self.validators.get_mut(object_id)
             .ok_or_else(|| "Validator not bonded".to_string())?;
@@ -265,12 +284,63 @@ impl ValidatorSet {
         let actual_amount = amount.min(total_stake);
         let unbonded = validator.unbond_fifo(actual_amount);
 
+        // Enqueue the unbonding entry with a maturation height
+        let matures_at = current_height.saturating_add(EPOCH);
+        self.unbonding_queue.push(PendingUnbond {
+            account: object_id.clone(),
+            amount: unbonded,
+            matures_at,
+        });
+
         // If no entries remain, remove the validator entirely
         if validator.entries.is_empty() {
             self.validators.remove(object_id);
         }
 
         Ok(unbonded)
+    }
+
+    /// Process all matured unbonding entries at the given block height.
+    ///
+    /// Returns a Vec of (account, amount) pairs for entries that have matured.
+    /// The caller is responsible for crediting the accounts.
+    pub fn process_matured_unbonds(&mut self, current_height: u64) -> Vec<(ObjectId, FlakeAmount)> {
+        let mut matured = Vec::new();
+        let mut remaining = Vec::new();
+
+        for entry in self.unbonding_queue.drain(..) {
+            if current_height >= entry.matures_at {
+                matured.push((entry.account, entry.amount));
+            } else {
+                remaining.push(entry);
+            }
+        }
+
+        self.unbonding_queue = remaining;
+        matured
+    }
+
+    /// Activate all validators that have been bonding for at least one full epoch.
+    ///
+    /// Validators transition from Bonding → Active once their bond has been
+    /// confirmed for EPOCH blocks. This prevents flash-bonding attacks where
+    /// an attacker bonds and immediately starts producing blocks.
+    pub fn activate_matured_validators(&mut self, current_height: u64) -> Vec<ObjectId> {
+        let mut activated = Vec::new();
+        for validator in self.validators.values_mut() {
+            if validator.status == ValidatorStatus::Bonding {
+                // A validator matures if their earliest bond entry is at least
+                // EPOCH blocks old
+                if let Some(earliest) = validator.entries.first() {
+                    if current_height >= earliest.bonded_at_height.saturating_add(EPOCH) {
+                        validator.status = ValidatorStatus::Active;
+                        validator.last_signed_height = current_height;
+                        activated.push(validator.object_id.clone());
+                    }
+                }
+            }
+        }
+        activated
     }
 
     /// Activate a validator that is currently in `Bonding` status. This
@@ -347,9 +417,12 @@ impl ValidatorSet {
         self.validators.values().cloned().collect()
     }
 
-    /// Load validators from a serialized Vec. Used for state restoration.
-    pub fn load_from_validators(validators: Vec<ValidatorInfo>) -> Self {
-        let mut set = ValidatorSet::new();
+    /// Load validators and unbonding queue from serialized data. Used for state restoration.
+    pub fn load_from_validators(validators: Vec<ValidatorInfo>, unbonding_queue: Vec<PendingUnbond>) -> Self {
+        let mut set = ValidatorSet {
+            validators: HashMap::new(),
+            unbonding_queue,
+        };
         for v in validators {
             set.validators.insert(v.object_id.clone(), v);
         }
@@ -469,7 +542,7 @@ mod tests {
         vs.bond(id.clone(), MIN_BOND_STAKE * 2, 100, 1000).unwrap(); // Entry 2: 2 OPL at t=1000
 
         // Unbond 1.5 OPL — should fully consume entry 1 (1 OPL) and 0.5 OPL from entry 2
-        let unbonded = vs.unbond_amount(&id, MIN_BOND_STAKE + MIN_BOND_STAKE / 2).unwrap();
+        let unbonded = vs.unbond_amount(&id, MIN_BOND_STAKE + MIN_BOND_STAKE / 2, 500).unwrap();
 
         // Should return all requested amount since total stake > amount
         assert_eq!(unbonded, MIN_BOND_STAKE + MIN_BOND_STAKE / 2);
@@ -480,6 +553,11 @@ mod tests {
         assert_eq!(v.entries[0].stake, MIN_BOND_STAKE * 2 - MIN_BOND_STAKE / 2);
         // Split entry keeps original timestamp for seniority
         assert_eq!(v.entries[0].bonded_at_timestamp, 1000);
+
+        // The unbonded amount should be in the unbonding queue
+        assert_eq!(vs.unbonding_queue.len(), 1);
+        assert_eq!(vs.unbonding_queue[0].amount, MIN_BOND_STAKE + MIN_BOND_STAKE / 2);
+        assert_eq!(vs.unbonding_queue[0].matures_at, 500 + EPOCH as u64);
     }
 
     #[test]
@@ -489,9 +567,11 @@ mod tests {
         vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0).unwrap();
 
         // Unbond the entire stake
-        let unbonded = vs.unbond_amount(&id, MIN_BOND_STAKE).unwrap();
+        let unbonded = vs.unbond_amount(&id, MIN_BOND_STAKE, 100).unwrap();
         assert_eq!(unbonded, MIN_BOND_STAKE);
         assert_eq!(vs.validator_count(), 0);
+        // Unbonding queue holds the pending entry
+        assert_eq!(vs.unbonding_queue.len(), 1);
     }
 
     #[test]
@@ -501,7 +581,7 @@ mod tests {
         vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0).unwrap();
 
         // Try to unbond more than total stake
-        let unbonded = vs.unbond_amount(&id, MIN_BOND_STAKE * 10).unwrap();
+        let unbonded = vs.unbond_amount(&id, MIN_BOND_STAKE * 10, 100).unwrap();
         assert_eq!(unbonded, MIN_BOND_STAKE); // Only unbond what's available
         assert_eq!(vs.validator_count(), 0);
     }
@@ -510,8 +590,52 @@ mod tests {
     fn unbond_nonexistent_validator() {
         let mut vs = ValidatorSet::new();
         let id = test_id(b"validator1");
-        let result = vs.unbond_amount(&id, MIN_BOND_STAKE);
+        let result = vs.unbond_amount(&id, MIN_BOND_STAKE, 100);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn process_matured_unbonds_returns_matured_entries() {
+        let mut vs = ValidatorSet::new();
+        let id = test_id(b"validator1");
+        vs.bond(id.clone(), MIN_BOND_STAKE * 3, 0, 0).unwrap();
+
+        // Unbond at height 100, matures at 100 + 1024 = 1124
+        let unbonded = vs.unbond_amount(&id, MIN_BOND_STAKE, 100).unwrap();
+        assert_eq!(unbonded, MIN_BOND_STAKE);
+
+        // At height 1123, nothing has matured yet
+        let matured = vs.process_matured_unbonds(1123);
+        assert!(matured.is_empty());
+        assert_eq!(vs.unbonding_queue.len(), 1);
+
+        // At height 1124, the entry matures
+        let matured = vs.process_matured_unbonds(1124);
+        assert_eq!(matured.len(), 1);
+        assert_eq!(matured[0].0, id);
+        assert_eq!(matured[0].1, MIN_BOND_STAKE);
+        assert!(vs.unbonding_queue.is_empty());
+    }
+
+    #[test]
+    fn activate_matured_validators_transitions_after_epoch() {
+        let mut vs = ValidatorSet::new();
+        let id = test_id(b"validator1");
+        vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0).unwrap();
+
+        // At height 0, validator should be in Bonding status
+        assert_eq!(vs.get_validator(&id).unwrap().status, ValidatorStatus::Bonding);
+
+        // Before epoch boundary, no activation
+        let activated = vs.activate_matured_validators(1023);
+        assert!(activated.is_empty());
+        assert_eq!(vs.get_validator(&id).unwrap().status, ValidatorStatus::Bonding);
+
+        // At epoch boundary, validator activates
+        let activated = vs.activate_matured_validators(1024);
+        assert_eq!(activated.len(), 1);
+        assert_eq!(activated[0], id);
+        assert_eq!(vs.get_validator(&id).unwrap().status, ValidatorStatus::Active);
     }
 
     #[test]
@@ -608,7 +732,7 @@ mod tests {
         vs.bond(id.clone(), MIN_BOND_STAKE * 3, 100, 2000).unwrap();
 
         // Unbond 2 OPL: consumes entry 1 (1 OPL) + 1 OPL from entry 2
-        let unbonded = vs.unbond_amount(&id, MIN_BOND_STAKE * 2).unwrap();
+        let unbonded = vs.unbond_amount(&id, MIN_BOND_STAKE * 2, 500).unwrap();
         assert_eq!(unbonded, MIN_BOND_STAKE * 2);
 
         let v = vs.get_validator(&id).unwrap();

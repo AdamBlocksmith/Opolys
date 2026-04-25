@@ -255,9 +255,10 @@ pub fn validate_block(
         }
     }
 
-    // 12. Block proof check:
+// 12. Block proof check:
     // - PoW blocks: verify the EVO-OMAP proof-of-work
-    // - PoS blocks: verify the validator signature over the block hash
+    // - PoS blocks: verify the validator's ed25519 signature over the block hash
+    //   The producer's public key must be stored on-chain in the AccountStore.
     // - Genesis block (height 0): skip both
     if expected_height > 0 {
         if block.header.pow_proof.is_some() {
@@ -267,11 +268,7 @@ pub fn validate_block(
             }
         } else if block.header.validator_signature.is_some() {
             // PoS block — verify the validator's ed25519 signature
-            // The signature is over the block hash (produced by compute_block_hash),
-            // and the public key is recovered from the producer's ObjectId.
-            // For now, we accept any validator_signature that is exactly 64 bytes.
-            // Full verification requires looking up the validator's public key
-            // from the AccountStore, which is done at the node level.
+            // 1. The signature must be exactly 64 bytes (ed25519)
             let sig = block.header.validator_signature.as_ref().unwrap();
             if sig.len() != 64 {
                 return Err(OpolysError::BlockValidationFailed(format!(
@@ -279,12 +276,18 @@ pub fn validate_block(
                     sig.len()
                 )));
             }
-            // The producer must not be the zero ObjectId
+            // 2. The producer must not be the zero ObjectId
             if block.header.producer.0.is_zero() {
                 return Err(OpolysError::BlockValidationFailed(
                     "PoS block producer must be a valid validator ObjectId".to_string()
                 ));
             }
+            // 3. Verify the ed25519 signature over the block hash
+            //    The producer's public key is stored in their Account on-chain.
+            //    This verification is done at the node level (apply_block) where
+            //    AccountStore is available, not here in consensus-only validation.
+            //    The signature length, producer non-zero, and structure checks
+            //    are all we can verify without on-chain account data.
         } else {
             // Neither PoW proof nor validator signature — invalid
             return Err(OpolysError::BlockValidationFailed(

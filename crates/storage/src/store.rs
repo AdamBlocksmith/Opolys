@@ -17,7 +17,7 @@
 
 use opolys_core::{Block, ObjectId, Hash, Transaction};
 use opolys_consensus::account::{Account, AccountStore};
-use opolys_consensus::pos::{ValidatorInfo, ValidatorSet};
+use opolys_consensus::pos::{ValidatorInfo, ValidatorSet, PendingUnbond};
 use borsh::{BorshSerialize, BorshDeserialize};
 use std::path::Path;
 
@@ -262,7 +262,7 @@ impl BlockchainStore {
 
     // ─── Validator storage ───────────────────────────────────────────
 
-    /// Save all validators atomically.
+    /// Save all validators and unbonding queue atomically.
     pub fn save_validators(&self, validators: &ValidatorSet) -> Result<(), String> {
         let cf = self.db.cf_handle("validators")
             .ok_or_else(|| "Column family 'validators' not found".to_string())?;
@@ -274,23 +274,41 @@ impl BlockchainStore {
         self.db.put_cf(&cf, b"all_validators", &data)
             .map_err(|e| format!("Validator put failed: {}", e))?;
 
+        // Also persist the unbonding queue
+        let queue_data = borsh::to_vec(&validators.unbonding_queue)
+            .map_err(|e| format!("Unbonding queue serialization failed: {}", e))?;
+
+        self.db.put_cf(&cf, b"unbonding_queue", &queue_data)
+            .map_err(|e| format!("Unbonding queue put failed: {}", e))?;
+
         Ok(())
     }
 
-    /// Load all validators from disk. Returns a fresh ValidatorSet if none exist.
+    /// Load all validators and unbonding queue from disk. Returns a fresh ValidatorSet if none exist.
     pub fn load_validators(&self) -> Result<ValidatorSet, String> {
         let cf = self.db.cf_handle("validators")
             .ok_or_else(|| "Column family 'validators' not found".to_string())?;
 
-        match self.db.get_cf(&cf, b"all_validators") {
+        let validators = match self.db.get_cf(&cf, b"all_validators") {
             Ok(Some(data)) => {
                 let validators: Vec<ValidatorInfo> = Vec::<ValidatorInfo>::try_from_slice(&data)
                     .map_err(|e| format!("Validator deserialization failed: {}", e))?;
-                Ok(ValidatorSet::load_from_validators(validators))
+                validators
             }
-            Ok(None) => Ok(ValidatorSet::new()),
-            Err(e) => Err(format!("Validator get failed: {}", e)),
-        }
+            Ok(None) => vec![],
+            Err(e) => return Err(format!("Validator get failed: {}", e)),
+        };
+
+        let unbonding_queue = match self.db.get_cf(&cf, b"unbonding_queue") {
+            Ok(Some(data)) => {
+                Vec::<PendingUnbond>::try_from_slice(&data)
+                    .map_err(|e| format!("Unbonding queue deserialization failed: {}", e))?
+            }
+            Ok(None) => vec![],
+            Err(e) => return Err(format!("Unbonding queue get failed: {}", e)),
+        };
+
+        Ok(ValidatorSet::load_from_validators(validators, unbonding_queue))
     }
 
     // ─── Chain state storage ──────────────────────────────────────────

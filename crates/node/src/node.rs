@@ -36,7 +36,7 @@ use opolys_storage::BlockchainStore;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use clap::Parser;
-use ed25519_dalek::Signer;
+use ed25519_dalek::{Signer, Verifier};
 
 /// Command-line arguments for the Opolys node.
 #[derive(Parser, Debug)]
@@ -318,19 +318,42 @@ impl OpolysNode {
                     Ok(None) => {
                         tracing::info!("No persisted state found, initializing from genesis");
                         let chain = ChainState::new(&genesis_config);
-                        (chain, AccountStore::new(), ValidatorSet::new(), Some(store))
+                        let mut accounts = AccountStore::new();
+                        let validators = ValidatorSet::new();
+                        // Credit genesis accounts with their initial balances
+                        let genesis_issued = opolys_consensus::genesis::apply_genesis_accounts(
+                            &genesis_config, &mut accounts,
+                        );
+                        // Track genesis issuance in chain state
+                        let mut chain = chain;
+                        chain.total_issued = chain.total_issued.saturating_add(genesis_issued);
+                        (chain, accounts, validators, Some(store))
                     }
                     Err(e) => {
                         tracing::error!("Failed to load chain state: {}, starting fresh", e);
                         let chain = ChainState::new(&genesis_config);
-                        (chain, AccountStore::new(), ValidatorSet::new(), Some(store))
+                        let mut accounts = AccountStore::new();
+                        let validators = ValidatorSet::new();
+                        let genesis_issued = opolys_consensus::genesis::apply_genesis_accounts(
+                            &genesis_config, &mut accounts,
+                        );
+                        let mut chain = chain;
+                        chain.total_issued = chain.total_issued.saturating_add(genesis_issued);
+                        (chain, accounts, validators, Some(store))
                     }
                 }
             }
             Err(e) => {
                 tracing::warn!("Could not open database at {:?}: {}, running without persistence", data_path, e);
-                let chain = ChainState::new(&genesis_config);
-                (chain, AccountStore::new(), ValidatorSet::new(), None)
+                let chain_state = ChainState::new(&genesis_config);
+                let mut accounts = AccountStore::new();
+                let validators = ValidatorSet::new();
+                let genesis_issued = opolys_consensus::genesis::apply_genesis_accounts(
+                    &genesis_config, &mut accounts,
+                );
+                let mut chain_state = chain_state;
+                chain_state.total_issued = chain_state.total_issued.saturating_add(genesis_issued);
+                (chain_state, accounts, validators, None)
             }
         };
 
@@ -414,24 +437,45 @@ impl OpolysNode {
 
     /// Produce a PoS block as a validator.
     ///
-    /// When `--validate` is enabled and this node's `miner_id` is an active
-    /// validator with bonded stake, this method builds and signs a block.
-    /// The block contains no PoW proof; instead, the validator signs the
-    /// block hash with their ed25519 key, and the signature is stored in
+    /// When `--validate` is enabled and this node's `miner_id` is the
+    /// **selected** block producer (determined by weighted random sampling
+    /// seeded from the previous block hash), this method builds and signs a
+    /// block. The block contains no PoW proof; instead, the validator signs
+    /// the block hash with their ed25519 key, and the signature is stored in
     /// `validator_signature`.
     ///
-    /// Returns `Some(Block)` if the node is an eligible validator, or `None`
-    /// if the miner_id is not an active validator or no signing key is available.
+    /// The producer is selected via `ValidatorSet::select_block_producer()`,
+    /// which uses the previous block hash as entropy for deterministic,
+    /// verifiable selection. Any node can verify that the producer was
+    /// legitimately chosen by re-running the selection with the same seed.
+    ///
+    /// Returns `Some(Block)` if this node is the selected producer, or `None`
+    /// if another validator was selected or no signing key is available.
     pub async fn produce_pos_block(&self) -> Option<Block> {
         let signing_key = self.signing_key.as_ref()?;
         let chain = self.chain.read().await;
         let validators = self.validators.read().await;
         let mempool = self.mempool.read().await;
 
-        // Check if this node is an active validator
-        let validator = validators.get_validator(&self.miner_id)?;
-        if validator.status != opolys_core::ValidatorStatus::Active {
-            tracing::debug!(miner_id = %self.miner_id.to_hex(), "Not an active validator, skipping PoS block production");
+        // Derive deterministic producer selection seed from the previous block hash.
+        // This ensures every node computes the same producer for the same height.
+        let seed = u64::from_be_bytes(
+            chain.latest_block_hash.0[0..8].try_into().unwrap_or([0u8; 8])
+        );
+
+        // Select the block producer via weighted random sampling
+        let producer = validators.select_block_producer(
+            chain.block_timestamps.last().copied().unwrap_or(0),
+            seed,
+        )?;
+
+        // Only produce if this node is the selected producer
+        if producer.object_id != self.miner_id {
+            tracing::debug!(
+                expected_producer = %producer.object_id.to_hex(),
+                our_id = %self.miner_id.to_hex(),
+                "Not selected as block producer, skipping"
+            );
             return None;
         }
 
@@ -540,6 +584,51 @@ impl OpolysNode {
             now_secs,
         ).map_err(|e| format!("Block validation failed: {}", e))?;
 
+        // Verify PoS validator signature if present
+        if block.header.validator_signature.is_some() && !block.header.producer.0.is_zero() {
+            if let Some(ref sig_bytes) = block.header.validator_signature {
+                if sig_bytes.len() == 64 {
+                    let block_hash = compute_block_hash(&block.header);
+                    // Look up the producer's public key from their on-chain account
+                    if let Some(account) = accounts.get_account(&block.header.producer) {
+                        if let Some(ref pk_bytes) = account.public_key {
+                            if pk_bytes.len() == 32 {
+                                let mut sig_array = [0u8; 64];
+                                sig_array.copy_from_slice(sig_bytes);
+                                let mut pk_array = [0u8; 32];
+                                pk_array.copy_from_slice(pk_bytes);
+                                if let Ok(verifying_key) = ed25519_dalek::VerifyingKey::from_bytes(&pk_array) {
+                                    let signature = ed25519_dalek::Signature::from_bytes(&sig_array);
+                                    if verifying_key.verify(block_hash.0.as_ref(), &signature).is_err() {
+                                        return Err("PoS block validator signature verification failed".to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+// If the producer has no stored public key yet, we accept the block
+                    // (first-time producers need their first transaction to register the key)
+                }
+            }
+        }
+
+        // Verify PoS block producer was legitimately selected
+        if block.header.validator_signature.is_some() && !block.header.producer.0.is_zero() {
+            let seed = u64::from_be_bytes(
+                chain.latest_block_hash.0[0..8].try_into().unwrap_or([0u8; 8])
+            );
+            let timestamp = chain.block_timestamps.last().copied().unwrap_or(0);
+            if let Some(expected_producer) = validators.select_block_producer(timestamp, seed) {
+                if expected_producer.object_id != block.header.producer {
+                    return Err(format!(
+                        "PoS block producer mismatch: expected {}, got {}",
+                        expected_producer.object_id.to_hex(),
+                        block.header.producer.to_hex()
+                    ));
+                }
+            }
+        }
+
         // Compute vein yield from the EVO-OMAP PoW hash
         let pow_hash_value = pow::compute_pow_hash_value(&block.header).unwrap_or(0u64);
 
@@ -596,6 +685,28 @@ impl OpolysNode {
         }
 
         chain.total_burned = chain.total_burned.saturating_add(total_fees_burned);
+
+        // Process matured unbonding entries — return stake to accounts
+        for (account, amount) in validators.process_matured_unbonds(chain.current_height) {
+            if accounts.get_account(&account).is_none() {
+                accounts.create_account(account.clone()).ok();
+            }
+            accounts.credit(&account, amount).ok();
+            tracing::debug!(
+                account = %account.to_hex(),
+                amount,
+                "Matured unbonding entry credited"
+            );
+        }
+
+        // Activate validators that have been bonding for at least one epoch
+        let activated = validators.activate_matured_validators(chain.current_height);
+        if !activated.is_empty() {
+            tracing::info!(
+                count = activated.len(),
+                "Validators activated at epoch boundary"
+            );
+        }
 
         // Update consensus phase based on stake coverage
         if bonded_stake > 0 && emission::compute_stake_coverage(bonded_stake, chain.total_issued) > 0.0 {
