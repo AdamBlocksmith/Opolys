@@ -64,6 +64,7 @@ async fn main() {
         no_rpc: args.no_rpc,
         validate: args.validate,
         key_file: args.key_file,
+        testnet: args.testnet,
     };
 
     tracing::info!(
@@ -73,6 +74,7 @@ async fn main() {
         mining = config.mine,
         validating = config.validate,
         rpc = !config.no_rpc,
+        testnet = config.testnet,
         "Starting Opolys node"
     );
 

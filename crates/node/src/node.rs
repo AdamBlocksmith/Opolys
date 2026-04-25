@@ -95,6 +95,14 @@ pub struct Args {
     /// For production use, generate a key with `opl keygen` and provide the path.
     #[arg(long)]
     pub key_file: Option<String>,
+
+    /// Run in testnet mode with pre-funded genesis accounts.
+    ///
+    /// Creates 3 genesis accounts each funded with 10,000 OPL for testing.
+    /// These accounts have deterministic ObjectIds derived from well-known
+    /// testnet keys. Do NOT use testnet mode for production.
+    #[arg(long)]
+    pub testnet: bool,
 }
 
 /// Configuration for an Opolys node, derived from CLI arguments or defaults.
@@ -107,10 +115,33 @@ pub struct NodeConfig {
     pub log_level: String,
     pub mine: bool,
     pub no_rpc: bool,
-    pub validate: bool,
+pub validate: bool,
     /// Path to the miner/validator key file (32-byte ed25519 seed).
     /// When provided, the node can sign PoS blocks and receive block rewards.
     pub key_file: Option<String>,
+    /// Run in testnet mode with pre-funded genesis accounts.
+    /// Creates 3 accounts each with 10,000 OPL. Do NOT use in production.
+    pub testnet: bool,
+}
+
+/// Build the testnet genesis config with pre-funded accounts.
+///
+/// These are deterministic testnet keys — NOT for production use.
+/// Each account starts with 10,000 OPL (10,000,000,000 Flakes).
+fn testnet_genesis_config() -> opolys_consensus::GenesisConfig {
+    use opolys_core::FLAKES_PER_OPL;
+    let mut config = opolys_consensus::GenesisConfig::default();
+    // 10,000 OPL per testnet account
+    let testnet_funding = 10_000 * FLAKES_PER_OPL;
+    config.genesis_accounts = vec![
+        // Testnet Account 0
+        (ObjectId::from_hex("eef4d70ed7c6ae9e70e900da4633a4fb3c9ab4dfaab788c7793fab46389242d4").unwrap(), testnet_funding),
+        // Testnet Account 1
+        (ObjectId::from_hex("c1d4059214449f375b86d3fa918d2b0e6201753ec3452fee4976acf38c31f538").unwrap(), testnet_funding),
+        // Testnet Account 2
+        (ObjectId::from_hex("9ec9dbbd1c9d739e1a9792e95ec941423e16f55ad8c00fcfd422fbe9efa6cf76").unwrap(), testnet_funding),
+    ];
+    config
 }
 
 impl Default for NodeConfig {
@@ -125,6 +156,7 @@ impl Default for NodeConfig {
             no_rpc: false,
             validate: false,
             key_file: None,
+            testnet: false,
         }
     }
 }
@@ -300,7 +332,12 @@ impl OpolysNode {
             (ObjectId(Hash::zero()), None)
         };
 
-        let genesis_config = GenesisConfig::default();
+        let genesis_config = if config.testnet {
+            tracing::warn!("TESTNET MODE: Pre-funded genesis accounts enabled. DO NOT use in production.");
+            testnet_genesis_config()
+        } else {
+            opolys_consensus::GenesisConfig::default()
+        };
 
         // Try to open the database and load existing state
         let data_path = std::path::PathBuf::from(&config.data_dir);
@@ -856,6 +893,7 @@ mod tests {
             no_rpc: true,
             validate: false,
             key_file: None,
+            testnet: false,
         };
         (config, dir)
     }
