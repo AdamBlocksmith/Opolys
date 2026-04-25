@@ -538,7 +538,7 @@ Opolys/
 
 ## 21. Test Count
 
-**139+ tests passing** across all crates (1 mining integration test `#[ignore]`d for requiring real PoW).
+**162+ tests passing** across all crates (1 mining integration test `#[ignore]`d for requiring real PoW).
 
 ---
 
@@ -565,7 +565,7 @@ Every block applied to the chain must pass these checks:
 
 1. **tx_id integrity**: Recomputed from (sender, action, fee, nonce) must match declared `tx_id`
 2. **signature_type**: Must be `SIGNATURE_TYPE_ED25519` (0)
-3. **ed25519 signature**: Planned — requires public key storage in Account (in progress)
+3. **ed25519 signature**: Verified against stored public key. `Blake3(public_key) == sender` must hold.
 
 ### Chain Sync
 
