@@ -740,4 +740,81 @@ mod tests {
         assert_eq!(v.entries[0].stake, MIN_BOND_STAKE * 2); // 3 - 1 = 2
         assert_eq!(v.entries[0].bonded_at_timestamp, 2000); // Keeps original timestamp
     }
+
+    /// Full lifecycle integration test: bond → activate → unbond → mature → slash
+    #[test]
+    fn validator_full_lifecycle() {
+        let mut vs = ValidatorSet::new();
+        let alice = test_id(b"alice");
+        let bob = test_id(b"bob");
+        let charlie = test_id(b"charlie");
+
+        // Phase 1: Three validators bond at height 0
+        vs.bond(alice.clone(), MIN_BOND_STAKE * 10, 0, 0).unwrap(); // Alice: 10 OPL
+        vs.bond(bob.clone(), MIN_BOND_STAKE * 20, 0, 0).unwrap();   // Bob: 20 OPL
+        vs.bond(charlie.clone(), MIN_BOND_STAKE * 5, 0, 0).unwrap(); // Charlie: 5 OPL
+
+        // All start as Bonding
+        assert_eq!(vs.get_validator(&alice).unwrap().status, ValidatorStatus::Bonding);
+        assert_eq!(vs.get_validator(&bob).unwrap().status, ValidatorStatus::Bonding);
+        assert_eq!(vs.get_validator(&charlie).unwrap().status, ValidatorStatus::Bonding);
+        assert_eq!(vs.total_bonded_stake(), MIN_BOND_STAKE * 35);
+
+        // Phase 2: Before epoch boundary, no activation
+        let activated = vs.activate_matured_validators(1023);
+        assert!(activated.is_empty());
+
+        // Phase 3: At epoch boundary (height 1024), all validators activate
+        let activated = vs.activate_matured_validators(1024);
+        assert_eq!(activated.len(), 3);
+        assert_eq!(vs.get_validator(&alice).unwrap().status, ValidatorStatus::Active);
+        assert_eq!(vs.get_validator(&bob).unwrap().status, ValidatorStatus::Active);
+        assert_eq!(vs.get_validator(&charlie).unwrap().status, ValidatorStatus::Active);
+
+        // Phase 4: Block producer selection — deterministic via seed
+        let producer = vs.select_block_producer(0, 42).unwrap();
+        // Bob has 2x the stake of Alice, so Bob should be selected more often
+        // but Bob is not guaranteed — just verify selection works
+        assert!(
+            producer.object_id == alice || producer.object_id == bob || producer.object_id == charlie,
+            "Producer must be one of the bonded validators"
+        );
+
+        // Phase 5: Unbond Alice at height 2000, matures at height 2000 + 1024 = 3024
+        let unbonded = vs.unbond_amount(&alice, MIN_BOND_STAKE * 3, 2000).unwrap();
+        assert_eq!(unbonded, MIN_BOND_STAKE * 3);
+        assert_eq!(vs.unbonding_queue.len(), 1);
+        assert_eq!(vs.unbonding_queue[0].account, alice);
+        assert_eq!(vs.unbonding_queue[0].amount, MIN_BOND_STAKE * 3);
+        assert_eq!(vs.unbonding_queue[0].matures_at, 2000 + EPOCH as u64);
+
+        // Alice still has 7 OPL bonded
+        assert_eq!(vs.get_validator(&alice).unwrap().total_stake(), MIN_BOND_STAKE * 7);
+
+        // Phase 6: Process matured unbonds — nothing at height 3023
+        let matured = vs.process_matured_unbonds(3023);
+        assert!(matured.is_empty());
+
+        // At height 3024, Alice's unbonding entry matures
+        let matured = vs.process_matured_unbonds(3024);
+        assert_eq!(matured.len(), 1);
+        assert_eq!(matured[0].0, alice);
+        assert_eq!(matured[0].1, MIN_BOND_STAKE * 3);
+        assert!(vs.unbonding_queue.is_empty());
+
+        // Phase 7: Charlie double-signs — SLASH!
+        assert_eq!(vs.get_validator(&charlie).unwrap().status, ValidatorStatus::Active);
+        let slashed = vs.slash(&charlie).unwrap();
+        assert_eq!(slashed, MIN_BOND_STAKE * 5);
+        assert_eq!(vs.get_validator(&charlie).unwrap().status, ValidatorStatus::Slashed);
+        assert_eq!(vs.get_validator(&charlie).unwrap().total_stake(), 0);
+
+        // Slashed validator is excluded from selection
+        let active_count = vs.active_validators().len();
+        assert_eq!(active_count, 2); // Only Alice and Bob remain active
+
+        // Total bonded stake excludes slashed validators
+        let bonded = vs.total_bonded_stake();
+        assert_eq!(bonded, MIN_BOND_STAKE * 7 + MIN_BOND_STAKE * 20); // Alice 7 + Bob 20
+    }
 }

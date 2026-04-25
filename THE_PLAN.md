@@ -210,7 +210,9 @@ Logarithmic seniority means older entries earn more per-coin, but the marginal g
 
 ### Block Producer Selection
 
-Weighted random sampling from active validators. Seed is derived from on-chain entropy.
+Weighted random sampling from active validators. The seed is derived from the first 8 bytes of the previous block hash (`Blake3(prev_block_hash)[0..8]` as `u64`), making selection deterministic and verifiable. Any node can recompute the expected producer and reject blocks from the wrong validator.
+
+The block producer is selected in `produce_pos_block()` and verified in `apply_block()`. If the producer doesn't match the expected selection, the block is rejected.
 
 ### Minimum Bond
 
@@ -233,7 +235,20 @@ Withdraws `amount` OPL using **FIFO order** — oldest entries consumed first:
 3. Residuals keep their original `bonded_at_timestamp`
 4. Auto-merge entries with the same `bonded_at_timestamp`
 
-Unbonding stake still earns rewards during the 1,024 block delay.
+Unbonded stake enters the **unbonding queue** — a list of `PendingUnbond` entries with `(account, amount, matures_at)` fields. After `UNBONDING_DELAY_BLOCKS` (1,024 blocks = one epoch), matured entries are automatically credited back to the sender's account by `process_matured_unbonds()` during `apply_block`.
+
+### Validator Activation
+
+Newly bonded validators start in `Bonding` status. They activate to `Active` status once their earliest bond entry has been confirmed for at least one full epoch (1,024 blocks). This is checked every block via `activate_matured_validators()` in `apply_block`. Only `Active` validators are eligible for block producer selection.
+
+### Double-Sign Slashing
+
+If a validator signs two different blocks at the same height, they are slashed:
+- All their bond entries are burned (stake set to 0)
+- Status changes to `Slashed`
+- Slashed stake is removed from circulation, not transferred to any treasury
+- Detection happens in `apply_block` via a `(height, producer) → block_hash` mapping
+- This is the **only** slashing condition — no liveness slashing, no governance
 
 ---
 
