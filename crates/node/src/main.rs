@@ -33,6 +33,7 @@ fn chain_state_to_info(chain: &ChainState) -> ChainInfo {
         total_burned: chain.total_burned,
         circulating_supply: chain.circulating_supply(),
         latest_block_hash: chain.latest_block_hash.to_hex(),
+        state_root: chain.state_root.to_hex(),
         phase: format!("{:?}", chain.phase),
         block_timestamps: chain.block_timestamps.clone(),
         suggested_fee: chain.suggested_fee,
@@ -271,12 +272,11 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
     }
 
     // Optionally start the validator block production loop
-    let mut validator_handle: Option<tokio::task::JoinHandle<()>> = None;
-    if config.validate && node.signing_key.is_some() {
+    let _validator_handle: Option<tokio::task::JoinHandle<()>> = if config.validate && node.signing_key.is_some() {
         let validating_node = node.clone();
         let validating_broadcast = block_broadcast_tx.clone();
         let validating_chain_info = chain_info.clone();
-        validator_handle = Some(tokio::spawn(async move {
+        Some(tokio::spawn(async move {
             tracing::info!(miner_id = %validating_node.miner_id.to_hex(), "Validator block production loop starting");
             loop {
                 // Wait for the target block time before producing
@@ -327,11 +327,13 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
                     }
                 }
             }
-        }));
-        tracing::info!("Validator block production loop active");
+        }))
     } else if config.validate {
         tracing::warn!("--validate requires --key-file to specify a validator key");
-    }
+        None
+    } else {
+        None
+    };
 
     // Drop the remaining sender so block_broadcast_rx ends when all producers are done
     drop(block_broadcast_tx);

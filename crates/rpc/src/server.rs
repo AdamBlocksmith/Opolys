@@ -75,6 +75,8 @@ pub struct ChainInfo {
     pub circulating_supply: u64,
     /// Blake3-256 hash of the most recent block header (hex).
     pub latest_block_hash: String,
+    /// Blake3-256 hash of the state root after the most recent block (hex).
+    pub state_root: String,
     /// Current consensus phase: "ProofOfWork" or "ProofOfStake".
     pub phase: String,
     /// Rolling window of block timestamps for difficulty retargeting.
@@ -373,11 +375,13 @@ async fn handle_get_difficulty(state: &RpcState) -> Result<serde_json::Value, Js
 
 async fn handle_get_validators(state: &RpcState) -> Result<serde_json::Value, JsonRpcError> {
     let validators = state.validators.read().await;
+    let chain = state.chain.read().await;
+    let current_timestamp = chain.block_timestamps.last().copied().unwrap_or(0);
     let validator_list = validators.all_validators();
     let mut result = Vec::new();
     for v in validator_list {
         let total_stake = v.total_stake();
-        let total_weight = v.weight(0); // approximate — would need chain timestamp for exact value
+        let total_weight = v.weight(current_timestamp);
         let entries: Vec<BondEntryResponse> = v.entries.iter().map(|e| BondEntryResponse {
             stake_flakes: e.stake,
             stake_opl: format_flake(e.stake),
@@ -458,7 +462,7 @@ async fn handle_get_mining_job(state: &RpcState) -> Result<serde_json::Value, Js
         version: opolys_core::BLOCK_VERSION,
         height: chain.height + 1,
         previous_hash: chain.latest_block_hash.clone(),
-        state_root: chain.phase.clone(),
+        state_root: chain.state_root.clone(),
         transaction_root,
         difficulty,
         target: u64::MAX / difficulty,
