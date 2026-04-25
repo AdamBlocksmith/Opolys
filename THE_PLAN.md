@@ -538,7 +538,7 @@ Opolys/
 
 ## 21. Test Count
 
-**144 tests passing** across all crates (1 mining integration test `#[ignore]`d for requiring real PoW).
+**139+ tests passing** across all crates (1 mining integration test `#[ignore]`d for requiring real PoW).
 
 ---
 
@@ -623,15 +623,25 @@ entry_weight = entry.stake × (1 + ln(1 + entry.age_years))
 
 ### Stake Coverage
 ```
-stake_coverage = min(1.0, total_bonded / total_issued)
+stake_coverage = min(1.0, bonded_stake / total_issued)
 ```
+First parameter is **bonded stake** from ValidatorSet, NOT total_issued.
+
+### Reward Distribution
+```
+coverage_milli = (bonded_stake × 1000) / total_issued   // integer, no float
+pow_share_amount = block_reward × (1000 - coverage_milli) / 1000
+pos_share_amount = block_reward - pow_share_amount
+```
+PoW share goes to the block producer. PoS share is distributed among active validators proportional to weight.
 
 ### EVO-OMAP PoW Verification
 ```
-target = u64::MAX / difficulty
-valid if: u64(pow_hash[..8]) < target
+target = 2^(64-D) - 1    // D = difficulty (leading zero bits)
+valid if: u64(pow_hash[..8]) <= target
 pow_hash = SHA3-256(state_summary || commitment_hash || memory_commitment)
 ```
+EVO-OMAP difficulty means **leading zero bits** in the SHA3-256 output, NOT a u64 divisor.
 
 ---
 
