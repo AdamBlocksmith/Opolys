@@ -36,7 +36,7 @@ rocksdb = "0.22"
 libp2p = { version = "0.54", features = [
     "tcp", "noise", "yamux", "gossipsub", "kad", "identify",
     "ping", "dns", "macros", "serde", "quic", "rsa", "ecdsa", "ed25519",
-    "secp256k1", "tokio", "request-response", "relay"
+    "secp256k1", "tokio", "request-response", "cbor", "relay"
 ] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -58,3 +58,4 @@ axum = "0.8"
 tower-http = { version = "0.6", features = ["cors"] }
 tempfile = "3"
 rayon = "1.10"
+reqwest = { version = "0.12", features = ["json"] }

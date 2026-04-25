@@ -101,6 +101,23 @@ impl ObjectId {
         ObjectId(Hash::zero())
     }
 
+    /// Parse an ObjectId from a 64-character lowercase hex string.
+    ///
+    /// Returns an error if the string is not exactly 64 hex characters
+    /// or contains invalid hex bytes.
+    pub fn from_hex(hex: &str) -> Result<Self, String> {
+        if hex.len() != 64 {
+            return Err(format!("ObjectId hex must be 64 characters, got {}", hex.len()));
+        }
+        let bytes = hex::decode(hex).map_err(|e| format!("Invalid hex: {}", e))?;
+        if bytes.len() != 32 {
+            return Err(format!("ObjectId must be 32 bytes, got {}", bytes.len()));
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Ok(ObjectId(Hash(arr)))
+    }
+
     /// Returns the ObjectId as a 64-character lowercase hex string.
     pub fn to_hex(&self) -> String {
         self.0.to_hex()

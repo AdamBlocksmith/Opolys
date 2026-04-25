@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[[bin]]
+name = "opl"
+path = "src/main.rs"
+
 [dependencies]
 opolys-core.workspace = true
 opolys-crypto.workspace = true
@@ -19,3 +23,5 @@ hex.workspace = true
 rand.workspace = true
 thiserror.workspace = true
 clap.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
