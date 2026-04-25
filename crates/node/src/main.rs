@@ -19,7 +19,6 @@
 //! Validators earn from block rewards only.
 
 use clap::Parser;
-use opolys_core::ObjectId;
 use opolys_node::{Args, NodeConfig, OpolysNode, ChainState};
 use opolys_rpc::RpcState;
 use opolys_rpc::server::{ChainInfo, BlockSubmission, BlockSubmissionResult};
@@ -54,30 +53,6 @@ async fn main() {
         .init();
 
     // Construct node configuration from CLI arguments
-    let miner_id = if let Some(key_path) = &args.key_file {
-        match std::fs::read(key_path) {
-            Ok(seed_bytes) if seed_bytes.len() == 32 => {
-                let mut seed = [0u8; 32];
-                seed.copy_from_slice(&seed_bytes);
-                let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
-                let verifying_key = signing_key.verifying_key();
-                let id = opolys_crypto::ed25519_public_key_to_object_id(verifying_key.as_bytes());
-                tracing::info!(miner_id = %id.to_hex(), "Loaded miner/validator identity from key file");
-                id
-            }
-            Ok(bytes) => {
-                tracing::error!("Key file must be exactly 32 bytes, got {}", bytes.len());
-                ObjectId(opolys_core::Hash::zero())
-            }
-            Err(e) => {
-                tracing::warn!("Failed to read key file {:?}: {}. Using zero miner_id.", key_path, e);
-                ObjectId(opolys_core::Hash::zero())
-            }
-        }
-    } else {
-        ObjectId(opolys_core::Hash::zero())
-    };
-
     let config = NodeConfig {
         listen_port: args.port,
         rpc_port: args.rpc_port.unwrap_or(args.port + 1),
@@ -87,7 +62,7 @@ async fn main() {
         mine: args.mine,
         no_rpc: args.no_rpc,
         validate: args.validate,
-        miner_id,
+        key_file: args.key_file,
     };
 
     tracing::info!(
@@ -295,6 +270,69 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
         tracing::info!("Mining loop active");
     }
 
+    // Optionally start the validator block production loop
+    let mut validator_handle: Option<tokio::task::JoinHandle<()>> = None;
+    if config.validate && node.signing_key.is_some() {
+        let validating_node = node.clone();
+        let validating_broadcast = block_broadcast_tx.clone();
+        let validating_chain_info = chain_info.clone();
+        validator_handle = Some(tokio::spawn(async move {
+            tracing::info!(miner_id = %validating_node.miner_id.to_hex(), "Validator block production loop starting");
+            loop {
+                // Wait for the target block time before producing
+                tokio::time::sleep(std::time::Duration::from_secs(opolys_core::BLOCK_TARGET_TIME_SECS)).await;
+
+                // Only produce if we're in PoS mode (stake coverage > 0)
+                let chain = validating_node.chain.read().await;
+                let phase = chain.phase.clone();
+                drop(chain);
+
+                if phase != opolys_core::ConsensusPhase::ProofOfStake {
+                    continue;
+                }
+
+                match validating_node.produce_pos_block().await {
+                    Some(block) => {
+                        let height = block.header.height;
+                        let tx_count = block.transactions.len();
+
+                        match validating_node.apply_block(&block).await {
+                            Ok(hash) => {
+                                tracing::info!(
+                                    height,
+                                    tx_count,
+                                    hash = %hash.to_hex(),
+                                    "Validator block produced and applied"
+                                );
+
+                                // Refresh the RPC chain info snapshot
+                                {
+                                    let chain = validating_node.chain.read().await;
+                                    let mut info = validating_chain_info.write().await;
+                                    *info = chain_state_to_info(&chain);
+                                }
+
+                                // Queue block for P2P broadcast (non-blocking)
+                                if let Ok(block_bytes) = borsh::to_vec(&block) {
+                                    let _ = validating_broadcast.try_send(block_bytes);
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!(height, error = %e, "Failed to apply validator block");
+                            }
+                        }
+                    }
+                    None => {
+                        // Not this validator's turn or not an active validator
+                    }
+                }
+            }
+        }));
+        tracing::info!("Validator block production loop active");
+    } else if config.validate {
+        tracing::warn!("--validate requires --key-file to specify a validator key");
+    }
+
     // Drop the remaining sender so block_broadcast_rx ends when all producers are done
     drop(block_broadcast_tx);
 
@@ -380,6 +418,13 @@ async fn handle_network_event(
     match event {
         opolys_networking::OpolysNetworkEvent::GossipBlock { data, source } => {
             tracing::info!(peer = %source, size = data.len(), "Received block via gossip");
+
+            // Reject oversized block data (max 10 MiB)
+            if data.len() > opolys_core::MAX_BLOCK_SIZE_BYTES {
+                tracing::warn!(peer = %source, size = data.len(), "Rejected oversized block from peer");
+                return;
+            }
+
             match borsh::from_slice::<opolys_core::Block>(&data) {
                 Ok(block) => {
                     // Skip blocks we've already applied (height <= current)
@@ -415,8 +460,21 @@ async fn handle_network_event(
         }
         opolys_networking::OpolysNetworkEvent::GossipTransaction { data, source } => {
             tracing::debug!(peer = %source, size = data.len(), "Received transaction via gossip");
+
+            // Reject oversized transaction data (max 100 KiB)
+            if data.len() > opolys_core::TX_MAX_SIZE_BYTES {
+                tracing::warn!(peer = %source, size = data.len(), "Rejected oversized transaction from peer");
+                return;
+            }
+
             match borsh::from_slice::<opolys_core::Transaction>(&data) {
                 Ok(tx) => {
+                    // Basic verification: check tx_id, signature type, and public_key binding
+                    if let Err(e) = opolys_execution::verify_transaction(&tx) {
+                        tracing::warn!(peer = %source, tx_id = %tx.tx_id.to_hex(), error = %e, "Rejected invalid transaction from peer");
+                        return;
+                    }
+
                     let mut mempool = node.mempool.write().await;
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)

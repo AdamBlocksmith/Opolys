@@ -107,10 +107,9 @@ pub struct NodeConfig {
     pub mine: bool,
     pub no_rpc: bool,
     pub validate: bool,
-    /// The miner/validator's on-chain identity (Blake3 hash of their ed25519 public key).
-    /// Defaults to a zero ObjectId if not set. For mining and validating, this
-    /// determines who receives block rewards.
-    pub miner_id: ObjectId,
+    /// Path to the miner/validator key file (32-byte ed25519 seed).
+    /// When provided, the node can sign PoS blocks and receive block rewards.
+    pub key_file: Option<String>,
 }
 
 impl Default for NodeConfig {
@@ -124,7 +123,7 @@ impl Default for NodeConfig {
             mine: false,
             no_rpc: false,
             validate: false,
-            miner_id: ObjectId(Hash::zero()),
+            key_file: None,
         }
     }
 }
@@ -254,12 +253,40 @@ pub struct OpolysNode {
     /// For PoW blocks, this identifies who earns the block reward.
     /// For PoS blocks, this must match an active validator's ObjectId.
     pub miner_id: ObjectId,
+    /// The ed25519 signing key for block production. Set when --key-file is provided.
+    /// Used by produce_pos_block() to sign PoS blocks.
+    pub signing_key: Option<ed25519_dalek::SigningKey>,
 }
 
 impl OpolysNode {
     /// Create a new node, either loading persisted state from disk or
     /// initializing from genesis.
     pub fn new(config: NodeConfig) -> Self {
+        // Load the miner/validator key from the key file (if provided)
+        let (miner_id, signing_key) = if let Some(ref key_path) = config.key_file {
+            match std::fs::read(key_path) {
+                Ok(seed_bytes) if seed_bytes.len() == 32 => {
+                    let mut seed = [0u8; 32];
+                    seed.copy_from_slice(&seed_bytes);
+                    let sk = ed25519_dalek::SigningKey::from_bytes(&seed);
+                    let vk = sk.verifying_key();
+                    let id = opolys_crypto::ed25519_public_key_to_object_id(vk.as_bytes());
+                    tracing::info!(miner_id = %id.to_hex(), "Loaded miner/validator identity from key file");
+                    (id, Some(sk))
+                }
+                Ok(bytes) => {
+                    tracing::error!("Key file must be exactly 32 bytes, got {}", bytes.len());
+                    (ObjectId(Hash::zero()), None)
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to read key file {:?}: {}. Using zero miner_id.", key_path, e);
+                    (ObjectId(Hash::zero()), None)
+                }
+            }
+        } else {
+            (ObjectId(Hash::zero()), None)
+        };
+
         let genesis_config = GenesisConfig::default();
 
         // Try to open the database and load existing state
@@ -315,7 +342,8 @@ impl OpolysNode {
             store,
             config: config.clone(),
             pow_context: Arc::new(RwLock::new(PowContext::new())),
-            miner_id: config.miner_id.clone(),
+            miner_id: miner_id.clone(),
+            signing_key,
         }
     }
 
@@ -393,8 +421,9 @@ impl OpolysNode {
     /// `validator_signature`.
     ///
     /// Returns `Some(Block)` if the node is an eligible validator, or `None`
-    /// if the miner_id is not an active validator.
-    pub async fn produce_pos_block(&self, signing_key: &ed25519_dalek::SigningKey) -> Option<Block> {
+    /// if the miner_id is not an active validator or no signing key is available.
+    pub async fn produce_pos_block(&self) -> Option<Block> {
+        let signing_key = self.signing_key.as_ref()?;
         let chain = self.chain.read().await;
         let validators = self.validators.read().await;
         let mempool = self.mempool.read().await;
@@ -623,7 +652,7 @@ mod tests {
             mine: true,
             no_rpc: true,
             validate: false,
-            miner_id: ObjectId(Hash::zero()),
+            key_file: None,
         };
         (config, dir)
     }
