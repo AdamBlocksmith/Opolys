@@ -518,8 +518,8 @@ Opolys/
 | 7: RPC | **DONE** | JSON-RPC 2.0 with mining endpoints |
 | 8: Node | **DONE** | Full node with mining loop and block application |
 | 9: Networking | **DONE** | P2P gossip/sync/discovery wired to node |
-| 10: Staking | **PLANNED** | `--validate` flag, PoS block production |
-| 11: Security | **PLANNED** | Code audit, fuzz, overflow checks |
+| 10: Staking | **IN PROGRESS** | `--validate` flag, public_key in Account, PoS signing |
+| 11: Security | **IN PROGRESS** | Block validation, tx_id verification, chain sync |
 | 12: Testnet | **PLANNED** | Deploy and test |
 | 13: Mainnet | **PLANNED** | Genesis ceremony and launch |
 
@@ -528,6 +528,50 @@ Opolys/
 ## 21. Test Count
 
 **144 tests passing** across all crates (1 mining integration test `#[ignore]`d for requiring real PoW).
+
+---
+
+## 22. Block & Transaction Validation
+
+### Block Validation (`validate_block`)
+
+Every block applied to the chain must pass these checks:
+
+1. **Version**: Must match `BLOCK_VERSION` (currently 1)
+2. **Height**: Must equal `parent_height + 1`
+3. **Previous hash**: Must match parent's hash (or `Hash::zero()` for genesis)
+4. **Timestamp**: Must be strictly greater than parent timestamp, and within `MAX_FUTURE_BLOCK_TIME_SECS` (5 min) of wall clock
+5. **Difficulty**: Must match the expected next difficulty from retargeting
+6. **Transaction count**: Must not exceed `MAX_TRANSACTIONS_PER_BLOCK` (10,000)
+7. **Block size**: Must not exceed `MAX_BLOCK_SIZE_BYTES` (10 MiB)
+8. **Transaction root**: Must match `compute_transaction_root(block.transactions)`
+9. **No duplicate transactions**: Each `tx_id` must be unique within the block
+10. **Transaction data size**: Each `tx.data` must not exceed `MAX_TX_DATA_SIZE_BYTES` (1 KiB)
+11. **Fee minimum**: Each transaction fee must be at least `MIN_FEE` (1 Flake)
+12. **PoW proof**: For PoW blocks, EVO-OMAP proof must satisfy the difficulty target
+
+### Transaction Verification (`verify_transaction`)
+
+1. **tx_id integrity**: Recomputed from (sender, action, fee, nonce) must match declared `tx_id`
+2. **signature_type**: Must be `SIGNATURE_TYPE_ED25519` (0)
+3. **ed25519 signature**: Planned — requires public key storage in Account (in progress)
+
+### Chain Sync
+
+- On peer connection, node requests blocks from `current_height + 1` onwards
+- Sync responses are deserialized and applied sequentially
+- Block sync requests served from RocksDB storage via `ResponseChannel`
+
+---
+
+## 23. New Constants
+
+| Constant | Value | Description |
+|---|---|---|
+| `MAX_TRANSACTIONS_PER_BLOCK` | 10,000 | Max transactions per block |
+| `MAX_BLOCK_SIZE_BYTES` | 10,485,760 | 10 MiB max block size |
+| `MAX_TX_DATA_SIZE_BYTES` | 1,024 | 1 KiB max transaction data field |
+| `MAX_FUTURE_BLOCK_TIME_SECS` | 300 | 5 min max future block time skew |
 
 ---
 
