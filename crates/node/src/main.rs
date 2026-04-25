@@ -22,7 +22,7 @@ use clap::Parser;
 use opolys_node::{Args, NodeConfig, OpolysNode, ChainState};
 use opolys_rpc::RpcState;
 use opolys_rpc::server::{ChainInfo, BlockSubmission, BlockSubmissionResult};
-use opolys_networking::{OpolysNetwork, NetworkConfig, SyncResponse};
+use opolys_networking::{OpolysNetwork, NetworkConfig, SyncResponse, SyncRequest, MAX_SYNC_BLOCKS};
 
 /// Convert live `ChainState` into an RPC-friendly `ChainInfo` snapshot.
 fn chain_state_to_info(chain: &ChainState) -> ChainInfo {
@@ -61,6 +61,7 @@ async fn main() {
         log_level: args.log_level,
         mine: args.mine,
         no_rpc: args.no_rpc,
+        validate: args.validate,
     };
 
     tracing::info!(
@@ -68,6 +69,7 @@ async fn main() {
         rpc_port = config.rpc_port,
         data_dir = %config.data_dir,
         mining = config.mine,
+        validating = config.validate,
         rpc = !config.no_rpc,
         "Starting Opolys node"
     );
@@ -122,6 +124,9 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
 
     if !config.mine {
         tracing::info!("Mining: disabled (run with --mine to enable block production)");
+    }
+    if config.validate {
+        tracing::info!("Validation: enabled (producing PoS blocks when validator is active)");
     }
     if config.no_rpc {
         tracing::info!("RPC: disabled (run without --no-rpc to enable)");
@@ -409,6 +414,16 @@ async fn handle_network_event(
         }
         opolys_networking::OpolysNetworkEvent::PeerConnected { peer_id } => {
             tracing::info!(peer = %peer_id, "Peer connected");
+            // When a new peer connects, request blocks they may have that we don't.
+            // We request from our current_height + 1 onwards.
+            let current_height = node.chain.read().await.current_height;
+            let request = SyncRequest {
+                start_height: current_height + 1,
+                count: MAX_SYNC_BLOCKS,
+            };
+            if let Err(e) = net.request_blocks(peer_id, request).await {
+                tracing::debug!(peer = %peer_id, error = %e, "Failed to request sync blocks from peer");
+            }
         }
         opolys_networking::OpolysNetworkEvent::PeerDisconnected { peer_id } => {
             tracing::info!(peer = %peer_id, "Peer disconnected");

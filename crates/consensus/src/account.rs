@@ -15,7 +15,13 @@ use borsh::{BorshSerialize, BorshDeserialize};
 /// A single account in the Opolys ledger.
 ///
 /// Every account has a balance (in flakes), a nonce (for replay protection),
-/// and is identified by its ObjectId (Blake3 hash of the public key).
+/// an optional ed25519 public key (for signature verification), and is
+/// identified by its ObjectId (Blake3 hash of the public key).
+///
+/// The public key is `None` for genesis/pre-funded accounts and `Some` for
+/// accounts created by transactions (Bond, Transfer). Signature verification
+/// requires the public key to derive the expected ObjectId and verify the
+/// ed25519 signature.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct Account {
     /// Blake3-based unique identifier derived from the account's public key.
@@ -24,15 +30,39 @@ pub struct Account {
     pub balance: FlakeAmount,
     /// Monotonically-increasing nonce used to prevent transaction replay.
     pub nonce: u64,
+    /// Ed25519 public key (32 bytes) for signature verification.
+    /// Stored alongside the account so that transaction signatures can be
+    /// verified without a separate key registry.
+    /// If `None`, the account was created by genesis or pre-funding and
+    /// cannot send transactions until a public key is registered.
+    pub public_key: Option<Vec<u8>>,
 }
 
 impl Account {
-    /// Create a new account with zero balance and zero nonce.
+    /// Create a new account with zero balance, zero nonce, and no public key.
+    ///
+    /// Accounts created by genesis or pre-funding may not have a public key
+    /// registered yet. To register a public key, use `set_public_key()`.
     pub fn new(object_id: ObjectId) -> Self {
         Account {
             object_id,
             balance: 0,
             nonce: 0,
+            public_key: None,
+        }
+    }
+
+    /// Create a new account with a public key.
+    ///
+    /// The `object_id` must be `Blake3(public_key)` — callers should verify
+    /// this invariant before calling. The public key enables signature
+    /// verification for transactions from this account.
+    pub fn with_public_key(object_id: ObjectId, public_key: Vec<u8>) -> Self {
+        Account {
+            object_id,
+            balance: 0,
+            nonce: 0,
+            public_key: Some(public_key),
         }
     }
 

@@ -76,6 +76,14 @@ pub struct Args {
     /// without network exposure).
     #[arg(long)]
     pub no_rpc: bool,
+
+    /// Enable validator block production (default: disabled).
+    ///
+    /// When enabled, the node will produce PoS blocks when it is an active
+    /// validator with bonded stake. Requires a wallet key to sign blocks.
+    /// This flag is separate from --mine (both can be active simultaneously).
+    #[arg(long)]
+    pub validate: bool,
 }
 
 /// Configuration for an Opolys node, derived from CLI arguments or defaults.
@@ -88,6 +96,7 @@ pub struct NodeConfig {
     pub log_level: String,
     pub mine: bool,
     pub no_rpc: bool,
+    pub validate: bool,
 }
 
 impl Default for NodeConfig {
@@ -100,6 +109,7 @@ impl Default for NodeConfig {
             log_level: "info".to_string(),
             mine: false,
             no_rpc: false,
+            validate: false,
         }
     }
 }
@@ -497,6 +507,7 @@ mod tests {
             log_level: "warn".to_string(),
             mine: true,
             no_rpc: true,
+            validate: false,
         };
         (config, dir)
     }
