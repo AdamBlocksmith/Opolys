@@ -316,7 +316,7 @@ impl SwarmTask {
             tracing::error!("Failed to subscribe to block topic: {}", e);
         }
 
-        // Start listening on QUIC
+        // Start listening on QUIC (primary transport for P2P)
         let listen_addr = libp2p::Multiaddr::from(libp2p::multiaddr::Protocol::Ip4(
             std::net::Ipv4Addr::UNSPECIFIED,
         ))
@@ -324,18 +324,8 @@ impl SwarmTask {
         .with(libp2p::multiaddr::Protocol::QuicV1);
 
         match self.swarm.listen_on(listen_addr) {
-            Ok(_) => tracing::info!("Listening on UDP port {}", config.listen_port),
+            Ok(_) => tracing::info!("Listening on UDP/QUIC port {}", config.listen_port),
             Err(e) => tracing::error!("Failed to listen on port {}: {}", config.listen_port, e),
-        }
-
-        // Also listen on TCP
-        let tcp_addr = libp2p::Multiaddr::from(libp2p::multiaddr::Protocol::Ip4(
-            std::net::Ipv4Addr::UNSPECIFIED,
-        ))
-        .with(libp2p::multiaddr::Protocol::Tcp(config.listen_port));
-        match self.swarm.listen_on(tcp_addr) {
-            Ok(_) => tracing::info!("Listening on TCP port {}", config.listen_port),
-            Err(e) => tracing::warn!("Failed to listen on TCP port {}: {}", config.listen_port, e),
         }
 
         // Dial bootstrap peers
