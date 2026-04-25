@@ -53,11 +53,9 @@ OPL uses 6 decimal places, named after real gold weight units:
 | Unit | Flakes | OPL | Example |
 |---|---|---|---|
 | **OPL** | 1,000,000 | 1 | `1.000000 OPL` |
-| **Pennyweight (dwt)** | 10,000 | 0.01 | `0.010000 OPL` |
-| **Grain (gr)** | 100 | 0.0001 | `0.000100 OPL` |
 | **Flake** | 1 | 0.000001 | `0.000001 OPL` |
 
-All on-chain arithmetic uses `FlakeAmount` (u64). IEEE 754 f64 is used in `ln_milli` and `compute_vein_yield` with deterministic rounding for consensus safety.
+There is only one sub-unit: the Flake. No Pennyweight or Grain. All on-chain arithmetic uses `FlakeAmount` (u64).
 
 ---
 

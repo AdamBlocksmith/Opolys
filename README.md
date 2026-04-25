@@ -72,11 +72,9 @@ OPL uses 6 decimal places, named after real gold weight units:
 | Unit | Flakes | OPL | Example |
 |---|---|---|---|
 | **OPL** | 1,000,000 | 1 | `1.000000 OPL` |
-| **Pennyweight (dwt)** | 10,000 | 0.01 | `0.010000 OPL` |
-| **Grain (gr)** | 100 | 0.0001 | `0.000100 OPL` |
 | **Flake** | 1 | 0.000001 | `0.000001 OPL` |
 
-The smallest on-chain unit is the **Flake** (1/1,000,000 OPL). All internal arithmetic uses `FlakeAmount` (u64) — no floating point anywhere.
+The only sub-unit is the **Flake** (1/1,000,000 OPL). All internal arithmetic uses `FlakeAmount` (u64) — no floating point anywhere.
 
 ---
 

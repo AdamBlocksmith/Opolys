@@ -334,20 +334,6 @@ pub fn flake_to_opl(flakes: FlakeAmount) -> u64 {
     flakes / crate::FLAKES_PER_OPL
 }
 
-/// Converts Flakes to Pennyweights (dwt), the second-smallest display unit.
-///
-/// 1 Pennyweight = 10,000 Flakes = 0.01 OPL.
-pub fn flakes_to_pennyweight(flakes: FlakeAmount) -> u64 {
-    flakes / (crate::FLAKES_PER_OPL / crate::PENNYWEIGHTS_PER_OPL)
-}
-
-/// Converts Flakes to Grains (gr), the third-smallest display unit.
-///
-/// 1 Grain = 100 Flakes = 0.0001 OPL.
-pub fn flakes_to_grain(flakes: FlakeAmount) -> u64 {
-    flakes / (crate::FLAKES_PER_OPL / crate::GRAINS_PER_OPL)
-}
-
 /// Formats a Flake amount as a human-readable string with 6 decimal places.
 ///
 /// # Examples
@@ -367,7 +353,7 @@ pub fn format_flake_as_opl(flakes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{FLAKES_PER_OPL, GRAINS_PER_OPL, PENNYWEIGHTS_PER_OPL};
+    use crate::FLAKES_PER_OPL;
 
     #[test]
     fn hash_zero_is_deterministic() {
@@ -382,22 +368,6 @@ mod tests {
         assert_eq!(opl_to_flake(1), 1_000_000);
         assert_eq!(flake_to_opl(opl_to_flake(1)), 1);
         assert_eq!(opl_to_flake(0), 0);
-    }
-
-    #[test]
-    fn pennyweight_conversion() {
-        assert_eq!(PENNYWEIGHTS_PER_OPL, 100);
-        // 1 OPL = 100 pennyweight, so 1,000,000 flakes / 10,000 flakes per pennyweight = 100
-        assert_eq!(flakes_to_pennyweight(FLAKES_PER_OPL), 100);
-        assert_eq!(flakes_to_pennyweight(10_000), 1);
-    }
-
-    #[test]
-    fn grain_conversion() {
-        assert_eq!(GRAINS_PER_OPL, 10_000);
-        // 1 OPL = 10,000 grains, so 1,000,000 flakes / 100 flakes per grain = 10,000
-        assert_eq!(flakes_to_grain(FLAKES_PER_OPL), 10_000);
-        assert_eq!(flakes_to_grain(100), 1);
     }
 
     #[test]

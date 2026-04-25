@@ -13,15 +13,13 @@
 //! | Total above-ground gold | 219,891 tonnes | WGC, end-2025 |
 //! | Annual gold production | 3,630 tonnes | USGS/WGC 2024-2025 avg |
 //! | Annual production in troy oz | ~116,707,041 | 3,630 × 32,150.7 |
-//! | Blocks per year | 262,980 | 365.25 × 24 × 60 × 60 ÷ 120 |
+//! | Blocks per year | 374,267 | 365.25 × 86,400 ÷ 84.375 |
 //! | **BASE_REWARD** | **440 OPL** | floor(116,707,041 ÷ 262,980) |
 //!
-//! # Currency Units (6 decimal places, gold-themed)
+//! # Currency Units (6 decimal places)
 //!
 //! - **OPL** — whole coin (1)
-//! - **Pennyweight (dwt)** — 0.01 OPL (100 per OPL)
-//! - **Grain (gr)** — 0.0001 OPL (10,000 per OPL)
-//! - **Flake** — 0.000001 OPL (1,000,000 per OPL) — smallest unit
+//! - **Flake** — 0.000001 OPL (1,000,000 per OPL) — the smallest and only sub-unit
 //!
 //! All on-chain amounts are in Flakes (u64). No floating-point arithmetic is used
 //! anywhere in consensus logic.
@@ -39,18 +37,12 @@ pub const CURRENCY_SMALLEST_UNIT: &str = "Flake";
 
 /// Number of Flakes in 1 OPL. This is the fundamental unit ratio:
 /// 1 OPL = 1,000,000 Flakes (6 decimal places).
+///
+/// There is only one sub-unit: the Flake. No Pennyweight or Grain.
+/// Display formatting uses 6 decimal places: 1.000000 OPL = 1,000,000 Flakes.
 pub const FLAKES_PER_OPL: u64 = 1_000_000;
 
-/// Number of Pennyweights in 1 OPL. Named after the pennyweight (dwt),
-/// a traditional gold measurement unit equal to 1/20 troy ounce.
-pub const PENNYWEIGHTS_PER_OPL: u64 = 100;
-
-/// Number of Grains in 1 OPL. Named after the grain (gr),
-/// a traditional gold measurement unit equal to 1/480 troy ounce.
-/// 1 Grain = 100 Flakes.
-pub const GRAINS_PER_OPL: u64 = 10_000;
-
-/// Decimal places for OPL display formatting. Always 6 (microsats).
+/// Decimal places for OPL display formatting. Always 6 (flakes).
 pub const DECIMAL_PLACES: u32 = 6;
 
 // ─── Block Rewards ───────────────────────────────────────────────────────────
@@ -229,26 +221,22 @@ mod tests {
 
     #[test]
     fn constants_are_consistent() {
-        assert_eq!(PENNYWEIGHTS_PER_OPL, 100);
-        assert_eq!(GRAINS_PER_OPL, 10_000);
         assert_eq!(FLAKES_PER_OPL, 1_000_000);
         assert_eq!(DECIMAL_PLACES, 6);
-        assert_eq!(FLAKES_PER_OPL / PENNYWEIGHTS_PER_OPL, 10_000);
-        assert_eq!(FLAKES_PER_OPL / GRAINS_PER_OPL, 100);
     }
 
     #[test]
-    fn base_reward_gold_derivation() {
-        let annual_production_tonnes: u64 = 3_630;
-        let troy_oz_per_tonne: f64 = 32_150.7;
-        let blocks_per_year: f64 = 365.25 * 24.0 * 60.0 * 60.0 / 120.0;
-        let annual_oz = annual_production_tonnes as f64 * troy_oz_per_tonne;
-        let opl_per_block = annual_oz / blocks_per_year;
-        assert!(opl_per_block > 439.0 && opl_per_block < 445.0,
-            "Gold derivation: {} OPL/block should be ~440", opl_per_block);
+    fn base_reward_is_440_opl() {
         assert_eq!(BASE_REWARD, 440 * FLAKES_PER_OPL);
         let base_reward_opl = BASE_REWARD / FLAKES_PER_OPL;
         assert_eq!(base_reward_opl, 440);
+    }
+
+    #[test]
+    fn block_target_time_produces_24h_epochs() {
+        // 1,024 blocks × 84,375 ms = 86,400,000 ms = 86,400 s = 24 hours exactly
+        let epoch_ms = EPOCH * BLOCK_TARGET_TIME_MS;
+        assert_eq!(epoch_ms, 86_400_000);
     }
 
     #[test]
