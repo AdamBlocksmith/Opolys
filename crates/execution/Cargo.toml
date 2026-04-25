@@ -11,3 +11,6 @@ opolys-crypto.workspace = true
 borsh.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+ed25519-dalek.workspace = true

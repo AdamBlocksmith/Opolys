@@ -117,7 +117,7 @@ impl TransactionDispatcher {
             return ApplyResult::err(&format!("Sender account not found: {}", sender.to_hex()));
         }
 
-        match &tx.action {
+        let result = match &tx.action {
             TransactionAction::Transfer { recipient, amount } => {
                 Self::apply_transfer(tx, sender, recipient, *amount, accounts)
             }
@@ -127,7 +127,19 @@ impl TransactionDispatcher {
             TransactionAction::ValidatorUnbond { amount } => {
                 Self::apply_unbond(tx, sender, *amount, accounts, validators)
             }
+        };
+
+        // After a successful transaction, store the sender's public key in
+        // their account. The first real transaction from a pre-funded account
+        // registers the key; subsequent transactions update it. This enables
+        // future signature verification without a separate key registry.
+        if result.success && !tx.public_key.is_empty() {
+            if let Some(account) = accounts.get_account_mut(sender) {
+                account.public_key = Some(tx.public_key.clone());
+            }
         }
+
+        result
     }
 
     /// Transfer OPL from sender to recipient.
@@ -660,12 +672,128 @@ mod tests {
         assert!(validate_transaction_basic(&tx, 50, 0).is_err());
     }
 
-    #[test]
+    #[cfg(test)]
     fn validate_transaction_basic_bond() {
         let alice = hash_to_object_id(b"alice");
         let tx = make_bond(&alice, MIN_BOND_STAKE, opl_to_flake(1), 0);
         // Total cost = MIN_BOND_STAKE + 1 OPL fee
         assert!(validate_transaction_basic(&tx, MIN_BOND_STAKE + opl_to_flake(1), 0).is_ok());
         assert!(validate_transaction_basic(&tx, MIN_BOND_STAKE, 0).is_err());
+    }
+
+    /// Bond transaction should store the sender's public key in their account.
+    #[test]
+    fn bond_stores_public_key_in_account() {
+        use ed25519_dalek::{SigningKey, Signer};
+        let mut accounts = AccountStore::new();
+        let mut validators = ValidatorSet::new();
+
+        // Generate a real ed25519 keypair so Blake3(pk) == sender
+        let seed = [42u8; 32];
+        let signing_key = SigningKey::from_bytes(&seed);
+        let verifying_key = signing_key.verifying_key();
+        let pk_bytes = verifying_key.as_bytes().to_vec();
+        let alice = opolys_crypto::ed25519_public_key_to_object_id(verifying_key.as_bytes());
+
+        accounts.create_account(alice.clone()).unwrap();
+        accounts.credit(&alice, opl_to_flake(200)).unwrap();
+
+        // Build and sign a bond transaction
+        let action = TransactionAction::ValidatorBond { amount: MIN_BOND_STAKE };
+        let tx_id = compute_tx_id(&alice, &action, opl_to_flake(1), 0);
+        let unsigned_data = borsh::to_vec(&(alice.clone(), &action, opl_to_flake(1), 0u64)).unwrap();
+        let signature = signing_key.sign(&unsigned_data).to_bytes().to_vec();
+
+        let tx = Transaction {
+            tx_id,
+            sender: alice.clone(),
+            action,
+            fee: opl_to_flake(1),
+            signature,
+            signature_type: SIGNATURE_TYPE_ED25519,
+            nonce: 0,
+            data: vec![],
+            public_key: pk_bytes.clone(),
+        };
+        let result = TransactionDispatcher::apply_transaction(
+            &tx, &mut accounts, &mut validators, 1, 100,
+        );
+        assert!(result.success, "Bond should succeed: {:?}", result.error);
+
+        // Verify the public key was stored in the account
+        let account = accounts.get_account(&alice).unwrap();
+        assert!(account.public_key.is_some(), "Public key should be stored after bond");
+        assert_eq!(account.public_key.as_ref().unwrap(), &pk_bytes);
+    }
+
+    /// Transfer transaction should store the sender's public key in their account.
+    #[test]
+    fn transfer_stores_public_key_in_account() {
+        use ed25519_dalek::{SigningKey, Signer};
+        let mut accounts = AccountStore::new();
+        let mut validators = ValidatorSet::new();
+        let bob = hash_to_object_id(b"bob");
+
+        // Generate a real ed25519 keypair so Blake3(pk) == sender
+        let seed = [7u8; 32];
+        let signing_key = SigningKey::from_bytes(&seed);
+        let verifying_key = signing_key.verifying_key();
+        let pk_bytes = verifying_key.as_bytes().to_vec();
+        let alice = opolys_crypto::ed25519_public_key_to_object_id(verifying_key.as_bytes());
+
+        accounts.create_account(alice.clone()).unwrap();
+        accounts.credit(&alice, opl_to_flake(1000)).unwrap();
+
+        // Build and sign a transfer transaction
+        let action = TransactionAction::Transfer {
+            recipient: bob.clone(),
+            amount: opl_to_flake(10),
+        };
+        let tx_id = compute_tx_id(&alice, &action, opl_to_flake(1), 0);
+        let unsigned_data = borsh::to_vec(&(alice.clone(), &action, opl_to_flake(1), 0u64)).unwrap();
+        let signature = signing_key.sign(&unsigned_data).to_bytes().to_vec();
+
+        let tx = Transaction {
+            tx_id,
+            sender: alice.clone(),
+            action,
+            fee: opl_to_flake(1),
+            signature,
+            signature_type: SIGNATURE_TYPE_ED25519,
+            nonce: 0,
+            data: vec![],
+            public_key: pk_bytes.clone(),
+        };
+        let result = TransactionDispatcher::apply_transaction(
+            &tx, &mut accounts, &mut validators, 1, 100,
+        );
+        assert!(result.success, "Transfer should succeed: {:?}", result.error);
+
+        let account = accounts.get_account(&alice).unwrap();
+        assert!(account.public_key.is_some(), "Public key should be stored after transfer");
+        assert_eq!(account.public_key.as_ref().unwrap(), &pk_bytes);
+    }
+
+    /// Empty public_key (genesis/test transactions) should NOT update account's stored key.
+    #[test]
+    fn empty_public_key_does_not_update_account() {
+        let mut accounts = AccountStore::new();
+        let mut validators = ValidatorSet::new();
+        let alice = hash_to_object_id(b"alice");
+        let bob = hash_to_object_id(b"bob");
+
+        accounts.create_account(alice.clone()).unwrap();
+        accounts.credit(&alice, opl_to_flake(1000)).unwrap();
+
+        // Transfer with empty public_key (test/genesis mode)
+        let tx = make_transfer(&alice, &bob, opl_to_flake(10), opl_to_flake(1), 0);
+        let result = TransactionDispatcher::apply_transaction(
+            &tx, &mut accounts, &mut validators, 1, 100,
+        );
+        assert!(result.success, "Transfer should succeed: {:?}", result.error);
+
+        // Account should NOT have a public key stored
+        let account = accounts.get_account(&alice).unwrap();
+        assert!(account.public_key.is_none(), "Empty public_key should not be stored");
     }
 }
