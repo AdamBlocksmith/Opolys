@@ -441,6 +441,12 @@ async fn handle_network_event(
                     match node.apply_block(&block).await {
                         Ok(hash) => {
                             tracing::info!(height = block.header.height, hash = %hash.to_hex(), "P2P block applied");
+                            // Re-broadcast the block to peers
+                            if let Ok(block_data) = borsh::to_vec(&block) {
+                                if let Err(e) = net.broadcast_block(block_data).await {
+                                    tracing::debug!("Failed to re-broadcast block: {}", e);
+                                }
+                            }
                             // Refresh chain info
                             {
                                 let chain = node.chain.read().await;
@@ -475,20 +481,27 @@ async fn handle_network_event(
                         return;
                     }
 
-                    let mut mempool = node.mempool.write().await;
+                    let tx_data_for_rebroadcast = data.clone();
+                    let priority = tx.fee as f64;
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_secs();
-                    // Priority score = fee as f64 (higher fee = higher priority)
-                    let priority = tx.fee as f64;
-                    match mempool.add_transaction(tx, priority, now) {
-                        Ok(()) => {
-                            tracing::debug!("Added gossiped transaction to mempool");
+                    {
+                        let mut mempool = node.mempool.write().await;
+                        match mempool.add_transaction(tx, priority, now) {
+                            Ok(()) => {
+                                tracing::debug!("Added gossiped transaction to mempool");
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "Failed to add gossiped transaction to mempool");
+                                return;
+                            }
                         }
-                        Err(e) => {
-                            tracing::warn!(error = %e, "Failed to add gossiped transaction to mempool");
-                        }
+                    }
+                    // Re-broadcast the transaction to other peers (outside mempool lock)
+                    if let Err(e) = net.broadcast_transaction(tx_data_for_rebroadcast).await {
+                        tracing::debug!("Failed to re-broadcast transaction: {}", e);
                     }
                 }
                 Err(e) => {

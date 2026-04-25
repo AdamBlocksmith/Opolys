@@ -33,6 +33,7 @@ use opolys_consensus::emission::compute_suggested_fee;
 use opolys_consensus::pow;
 use opolys_execution::TransactionDispatcher;
 use opolys_storage::BlockchainStore;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use clap::Parser;
@@ -155,6 +156,10 @@ pub struct ChainState {
     /// Suggested fee for the next block, computed via EMA of previous block's fees.
     /// Starts at MIN_FEE (1 Flake) and adjusts based on network demand.
     pub suggested_fee: FlakeAmount,
+    /// Double-sign detection: tracks which block hash each validator signed at
+    /// each height. Key is (height, producer ObjectId hex) → block hash.
+    /// If a validator signs a different block at the same height, they are slashed.
+    pub producer_signatures: HashMap<(u64, String), Hash>,
 }
 
 impl ChainState {
@@ -174,6 +179,7 @@ impl ChainState {
             state_root: genesis.header.state_root.clone(),
             phase: ConsensusPhase::ProofOfWork,
             suggested_fee: MIN_FEE,
+            producer_signatures: HashMap::new(),
         }
     }
 
@@ -194,6 +200,7 @@ pub fn from_persisted(p: &opolys_storage::PersistedChainState) -> Self {
             state_root: Hash::from_bytes(p.state_root),
             phase,
             suggested_fee: p.suggested_fee,
+            producer_signatures: HashMap::new(),
         }
     }
 
@@ -626,6 +633,33 @@ impl OpolysNode {
                         block.header.producer.to_hex()
                     ));
                 }
+            }
+        }
+
+        // Detect double-signing: if a validator signed a different block at
+        // the same height, slash them. This is the only slashing condition.
+        if block.header.validator_signature.is_some() && !block.header.producer.0.is_zero() {
+            let block_hash = compute_block_hash(&block.header);
+            let key = (block.header.height, block.header.producer.to_hex());
+            if let Some(previous_hash) = chain.producer_signatures.get(&key) {
+                if *previous_hash != block_hash {
+                    // Double-sign detected! Slash the validator.
+                    tracing::warn!(
+                        producer = %block.header.producer.to_hex(),
+                        height = block.header.height,
+                        "Double-sign detected! Slashing validator"
+                    );
+                    if let Ok(slashed_amount) = validators.slash(&block.header.producer) {
+                        chain.total_burned = chain.total_burned.saturating_add(slashed_amount);
+                        tracing::info!(
+                            producer = %block.header.producer.to_hex(),
+                            amount = slashed_amount,
+                            "Validator slashed for double-signing"
+                        );
+                    }
+                }
+            } else {
+                chain.producer_signatures.insert(key, block_hash);
             }
         }
 
