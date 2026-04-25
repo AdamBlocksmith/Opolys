@@ -58,6 +58,10 @@ pub enum OpolysError {
     #[error("Validator not bonded")]
     ValidatorNotBonded,
 
+    /// The transaction fee is below the minimum required.
+    #[error("Invalid params: {0}")]
+    InvalidParams(String),
+
     /// Generic transaction validation failure (e.g., malformed data, wrong action).
     #[error("Invalid transaction: {0}")]
     InvalidTransaction(String),

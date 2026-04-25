@@ -11,9 +11,12 @@
 //! - Older entries earn proportionally more per-coin
 //! - The marginal gain diminishes logarithmically, preventing permanent dominance
 //!
-//! Validators can hold multiple bond entries and unbond them individually by
-//! `bond_id`. Pools are a market innovation — the protocol provides per-entry
-//! bonds, community builds pooling off-chain.
+//! **Unbonding is FIFO** — when a validator unbonds, the oldest entries are
+//! consumed first. If the unbond amount exceeds an entry's stake, that entry
+//! is fully consumed and the remainder comes from the next oldest. Split
+//! entries keep their original `bonded_at_timestamp` for weight calculation.
+//! The 1 OPL minimum only applies to new bond entries, not to residuals from
+//! FIFO splits.
 //!
 //! **Slashing is narrowly scoped to double-signing only.** No governance
 //! body can slash for other reasons. A slashed validator's entire stake across
@@ -32,13 +35,11 @@ use std::collections::HashMap;
 /// A single bond entry within a validator's stake.
 ///
 /// Each entry has its own stake amount, bonding timestamp, and seniority clock.
-/// Validators can hold multiple entries (top-ups), and unbond them individually
-/// by `bond_id`. The `bond_id` is a per-validator auto-incrementing counter
-/// that uniquely identifies each entry.
+/// Entries are consumed in FIFO order during unbonding — oldest first.
+/// Split entries retain their original `bonded_at_timestamp` so they
+/// continue earning seniority weight as if they had never been split.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize, Serialize, Deserialize)]
 pub struct BondEntry {
-    /// Unique identifier for this entry, auto-incremented per validator.
-    pub bond_id: u64,
     /// Amount of OPL (in flakes) locked in this entry.
     pub stake: FlakeAmount,
     /// Block height at which this entry was bonded.
@@ -49,23 +50,29 @@ pub struct BondEntry {
 }
 
 impl BondEntry {
-    /// Compute this entry's seniority in years based on the time elapsed
-    /// since bonding. Returns 0.0 if `current_timestamp` is at or before the
-    /// bonding timestamp.
-    pub fn age_years(&self, current_timestamp: u64) -> f64 {
+    /// Compute this entry's seniority in milli-years (× 1000) based on the
+    /// time elapsed since bonding. Returns 0 if `current_timestamp` is at or
+    /// before the bonding timestamp.
+    ///
+    /// Returns milli-years (not fractional years) to maintain integer-only
+    /// arithmetic throughout consensus code.
+    pub fn age_years_milli(&self, current_timestamp: u64) -> u64 {
         if current_timestamp <= self.bonded_at_timestamp {
-            return 0.0;
+            return 0;
         }
         let age_secs = current_timestamp - self.bonded_at_timestamp;
-        age_secs as f64 / (365.25 * 24.0 * 3600.0)
+        // Convert seconds to milli-years: age_secs × 1000 / (365.25 × 86400)
+        // Using integer arithmetic: age_secs × 1000 / 31_557_600
+        (age_secs as u128 * 1000 / 31_557_600) as u64
     }
 
     /// Compute this entry's weight: `stake × (1 + ln(1 + age_years))`.
     ///
+    /// Uses integer-only arithmetic via `ln_milli` in the emission module.
     /// Older entries earn a logarithmic seniority bonus that diminishes over
     /// time, preventing permanent dominance by early stakers.
     pub fn weight(&self, current_timestamp: u64) -> FlakeAmount {
-        crate::emission::compute_validator_weight(self.stake, self.age_years(current_timestamp))
+        crate::emission::compute_validator_weight(self.stake, self.age_years_milli(current_timestamp))
     }
 }
 
@@ -82,14 +89,13 @@ pub struct ValidatorInfo {
     /// The validator's on-chain identity (Blake3 hash of public key).
     pub object_id: ObjectId,
     /// The validator's bond entries, each with its own stake and seniority.
+    /// Entries are sorted by `bonded_at_timestamp` (FIFO order).
     pub entries: Vec<BondEntry>,
     /// Current lifecycle status: Bonding → Active → (Slashed | Unbonded).
     pub status: ValidatorStatus,
     /// Height of the most recent block this validator signed, updated on
     /// each signature to track liveness.
     pub last_signed_height: u64,
-    /// Auto-incrementing counter for the next bond entry's ID.
-    next_bond_id: u64,
 }
 
 impl ValidatorInfo {
@@ -98,14 +104,12 @@ impl ValidatorInfo {
         ValidatorInfo {
             object_id,
             entries: vec![BondEntry {
-                bond_id: 0,
                 stake,
                 bonded_at_height: height,
                 bonded_at_timestamp: timestamp,
             }],
             status: ValidatorStatus::Bonding,
             last_signed_height: 0,
-            next_bond_id: 1,
         }
     }
 
@@ -124,29 +128,59 @@ impl ValidatorInfo {
 
     /// Add a new bond entry (top-up) to this validator.
     ///
-    /// Each entry must meet the `MIN_BOND_STAKE` minimum. The entry gets
-    /// its own `bond_id` and starts with zero seniority.
+    /// Each new entry must meet the `MIN_BOND_STAKE` minimum (1 OPL).
+    /// The entry gets its own seniority clock starting from zero.
+    /// If an entry with the same `bonded_at_timestamp` already exists,
+    /// stakes are merged (auto-merge) to reduce entry count.
     fn add_entry(&mut self, stake: FlakeAmount, height: u64, timestamp: u64) {
-        let bond_id = self.next_bond_id;
-        self.next_bond_id += 1;
-        self.entries.push(BondEntry {
-            bond_id,
+        // Auto-merge: if an entry with the same timestamp exists, combine stakes
+        if let Some(existing) = self.entries.iter_mut().find(|e| e.bonded_at_timestamp == timestamp) {
+            existing.stake = existing.stake.saturating_add(stake);
+            return;
+        }
+        // Otherwise, insert in sorted order by timestamp (FIFO)
+        let entry = BondEntry {
             stake,
             bonded_at_height: height,
             bonded_at_timestamp: timestamp,
-        });
+        };
+        let pos = self.entries.iter().position(|e| e.bonded_at_timestamp > timestamp).unwrap_or(self.entries.len());
+        self.entries.insert(pos, entry);
     }
 
-    /// Remove a specific bond entry by its `bond_id`, returning the stake
-    /// amount that was in that entry. Returns `None` if the bond_id doesn't exist.
-    fn remove_entry(&mut self, bond_id: u64) -> Option<FlakeAmount> {
-        let idx = self.entries.iter().position(|e| e.bond_id == bond_id)?;
-        Some(self.entries.remove(idx).stake)
+    /// Unbond `amount` Flakes from this validator using FIFO order.
+    ///
+    /// Consumes the oldest entries first. If the amount exceeds an entry's
+    /// stake, that entry is fully consumed and the remainder comes from the
+    /// next oldest. Split entries keep their original `bonded_at_timestamp`.
+    /// Returns the actual amount unbonded (may be less than requested if
+    /// total stake is insufficient).
+    fn unbond_fifo(&mut self, amount: FlakeAmount) -> FlakeAmount {
+        let mut remaining = amount;
+        let mut consumed = 0u64;
+
+        while remaining > 0 && !self.entries.is_empty() {
+            let entry_stake = self.entries[consumed as usize].stake;
+            if entry_stake <= remaining {
+                // Full consumption of this entry
+                remaining -= entry_stake;
+                consumed += 1;
+            } else {
+                // Partial consumption — split the entry
+                self.entries[consumed as usize].stake -= remaining;
+                remaining = 0;
+            }
+        }
+
+        // Remove consumed entries from the front
+        self.entries.drain(0..consumed as usize);
+
+        amount.saturating_sub(remaining)
     }
 
-    /// Find a specific bond entry by its ID.
-    pub fn get_entry(&self, bond_id: u64) -> Option<&BondEntry> {
-        self.entries.iter().find(|e| e.bond_id == bond_id)
+    /// Find a specific bond entry by index.
+    pub fn get_entry(&self, index: usize) -> Option<&BondEntry> {
+        self.entries.get(index)
     }
 }
 
@@ -171,11 +205,11 @@ impl ValidatorSet {
 
     /// Bond stake as a validator entry. If the validator doesn't exist, creates
     /// a new validator with this as their first entry (status: Bonding). If the
-    /// validator already exists, adds a new bond entry (top-up) with its own
-    /// seniority clock starting from zero.
+    /// validator already exists, adds to the existing entry (auto-merge) if same
+    /// timestamp, or creates a new entry (top-up) with its own seniority clock.
     ///
-    /// Each entry must meet `MIN_BOND_STAKE` (100 OPL). Returns an error if
-    /// the stake is below the minimum.
+    /// Each **new** entry must meet `MIN_BOND_STAKE` (1 OPL). Merged entries
+    /// have no minimum since they may be residuals from FIFO splits.
     pub fn bond(
         &mut self,
         object_id: ObjectId,
@@ -191,7 +225,7 @@ impl ValidatorSet {
         }
 
         if let Some(validator) = self.validators.get_mut(&object_id) {
-            // Top-up: add a new bond entry to existing validator
+            // Top-up or auto-merge
             validator.add_entry(stake, height, timestamp);
         } else {
             // New validator: create with first bond entry
@@ -201,37 +235,42 @@ impl ValidatorSet {
         Ok(())
     }
 
-    /// Unbond a specific bond entry by `bond_id`, returning that entry's stake.
-    /// If the validator has no remaining entries after removal, the validator
-    /// is removed from the set entirely.
+    /// Unbond `amount` Flakes from a validator using FIFO order.
     ///
-    /// Returns an error if the validator or bond_id is not found.
-    pub fn unbond_entry(
+    /// The oldest entries are consumed first. If the amount exceeds an entry's
+    /// stake, that entry is fully consumed and the remainder comes from the
+    /// next oldest. The actual unbonded amount is returned (may be less than
+    /// requested if total stake is insufficient).
+    ///
+    /// After a `UNBONDING_DELAY_BLOCKS` delay (1 epoch = 1,024 blocks),
+    /// the unbonded stake is returned to the sender. Unbonding stake still
+    /// earns rewards during the delay period.
+    ///
+    /// If the validator has no remaining entries after unbonding, they are
+    /// removed from the set entirely.
+    pub fn unbond_amount(
         &mut self,
         object_id: &ObjectId,
-        bond_id: u64,
+        amount: FlakeAmount,
     ) -> Result<FlakeAmount, String> {
         let validator = self.validators.get_mut(object_id)
             .ok_or_else(|| "Validator not bonded".to_string())?;
 
-        let stake = validator.remove_entry(bond_id)
-            .ok_or_else(|| format!("Bond entry {} not found", bond_id))?;
+        let total_stake = validator.total_stake();
+        if total_stake == 0 {
+            return Err("Validator has no stake".to_string());
+        }
+
+        // Unbond up to the amount available
+        let actual_amount = amount.min(total_stake);
+        let unbonded = validator.unbond_fifo(actual_amount);
 
         // If no entries remain, remove the validator entirely
         if validator.entries.is_empty() {
             self.validators.remove(object_id);
         }
 
-        Ok(stake)
-    }
-
-    /// Unbond a validator entirely, removing all entries and returning the
-    /// total stake across all bond entries.
-    ///
-    /// Fails if the validator is not found.
-    pub fn unbond(&mut self, object_id: &ObjectId) -> Result<ValidatorInfo, String> {
-        self.validators.remove(object_id)
-            .ok_or_else(|| "Validator not bonded".to_string())
+        Ok(unbonded)
     }
 
     /// Activate a validator that is currently in `Bonding` status. This
@@ -383,6 +422,7 @@ mod tests {
     fn bond_insufficient_stake_per_entry() {
         let mut vs = ValidatorSet::new();
         let id = test_id(b"validator1");
+        // MIN_BOND_STAKE is now 1 OPL = 1,000,000 flakes
         assert!(vs.bond(id, 100, 0, 0).is_err());
     }
 
@@ -393,86 +433,85 @@ mod tests {
         vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0).unwrap();
         vs.activate(&id, 1).unwrap();
 
-        // Top-up: add a second entry
+        // Top-up: add a second entry at a different timestamp
         vs.bond(id.clone(), MIN_BOND_STAKE * 2, 100, 1000).unwrap();
 
         let v = vs.get_validator(&id).unwrap();
         assert_eq!(v.entries.len(), 2);
         assert_eq!(v.total_stake(), MIN_BOND_STAKE * 3);
 
-        // First entry has bond_id 0, second has bond_id 1
-        assert_eq!(v.entries[0].bond_id, 0);
-        assert_eq!(v.entries[1].bond_id, 1);
+        // First entry (timestamp 0) and second entry (timestamp 1000)
+        assert_eq!(v.entries[0].bonded_at_timestamp, 0);
+        assert_eq!(v.entries[1].bonded_at_timestamp, 1000);
         assert_eq!(v.entries[0].stake, MIN_BOND_STAKE);
         assert_eq!(v.entries[1].stake, MIN_BOND_STAKE * 2);
     }
 
     #[test]
-    fn top_up_minimum_stake_enforcement() {
+    fn auto_merge_same_timestamp() {
         let mut vs = ValidatorSet::new();
         let id = test_id(b"validator1");
-        vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0).unwrap();
+        vs.bond(id.clone(), MIN_BOND_STAKE, 0, 100).unwrap();
 
-        // Top-up below minimum should fail
-        assert!(vs.bond(id, 50, 100, 1000).is_err());
-    }
-
-    #[test]
-    fn unbond_specific_entry() {
-        let mut vs = ValidatorSet::new();
-        let id = test_id(b"validator1");
-        vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0).unwrap();
-        vs.bond(id.clone(), MIN_BOND_STAKE * 2, 100, 1000).unwrap();
-
-        // Unbond entry #0
-        let returned = vs.unbond_entry(&id, 0).unwrap();
-        assert_eq!(returned, MIN_BOND_STAKE);
+        // Top-up at same timestamp — should auto-merge
+        vs.bond(id.clone(), MIN_BOND_STAKE * 2, 5, 100).unwrap();
 
         let v = vs.get_validator(&id).unwrap();
-        assert_eq!(v.entries.len(), 1);
-        assert_eq!(v.total_stake(), MIN_BOND_STAKE * 2);
-        assert_eq!(v.entries[0].bond_id, 1); // only entry #1 remains
+        assert_eq!(v.entries.len(), 1); // Merged, not two entries
+        assert_eq!(v.total_stake(), MIN_BOND_STAKE * 3);
     }
 
     #[test]
-    fn unbond_last_entry_removes_validator() {
+    fn unbond_fifo_consumes_oldest_first() {
+        let mut vs = ValidatorSet::new();
+        let id = test_id(b"validator1");
+        vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0).unwrap();       // Entry 1: 1 OPL at t=0
+        vs.bond(id.clone(), MIN_BOND_STAKE * 2, 100, 1000).unwrap(); // Entry 2: 2 OPL at t=1000
+
+        // Unbond 1.5 OPL — should fully consume entry 1 (1 OPL) and 0.5 OPL from entry 2
+        let unbonded = vs.unbond_amount(&id, MIN_BOND_STAKE + MIN_BOND_STAKE / 2).unwrap();
+
+        // Should return all requested amount since total stake > amount
+        assert_eq!(unbonded, MIN_BOND_STAKE + MIN_BOND_STAKE / 2);
+
+        let v = vs.get_validator(&id).unwrap();
+        // Entry 1 is gone, entry 2 has 1.5 OPL remaining with original timestamp
+        assert_eq!(v.entries.len(), 1);
+        assert_eq!(v.entries[0].stake, MIN_BOND_STAKE * 2 - MIN_BOND_STAKE / 2);
+        // Split entry keeps original timestamp for seniority
+        assert_eq!(v.entries[0].bonded_at_timestamp, 1000);
+    }
+
+    #[test]
+    fn unbond_fifo_removes_validator_when_empty() {
         let mut vs = ValidatorSet::new();
         let id = test_id(b"validator1");
         vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0).unwrap();
 
-        // Unbond the only entry
-        let returned = vs.unbond_entry(&id, 0).unwrap();
-        assert_eq!(returned, MIN_BOND_STAKE);
+        // Unbond the entire stake
+        let unbonded = vs.unbond_amount(&id, MIN_BOND_STAKE).unwrap();
+        assert_eq!(unbonded, MIN_BOND_STAKE);
         assert_eq!(vs.validator_count(), 0);
     }
 
     #[test]
-    fn unbond_nonexistent_bond_id() {
+    fn unbond_more_than_stake() {
         let mut vs = ValidatorSet::new();
         let id = test_id(b"validator1");
         vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0).unwrap();
 
-        let result = vs.unbond_entry(&id, 999);
-        assert!(result.is_err());
+        // Try to unbond more than total stake
+        let unbonded = vs.unbond_amount(&id, MIN_BOND_STAKE * 10).unwrap();
+        assert_eq!(unbonded, MIN_BOND_STAKE); // Only unbond what's available
+        assert_eq!(vs.validator_count(), 0);
     }
 
     #[test]
     fn unbond_nonexistent_validator() {
         let mut vs = ValidatorSet::new();
         let id = test_id(b"validator1");
-        let result = vs.unbond_entry(&id, 0);
+        let result = vs.unbond_amount(&id, MIN_BOND_STAKE);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn unbond_all_entries() {
-        let mut vs = ValidatorSet::new();
-        let id = test_id(b"validator1");
-        vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0).unwrap();
-
-        let info = vs.unbond(&id).unwrap();
-        assert_eq!(info.total_stake(), MIN_BOND_STAKE);
-        assert_eq!(vs.validator_count(), 0);
     }
 
     #[test]
@@ -488,7 +527,6 @@ mod tests {
         let v = vs.get_validator(&id).unwrap();
         assert_eq!(v.total_stake(), 0);
         assert_eq!(v.status, ValidatorStatus::Slashed);
-        // All entries have zero stake
         for entry in &v.entries {
             assert_eq!(entry.stake, 0);
         }
@@ -538,15 +576,21 @@ mod tests {
         vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0).unwrap();
         vs.activate(&id, 1).unwrap();
 
-        // Top-up at timestamp 1000
-        vs.bond(id.clone(), MIN_BOND_STAKE, 100, 1000).unwrap();
+        // Top-up at timestamp 1,000,000 (~11.5 days)
+        let top_up_time: u64 = 1_000_000;
+        vs.bond(id.clone(), MIN_BOND_STAKE, 100, top_up_time).unwrap();
 
-        // At timestamp 1000, first entry has 1000s seniority, second has 0
         let v = vs.get_validator(&id).unwrap();
-        let age_0 = v.entries[0].age_years(1000);
-        let age_1 = v.entries[1].age_years(1000);
-        assert!(age_0 > 0.0);
-        assert_eq!(age_1, 0.0);
+        // Check age at ~1 year (31,557,600 seconds) — enough for measurable milli-years
+        let check_time: u64 = 31_557_600;
+        let age_0_milli = v.entries[0].age_years_milli(check_time);
+        let age_1_milli = v.entries[1].age_years_milli(check_time);
+        // Entry bonded at genesis should have ~31.7 milli-years at check_time
+        assert!(age_0_milli > 0, "Entry bonded at genesis should have age after 1 year");
+        // Top-up entry should have ~30.5 milli-years (1 year - 11.5 days)
+        assert!(age_1_milli > 0, "Top-up entry should have age after 1 year");
+        // At the exact top-up time, the new entry has zero seniority
+        assert_eq!(v.entries[1].age_years_milli(top_up_time), 0);
     }
 
     #[test]
@@ -556,21 +600,20 @@ mod tests {
     }
 
     #[test]
-    fn get_entry_by_bond_id() {
+    fn unbond_fifo_partial_from_second_entry() {
         let mut vs = ValidatorSet::new();
         let id = test_id(b"validator1");
+        // Entry 1: 1 OPL, Entry 2: 3 OPL
         vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0).unwrap();
-        vs.bond(id.clone(), MIN_BOND_STAKE * 2, 100, 1000).unwrap();
+        vs.bond(id.clone(), MIN_BOND_STAKE * 3, 100, 2000).unwrap();
+
+        // Unbond 2 OPL: consumes entry 1 (1 OPL) + 1 OPL from entry 2
+        let unbonded = vs.unbond_amount(&id, MIN_BOND_STAKE * 2).unwrap();
+        assert_eq!(unbonded, MIN_BOND_STAKE * 2);
 
         let v = vs.get_validator(&id).unwrap();
-        let entry0 = v.get_entry(0).unwrap();
-        assert_eq!(entry0.stake, MIN_BOND_STAKE);
-        assert_eq!(entry0.bond_id, 0);
-
-        let entry1 = v.get_entry(1).unwrap();
-        assert_eq!(entry1.stake, MIN_BOND_STAKE * 2);
-        assert_eq!(entry1.bond_id, 1);
-
-        assert!(v.get_entry(999).is_none());
+        assert_eq!(v.entries.len(), 1);
+        assert_eq!(v.entries[0].stake, MIN_BOND_STAKE * 2); // 3 - 1 = 2
+        assert_eq!(v.entries[0].bonded_at_timestamp, 2000); // Keeps original timestamp
     }
 }

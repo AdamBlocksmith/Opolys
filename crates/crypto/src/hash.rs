@@ -1,10 +1,18 @@
-//! Blake3-256 hashing for the Opolys blockchain.
+//! Blake3-256 and SHA3-256 hashing for the Opolys blockchain.
 //!
-//! Blake3-256 (32 bytes) is the sole hash algorithm used across Opolys. Every
-//! `Hash` and `ObjectId` on the network is produced by Blake3, ensuring a
-//! uniform, collision-resistant digest that is fast to compute and easy to
-//! verify. No other hash functions are used — this single-algorithm discipline
-//! keeps the protocol simple and auditable.
+//! Blake3-256 (32 bytes) is the primary hash algorithm used across Opolys for
+//! `Hash` and `ObjectId`. SHA3-256 is used for EVO-OMAP finalization and
+//! domain-separated commitments where a distinct hash is required.
+//!
+//! Every `Hash` and `ObjectId` on the network is produced by Blake3, ensuring
+//! a uniform, collision-resistant digest that is fast to compute and easy to
+//! verify. SHA3-256 provides a separate hash function for cases where a second
+//! independent hash is needed (e.g., EVO-OMAP finalization: Blake3 inner with
+//! SHA3-256 final).
+//!
+//! Blake3 XOF (extendable output function) is used for EVO-OMAP's dataset
+//! generation and variable-length operations, providing deterministic
+//! arbitrary-length output from a single seed.
 
 use opolys_core::{Hash, ObjectId};
 
@@ -83,6 +91,55 @@ pub fn hash(data: &[u8]) -> Hash {
 /// function is the standard way to derive such an identifier from raw bytes.
 pub fn hash_to_object_id(data: &[u8]) -> ObjectId {
     ObjectId(hash(data))
+}
+
+/// Compute SHA3-256 of arbitrary data.
+///
+/// Used for EVO-OMAP finalization (Blake3 inner, SHA3-256 outer) and
+/// domain-separated commitments where a second independent hash is required.
+/// Produces a 32-byte digest, same length as Blake3-256, but with different
+/// internal structure — ensuring no accidental collisions between Blake3 and
+/// SHA3 outputs.
+pub fn sha3_256(data: &[u8]) -> Hash {
+    use sha3::Digest;
+    let mut hasher = sha3::Sha3_256::new();
+    hasher.update(data);
+    let result = hasher.finalize();
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&result[..32]);
+    Hash::from_bytes(arr)
+}
+
+/// Compute Blake3 XOF (extendable output) to produce arbitrary-length output.
+///
+/// Used by EVO-OMAP for dataset generation and other variable-length operations.
+/// Given a seed and a desired output length, produces deterministic bytes.
+/// Unlike `hash()`, which always produces 32 bytes, XOF can produce any length.
+///
+/// Uses Blake3's native XOF mode via `Hasher::new_xof()` + `XofReader`,
+/// which supports arbitrary output lengths from a single seed.
+pub fn blake3_xof(seed: &[u8], output_len: usize) -> Vec<u8> {
+    let mut output = vec![0u8; output_len];
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(seed);
+    let mut reader = hasher.finalize_xof();
+    reader.fill(&mut output);
+    output
+}
+
+/// Compute Blake3 XOF with multiple input slices concatenated as seed.
+///
+/// Convenience function for EVO-OMAP operations that need to hash multiple
+/// domain-separated inputs before extending to the desired output length.
+pub fn blake3_xof_multi(inputs: &[&[u8]], output_len: usize) -> Vec<u8> {
+    let mut hasher = blake3::Hasher::new();
+    for input in inputs {
+        hasher.update(input);
+    }
+    let mut output = vec![0u8; output_len];
+    let mut reader = hasher.finalize_xof();
+    reader.fill(&mut output);
+    output
 }
 
 #[cfg(test)]

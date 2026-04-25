@@ -34,6 +34,7 @@ fn chain_state_to_info(chain: &ChainState) -> ChainInfo {
         latest_block_hash: chain.latest_block_hash.to_hex(),
         phase: format!("{:?}", chain.phase),
         block_timestamps: chain.block_timestamps.clone(),
+        suggested_fee: chain.suggested_fee,
     }
 }
 

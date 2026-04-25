@@ -212,6 +212,7 @@ mod tests {
             signature: vec![],
             nonce,
             data: vec![],
+            signature_type: opolys_core::SIGNATURE_TYPE_ED25519,
         }
     }
 

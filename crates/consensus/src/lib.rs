@@ -11,11 +11,11 @@
 //! - **account**: Ledger accounts with balance, nonce, and transfer semantics.
 //! - **block**: Block hashing, transaction roots, and formatting.
 //! - **difficulty**: Adaptive difficulty retargeting, consensus floor, and PoW checks.
-//! - **emission**: Block reward computation — inversely proportional to difficulty, scaled by discovery bonus.
+//! - **emission**: Block reward computation — vein yield with integer-only natural log.
 //! - **genesis**: Genesis block construction and validation from ceremony attestation data.
 //! - **mempool**: Fee-prioritized transaction pool with eviction and per-account limits.
-//! - **pow**: Autolykos-inspired proof-of-work mining and verification.
-//! - **pos**: Proof-of-stake validator set management — bonding, slashing, and block producer selection.
+//! - **pow**: EVO-OMAP proof-of-work mining and verification.
+//! - **pos**: Proof-of-stake validator set management — bonding, FIFO unbonding, and block producer selection.
 
 pub mod account;
 pub mod block;

@@ -45,6 +45,9 @@ pub struct PersistedChainState {
     /// Consensus phase: 0 = ProofOfWork, 1 = ProofOfStake.
     /// Transitions naturally as stake coverage grows.
     pub phase: u8,
+    /// Suggested fee for the next block (Flakes), computed via EMA.
+    /// Starts at MIN_FEE (1 Flake) and adjusts based on network demand.
+    pub suggested_fee: u64,
 }
 
 /// Persistent storage backed by RocksDB.
@@ -358,6 +361,7 @@ mod tests {
             latest_block_hash: [99u8; 32],
             state_root: [0u8; 32],
             phase: 0,
+            suggested_fee: 1,
         };
 
         store.save_chain_state(&state).unwrap();

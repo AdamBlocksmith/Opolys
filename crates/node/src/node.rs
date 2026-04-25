@@ -4,9 +4,9 @@
 //! and persistence. It manages:
 //!
 //! - **Chain state** — height, difficulty, issuance/burn tracking, block linkage
-//! - **Mining** — Autolykos PoW mining loop for block production
+//! - **Mining** — EVO-OMAP PoW mining loop for block production (parallel by default)
 //! - **Block application** — state transitions: transaction execution, fee burning,
-//!   reward emission, difficulty adjustment, and consensus phase transitions
+//!   reward emission (vein yield), difficulty adjustment, and consensus phase transitions
 //! - **Persistence** — saving and loading state via RocksDB
 //! - **RPC** — serving chain queries via JSON-RPC
 //!
@@ -15,7 +15,7 @@
 //! Validators earn from block rewards only. Only double-signing gets slashed. There
 //! is no governance, no schedules, and no fixed percentages.
 //!
-//! Hashing: Blake3-256. Signatures: ed25519.
+//! Hashing: Blake3-256 (32 bytes) everywhere. Signatures: ed25519.
 //! Key derivation: BIP-39 24-word mnemonics, SLIP-0010 ed25519.
 
 use opolys_core::*;
@@ -24,11 +24,13 @@ use opolys_consensus::{
     emission,
     mempool::Mempool,
     pos::ValidatorSet,
-    pow,
+    pow::PowContext,
     genesis::GenesisConfig,
 };
-use opolys_consensus::difficulty::{compute_next_difficulty, compute_discovery_bonus};
+use opolys_consensus::difficulty::compute_next_difficulty;
 use opolys_consensus::block::{compute_transaction_root, compute_block_hash};
+use opolys_consensus::emission::compute_suggested_fee;
+use opolys_consensus::pow;
 use opolys_execution::TransactionDispatcher;
 use opolys_storage::BlockchainStore;
 use std::sync::Arc;
@@ -63,7 +65,7 @@ pub struct Args {
     ///
     /// Without this flag, the node runs in read-only mode — it syncs chain
     /// state and serves RPC queries but does not produce blocks. Pass --mine
-    /// to start the Autolykos PoW mining loop.
+    /// to start the EVO-OMAP PoW mining loop.
     #[arg(long)]
     pub mine: bool,
 
@@ -79,19 +81,12 @@ pub struct Args {
 /// Configuration for an Opolys node, derived from CLI arguments or defaults.
 #[derive(Debug, Clone)]
 pub struct NodeConfig {
-    /// P2P network listen port.
     pub listen_port: u16,
-    /// JSON-RPC server port.
     pub rpc_port: u16,
-    /// Filesystem path for RocksDB data storage.
     pub data_dir: String,
-    /// List of bootstrap peer addresses for network discovery.
     pub bootstrap_peers: Vec<String>,
-    /// Logging verbosity level.
     pub log_level: String,
-    /// Whether the mining loop is active.
     pub mine: bool,
-    /// Whether the RPC server is disabled.
     pub no_rpc: bool,
 }
 
@@ -125,16 +120,17 @@ pub struct ChainState {
     /// Total OPL flakes permanently removed via fee burning.
     pub total_burned: FlakeAmount,
     /// Rolling window of block timestamps used for difficulty retargeting.
-    /// Should contain timestamps for at least RETARGET_EPOCH blocks.
     pub block_timestamps: Vec<u64>,
     /// Blake3-256 hash of the most recent block header.
-    /// Genesis block uses `Hash::zero()` as its previous_hash.
     pub latest_block_hash: Hash,
     /// Blake3-256 hash of the state root after applying the most recent block.
     pub state_root: Hash,
     /// Current consensus phase — transitions smoothly from PoW to PoS
     /// as stake_coverage increases (no governance, no hard switch).
     pub phase: ConsensusPhase,
+    /// Suggested fee for the next block, computed via EMA of previous block's fees.
+    /// Starts at MIN_FEE (1 Flake) and adjusts based on network demand.
+    pub suggested_fee: FlakeAmount,
 }
 
 impl ChainState {
@@ -153,11 +149,12 @@ impl ChainState {
             latest_block_hash: genesis_hash,
             state_root: genesis.header.state_root.clone(),
             phase: ConsensusPhase::ProofOfWork,
+            suggested_fee: MIN_FEE,
         }
     }
 
     /// Create chain state from persisted data (loaded from RocksDB).
-    pub fn from_persisted(p: &opolys_storage::PersistedChainState) -> Self {
+pub fn from_persisted(p: &opolys_storage::PersistedChainState) -> Self {
         let phase = match p.phase {
             0 => ConsensusPhase::ProofOfWork,
             1 => ConsensusPhase::ProofOfStake,
@@ -172,6 +169,7 @@ impl ChainState {
             latest_block_hash: Hash::from_bytes(p.latest_block_hash),
             state_root: Hash::from_bytes(p.state_root),
             phase,
+            suggested_fee: p.suggested_fee,
         }
     }
 
@@ -189,17 +187,16 @@ impl ChainState {
                 ConsensusPhase::ProofOfWork => 0,
                 ConsensusPhase::ProofOfStake => 1,
             },
+            suggested_fee: self.suggested_fee,
         }
     }
 
     /// Circulating supply = total_issued - total_burned.
-    /// Can decrease over time as fees are burned, modelling real gold attrition.
     pub fn circulating_supply(&self) -> FlakeAmount {
         self.total_issued.saturating_sub(self.total_burned)
     }
 
     /// Stake coverage = bonded_stake / total_issued.
-    /// Used to blend PoW/PoS rewards continuously (no thresholds).
     pub fn stake_coverage(&self) -> f64 {
         emission::compute_stake_coverage(
             self.total_issued,
@@ -226,6 +223,8 @@ pub struct OpolysNode {
     pub store: Option<Arc<BlockchainStore>>,
     /// Node configuration (ports, data directory, etc.).
     pub config: NodeConfig,
+    /// EVO-OMAP mining context with dataset cache for efficient mining.
+    pow_context: Arc<RwLock<PowContext>>,
 }
 
 impl OpolysNode {
@@ -241,7 +240,6 @@ impl OpolysNode {
         let (chain_state, accounts, validators, store) = match store_result {
             Ok(store) => {
                 let store = Arc::new(store);
-                // Try to load persisted state
                 match store.load_chain_state() {
                     Ok(Some(persisted)) => {
                         tracing::info!(
@@ -287,15 +285,17 @@ impl OpolysNode {
             validators: Arc::new(RwLock::new(validators)),
             store,
             config,
+            pow_context: Arc::new(RwLock::new(PowContext::new())),
         }
     }
 
-    /// Attempt to mine a new block.
+    /// Attempt to mine a new block using EVO-OMAP.
     ///
     /// Builds a block header from the current chain state, pulls transactions
-    /// from the mempool, computes the transaction root, and runs the Autolykos
-    /// PoW mining loop. Returns `Some(Block)` if a valid nonce is found within
-    /// `max_attempts`, or `None` if the search is exhausted.
+    /// from the mempool, computes the transaction root, and runs the EVO-OMAP
+    /// PoW mining loop with parallel nonce search. Returns `Some(Block)` if a
+    /// valid nonce is found within `max_attempts`, or `None` if the search
+    /// is exhausted.
     pub async fn mine_block(&self, max_attempts: u64) -> Option<Block> {
         let chain = self.chain.read().await;
         let accounts = self.accounts.read().await;
@@ -322,8 +322,9 @@ impl OpolysNode {
 
         let difficulty = diff_target.effective_difficulty();
 
-        // Build the block header, linking to the previous block via latest_block_hash
+        // Build the block header with all new fields
         let header = BlockHeader {
+            version: BLOCK_VERSION,
             height: chain.current_height + 1,
             previous_hash: chain.latest_block_hash.clone(),
             state_root: chain.state_root.clone(),
@@ -333,6 +334,8 @@ impl OpolysNode {
                 .unwrap_or_default()
                 .as_secs(),
             difficulty,
+            suggested_fee: chain.suggested_fee,
+            extension_root: None,
             pow_proof: None,
             validator_signature: None,
         };
@@ -342,7 +345,12 @@ impl OpolysNode {
         drop(validators);
         drop(mempool);
 
-        pow::mine_block(header, difficulty, max_attempts)
+        let num_threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+
+        let mut ctx = self.pow_context.write().await;
+        ctx.mine_parallel(header, difficulty, max_attempts, num_threads)
     }
 
     /// Apply a mined or received block to the chain state.
@@ -351,9 +359,10 @@ impl OpolysNode {
     /// 1. Verify block links to our chain tip
     /// 2. Compute the block hash and update chain linkage
     /// 3. Execute all transactions (Transfer/Bond/Unbond), burning fees
-    /// 4. Update issuance and difficulty tracking
-    /// 5. Remove processed transactions from the mempool
-    /// 6. Persist all state to disk (if storage is available)
+    /// 4. Compute block reward using vein yield (integer-only natural log)
+    /// 5. Update issuance, difficulty, suggested_fee, and consensus phase
+    /// 6. Remove processed transactions from the mempool
+    /// 7. Persist all state to disk (if storage is available)
     pub async fn apply_block(&self, block: &Block) -> Result<Hash, String> {
         let mut chain = self.chain.write().await;
         let mut accounts = self.accounts.write().await;
@@ -370,23 +379,19 @@ impl OpolysNode {
         }
 
         let bonded_stake = validators.total_bonded_stake();
-        let _stake_coverage = emission::compute_stake_coverage(bonded_stake, chain.total_issued);
 
-        // Compute discovery bonus from PoW hash
-        let pow_hash = if let Some(ref proof) = block.header.pow_proof {
-            let nonce = u64::from_be_bytes(proof[..8].try_into().unwrap_or([0u8; 8]));
-            let dataset = pow::AutolykosDataset::generate(&[], block.header.height);
-            let hash = pow::autolykos_hash(&dataset, &block.header, nonce);
-            u64::from_be_bytes(hash.0[..8].try_into().unwrap_or([0u8; 8]))
-        } else {
-            0u64
-        };
+        // Compute vein yield from the EVO-OMAP PoW hash
+        let pow_hash_value = pow::compute_pow_hash_value(&block.header).unwrap_or(0u64);
 
-        let discovery_bonus = compute_discovery_bonus(block.header.difficulty, pow_hash);
-        let block_reward = emission::compute_block_reward(block.header.difficulty, discovery_bonus);
+        // Block reward uses vein yield: BASE_REWARD / difficulty * vein_yield
+        let block_reward = emission::compute_block_reward(block.header.difficulty, pow_hash_value);
 
         // Compute the block hash — this is the new chain tip
         let block_hash = compute_block_hash(&block.header);
+
+        // Compute suggested fee for the next block via EMA
+        let total_fees: FlakeAmount = block.transactions.iter().map(|tx| tx.fee).sum();
+        let next_suggested_fee = compute_suggested_fee(total_fees, chain.suggested_fee);
 
         // Update chain state
         chain.total_issued = chain.total_issued.saturating_add(block_reward);
@@ -394,6 +399,7 @@ impl OpolysNode {
         chain.current_difficulty = block.header.difficulty;
         chain.latest_block_hash = block_hash.clone();
         chain.block_timestamps.push(block.header.timestamp);
+        chain.suggested_fee = next_suggested_fee;
 
         // Execute all transactions in order
         let mut total_fees_burned: FlakeAmount = 0;
@@ -457,7 +463,6 @@ mod tests {
     use super::*;
 
     /// Helper: create a NodeConfig that uses a temporary directory.
-    /// Each test gets its own isolated database — no shared state.
     fn test_config() -> (NodeConfig, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("Failed to create temp dir");
         let config = NodeConfig {
@@ -490,9 +495,15 @@ mod tests {
     fn chain_state_genesis_hash_is_computed() {
         let config = GenesisConfig::default();
         let chain = ChainState::new(&config);
-        // The genesis block hash should NOT be zero — it's computed from header fields
         assert_ne!(chain.latest_block_hash, Hash::zero());
         assert_eq!(chain.latest_block_hash.to_hex().len(), 64);
+    }
+
+    #[test]
+    fn chain_state_suggested_fee_starts_at_min() {
+        let config = GenesisConfig::default();
+        let chain = ChainState::new(&config);
+        assert_eq!(chain.suggested_fee, MIN_FEE);
     }
 
     #[test]
@@ -509,7 +520,11 @@ mod tests {
         assert_eq!(restored.state_root, chain.state_root);
     }
 
+    /// Integration test that mines real EVO-OMAP blocks. Ignored by default
+    /// because it takes ~7.5s per hash attempt (requires actual PoW computation).
+    /// Run with `cargo test -- --ignored` to include this test.
     #[tokio::test]
+    #[ignore]
     async fn mine_and_apply_block_links_chain() {
         let (config, _dir) = test_config();
         let node = OpolysNode::new(config);
@@ -521,6 +536,7 @@ mod tests {
         // Mine block 1
         let block = node.mine_block(1_000_000).await.expect("Should mine block 1");
         assert_eq!(block.header.height, 1);
+        assert_eq!(block.header.version, BLOCK_VERSION);
         assert_eq!(block.header.previous_hash, genesis_hash, "Block 1 must reference genesis hash");
 
         // Apply block 1

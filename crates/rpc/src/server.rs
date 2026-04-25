@@ -43,7 +43,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_http::cors::{Any, CorsLayer};
 
-use opolys_core::{FlakeAmount, Block, Transaction, ObjectId, Hash, FLAKES_PER_OPL};
+use opolys_core::{FlakeAmount, Block, Transaction, ObjectId, Hash, FLAKES_PER_OPL, EPOCH};
 use opolys_consensus::account::AccountStore;
 use opolys_consensus::mempool::Mempool;
 use opolys_consensus::pos::ValidatorSet;
@@ -79,6 +79,8 @@ pub struct ChainInfo {
     pub phase: String,
     /// Rolling window of block timestamps for difficulty retargeting.
     pub block_timestamps: Vec<u64>,
+    /// Suggested fee for the next block (Flakes), computed via EMA.
+    pub suggested_fee: u64,
 }
 
 // ─── Shared state for RPC handlers ────────────────────────────────
@@ -213,6 +215,8 @@ async fn handle_get_chain_info(state: &RpcState) -> Result<serde_json::Value, Js
         total_burned: chain.total_burned,
         circulating_supply: chain.circulating_supply,
         circulating_supply_opl: format_flake(chain.circulating_supply),
+        suggested_fee: chain.suggested_fee,
+        suggested_fee_opl: format_flake(chain.suggested_fee),
         validator_count: validators.validator_count(),
         bonded_stake: validators.total_bonded_stake(),
         phase: chain.phase.clone(),
@@ -363,7 +367,7 @@ async fn handle_get_difficulty(state: &RpcState) -> Result<serde_json::Value, Js
         consensus_floor: diff_target.consensus_floor,
         effective_difficulty: diff_target.effective_difficulty(),
         height: chain.height,
-        next_retarget_height: ((chain.height / opolys_core::RETARGET_EPOCH) + 1) * opolys_core::RETARGET_EPOCH,
+        next_retarget_height: ((chain.height / EPOCH) + 1) * EPOCH,
     }).map_err(|e| JsonRpcError::internal_error(&e.to_string()))
 }
 
@@ -375,7 +379,6 @@ async fn handle_get_validators(state: &RpcState) -> Result<serde_json::Value, Js
         let total_stake = v.total_stake();
         let total_weight = v.weight(0); // approximate — would need chain timestamp for exact value
         let entries: Vec<BondEntryResponse> = v.entries.iter().map(|e| BondEntryResponse {
-            bond_id: e.bond_id,
             stake_flakes: e.stake,
             stake_opl: format_flake(e.stake),
             bonded_at_height: e.bonded_at_height,
@@ -452,12 +455,14 @@ async fn handle_get_mining_job(state: &RpcState) -> Result<serde_json::Value, Js
     let transaction_root = opolys_consensus::block::compute_transaction_root(&transactions).to_hex();
 
     let job = MiningJobResponse {
+        version: opolys_core::BLOCK_VERSION,
         height: chain.height + 1,
         previous_hash: chain.latest_block_hash.clone(),
         state_root: chain.phase.clone(),
         transaction_root,
         difficulty,
         target: u64::MAX / difficulty,
+        suggested_fee: chain.suggested_fee,
         timestamp: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -581,19 +586,21 @@ fn format_action(action: &opolys_core::TransactionAction) -> String {
         opolys_core::TransactionAction::ValidatorBond { amount } => {
             format!("Bond {} flakes ({})", amount, format_flake(*amount))
         }
-        opolys_core::TransactionAction::ValidatorUnbond { bond_id } => format!("Unbond entry #{}", bond_id),
+        opolys_core::TransactionAction::ValidatorUnbond { amount } => format!("Unbond {} flakes ({})", amount, format_flake(*amount)),
     }
 }
 
 /// Convert a Block to a JSON-serializable response.
 fn block_to_response(block: &Block) -> BlockResponse {
     BlockResponse {
+        version: block.header.version,
         height: block.header.height,
         previous_hash: block.header.previous_hash.to_hex(),
         state_root: block.header.state_root.to_hex(),
         transaction_root: block.header.transaction_root.to_hex(),
         timestamp: block.header.timestamp,
         difficulty: block.header.difficulty,
+        suggested_fee: block.header.suggested_fee,
         transaction_count: block.transactions.len(),
         block_hash: compute_block_hash(&block.header).to_hex(),
     }
@@ -610,6 +617,8 @@ pub struct ChainInfoResponse {
     pub total_burned: u64,
     pub circulating_supply: u64,
     pub circulating_supply_opl: String,
+    pub suggested_fee: u64,
+    pub suggested_fee_opl: String,
     pub validator_count: usize,
     pub bonded_stake: u64,
     pub phase: String,
@@ -633,12 +642,14 @@ pub struct AccountResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockResponse {
+    pub version: u32,
     pub height: u64,
     pub previous_hash: String,
     pub state_root: String,
     pub transaction_root: String,
     pub timestamp: u64,
     pub difficulty: u64,
+    pub suggested_fee: u64,
     pub transaction_count: usize,
     pub block_hash: String,
 }
@@ -684,7 +695,6 @@ pub struct DifficultyResponse {
 /// A single bond entry within a validator's stake.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BondEntryResponse {
-    pub bond_id: u64,
     pub stake_flakes: u64,
     pub stake_opl: String,
     pub bonded_at_height: u64,
@@ -714,12 +724,14 @@ pub struct SendTransactionResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MiningJobResponse {
+    pub version: u32,
     pub height: u64,
     pub previous_hash: String,
     pub state_root: String,
     pub transaction_root: String,
     pub difficulty: u64,
     pub target: u64,
+    pub suggested_fee: u64,
     pub timestamp: u64,
     pub transaction_count: usize,
 }

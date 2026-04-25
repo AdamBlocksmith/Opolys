@@ -1,18 +1,21 @@
-//! # Adaptive difficulty retargeting and proof-of-work verification.
+//! # Adaptive difficulty retargeting for Opolys.
 //!
 //! Opolys has **no hard cap** on supply and no hardcoded difficulty schedules.
-//! Instead, difficulty emerges from two components:
+//! Difficulty emerges from two components:
 //!
-//! 1. **Retarget** — a Bitcoin-style adjustment every `RETARGET_EPOCH` blocks
-//!    that compares actual block times against the target interval.
+//! 1. **Retarget** — an adjustment every `EPOCH` blocks (1,024) that compares
+//!    actual block times against the target interval.
 //! 2. **Consensus floor** — `total_issued / bonded_stake`, a minimum difficulty
 //!    that rises as more $OPL enters circulation relative to staked supply.
 //!
 //! The effective difficulty is the maximum of the retarget, the consensus floor,
-//! and `MIN_DIFFICULTY`. This dual mechanism ensures that difficulty grows
-//! organically as the network matures and staking participation evolves.
+//! and `MIN_DIFFICULTY` (which is the mathematical floor, not an arbitrary cap).
+//! There is no maximum difficulty clamp — difficulty adjusts freely.
+//!
+//! The discovery bonus has been replaced by **vein yield**, computed in
+//! `emission.rs`. This module no longer computes discovery bonuses.
 
-use opolys_core::{MIN_DIFFICULTY, RETARGET_EPOCH, BlockHeight};
+use opolys_core::{MIN_DIFFICULTY, EPOCH, BlockHeight};
 
 /// The computed difficulty target for a given block.
 ///
@@ -32,8 +35,8 @@ pub struct DifficultyTarget {
 
 impl DifficultyTarget {
     /// Returns the effective difficulty: the maximum of retarget, consensus
-    /// floor, and the global `MIN_DIFFICULTY`. This is the value used for
-    /// PoW validation and reward computation.
+    /// floor, and the global `MIN_DIFFICULTY` (which is 1 — a mathematical
+    /// floor, not an artificial clamp).
     pub fn effective_difficulty(&self) -> u64 {
         self.retarget.max(self.consensus_floor).max(MIN_DIFFICULTY)
     }
@@ -71,19 +74,20 @@ pub fn compute_next_difficulty(
     }
 }
 
-/// Retarget difficulty every `RETARGET_EPOCH` blocks by comparing actual
-/// block times to the expected target interval.
+/// Retarget difficulty every `EPOCH` blocks by comparing actual block times
+/// to the expected target interval.
 ///
 /// If the epoch was too fast, difficulty increases; if too slow, it decreases.
-/// Adjustments are clamped to [current/4, current*4] to prevent wild swings,
-/// and never fall below `MIN_DIFFICULTY`.
+/// There is **no clamp** on adjustments — difficulty adjusts freely based on
+/// observed block times. The only floor is `MIN_DIFFICULTY` (1), which is a
+/// mathematical requirement (difficulty 0 would make all hashes valid).
 fn compute_retarget(current_difficulty: u64, current_height: BlockHeight, block_timestamps: &[u64]) -> u64 {
     // Not enough blocks for a retarget epoch yet — hold at current difficulty.
-    if current_height < RETARGET_EPOCH {
+    if current_height < EPOCH {
         return current_difficulty.max(MIN_DIFFICULTY);
     }
 
-    let epoch_start = current_height.saturating_sub(RETARGET_EPOCH);
+    let epoch_start = current_height.saturating_sub(EPOCH);
     if epoch_start as usize >= block_timestamps.len() {
         return current_difficulty.max(MIN_DIFFICULTY);
     }
@@ -101,24 +105,24 @@ fn compute_retarget(current_difficulty: u64, current_height: BlockHeight, block_
     }
 
     let actual_time = block_timestamps[end_idx].saturating_sub(block_timestamps[start_idx]);
-    let expected_time = RETARGET_EPOCH * opolys_core::BLOCK_TARGET_TIME_SECS;
+    let expected_time = EPOCH * opolys_core::BLOCK_TARGET_TIME_SECS;
 
-    // If timestamps are degenerate (zero elapsed time), spike difficulty 4x.
+    // If timestamps are degenerate (zero elapsed time), spike difficulty.
     if actual_time == 0 {
         return current_difficulty.saturating_mul(4);
     }
 
     // Standard retarget: scale difficulty proportionally to expected vs actual time.
+    // If blocks were too fast (actual < expected), difficulty increases.
+    // If blocks were too slow (actual > expected), difficulty decreases.
     // Uses u128 intermediate to prevent overflow on large difficulty values.
-    let numerator = current_difficulty as u128 * actual_time as u128;
-    let denominator = expected_time as u128;
+    let numerator = current_difficulty as u128 * expected_time as u128;
+    let denominator = actual_time as u128;
     let new_difficulty = (numerator / denominator) as u64;
 
-    // Clamp to [current/4, current*4] to prevent violent swings per epoch.
-    let max_new = current_difficulty.saturating_mul(4);
-    let min_new = current_difficulty / 4;
-
-    new_difficulty.clamp(min_new, max_new).max(MIN_DIFFICULTY)
+    // No maximum clamp — difficulty adjusts freely.
+    // The only floor is MIN_DIFFICULTY (1), a mathematical requirement.
+    new_difficulty.max(MIN_DIFFICULTY)
 }
 
 /// Convert difficulty to a numerical hash target: `u64::MAX / difficulty`.
@@ -140,28 +144,6 @@ fn compute_target(difficulty: u64) -> u64 {
 pub fn check_proof_of_work(hash_value: u64, difficulty: u64) -> bool {
     let target = compute_target(difficulty);
     hash_value < target
-}
-
-/// Compute the discovery bonus — a multiplier that rewards miners for
-/// finding a particularly good (low) hash.
-///
-/// The bonus is the square root of `u64::MAX / (difficulty * hash_value)`,
-/// clamped to a minimum of 1. This means a hash far below the target
-/// yields a higher bonus, creating economic incentive to continue mining
-/// even after the base reward is small.
-pub fn compute_discovery_bonus(difficulty: u64, hash_value: u64) -> u64 {
-    if difficulty == 0 || hash_value == 0 {
-        return 1;
-    }
-    // Compute the ratio of the entire hash space to the product of difficulty
-    // and the actual hash — a measure of how "far below target" this hash is.
-    let ratio = u128::from(u64::MAX) / (u128::from(difficulty) * u128::from(hash_value));
-    if ratio < 1 {
-        return 1;
-    }
-    // Square-root scaling keeps the bonus sub-linear to prevent inflation spikes.
-    let sqrt_ratio = (ratio as f64).sqrt() as u64;
-    sqrt_ratio.max(1)
 }
 
 #[cfg(test)]
@@ -196,18 +178,6 @@ mod tests {
     }
 
     #[test]
-    fn discovery_bonus_minimum() {
-        let bonus = compute_discovery_bonus(1, u64::MAX);
-        assert_eq!(bonus, 1);
-    }
-
-    #[test]
-    fn discovery_bonus_large() {
-        let bonus = compute_discovery_bonus(1, 1);
-        assert!(bonus > 1);
-    }
-
-    #[test]
     fn check_pow_easy_difficulty() {
         assert!(check_proof_of_work(0, 1));
         assert!(!check_proof_of_work(u64::MAX, 1));
@@ -216,14 +186,37 @@ mod tests {
     #[test]
     fn retarget_at_epoch_boundary() {
         let timestamps: Vec<u64> = (0..=2000).map(|i| i * 120).collect();
-        let new_diff = compute_retarget(100, 1000, &timestamps);
+        let new_diff = compute_retarget(100, 1024, &timestamps);
         assert!(new_diff >= MIN_DIFFICULTY);
+    }
+
+    #[test]
+    fn retarget_no_clamp_max() {
+// If blocks are 10x too slow, difficulty should drop proportionally
+    // without an artificial maximum clamp
+    let timestamps: Vec<u64> = (0..=2000).map(|i| i * 1200).collect();
+    let new_diff = compute_retarget(100, 1024, &timestamps);
+    // 1200s per block × 1024 blocks = 1,228,800s actual
+    // Expected: 120s × 1024 = 122,880s
+    // Ratio: 122,880 / 1,228,800 ≈ 0.1x, so difficulty drops from 100 to ~10
+    assert!(new_diff < 100, "Difficulty should drop when blocks are too slow: got {}", new_diff);
     }
 
     #[test]
     fn compute_next_difficulty_integrates_consensus_floor() {
         let timestamps: Vec<u64> = (0..=2000).map(|i| i * 120).collect();
-        let result = compute_next_difficulty(100, 1000, &timestamps, 10_000_000, 1_000_000);
+        let result = compute_next_difficulty(100, 1024, &timestamps, 10_000_000, 1_000_000);
         assert!(result.effective_difficulty() >= 10);
+    }
+
+    #[test]
+    fn min_difficulty_is_mathematical_floor() {
+        // MIN_DIFFICULTY = 1 is the only floor — difficulty can freely adjust above it
+        assert_eq!(MIN_DIFFICULTY, 1);
+    }
+
+    #[test]
+    fn epoch_is_1024() {
+        assert_eq!(EPOCH, 1024);
     }
 }

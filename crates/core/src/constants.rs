@@ -70,14 +70,32 @@ pub const BASE_REWARD: u64 = 440 * FLAKES_PER_OPL;
 // ─── Consensus Parameters ────────────────────────────────────────────────────
 
 /// Minimum difficulty target (easiest possible PoW). Difficulty 1 means
-/// any hash satisfies the target.
+/// any hash satisfies the target. This is a mathematical floor, not an
+/// arbitrary cap — the natural logarithm in vein yield is undefined for
+/// difficulty 0.
 pub const MIN_DIFFICULTY: u64 = 1;
 
-/// Number of blocks between difficulty retargeting events.
+/// Unified epoch length for both EVO-OMAP dataset regeneration and
+/// difficulty retargeting. Every 1,024 blocks:
+/// - EVO-OMAP generates a new dataset from a fresh epoch seed
+/// - Difficulty is retargeted based on observed block times
+/// - Unbonding entries mature (1,024 blocks = one epoch delay)
 ///
-/// The network adjusts difficulty every `RETARGET_EPOCH` blocks to maintain
-/// the target block interval.
-pub const RETARGET_EPOCH: u64 = 1_000;
+/// Replaces the previous separate RETARGET_EPOCH and EVO_OMAP_EPOCH_BLOCKS
+/// constants with a single unified EPOCH.
+pub const EPOCH: u64 = 1_024;
+
+/// Number of blocks a validator must wait before unbonded stake is returned.
+/// Equal to EPOCH (1,024 blocks ≈ 34 hours at 120s/block). Unbonding stake
+/// still earns rewards during this delay.
+pub const UNBONDING_DELAY_BLOCKS: u64 = EPOCH;
+
+/// Minimum transaction fee in Flakes. 1 Flake is the atomic unit — this
+/// establishes the floor for the market-driven fee model. The actual
+/// suggested fee is computed as an EMA of the previous block's transaction
+/// fees, but can never fall below MIN_FEE.
+/// Minimum transaction fee in Flakes. 1 Flake = the atomic unit.
+pub const MIN_FEE: u64 = 1;
 
 /// Number of PoS-finalized blocks required before a block is considered final.
 ///
@@ -90,28 +108,36 @@ pub const POS_FINALITY_BLOCKS: u64 = 3;
 /// block issuance with real-world gold mining rates.
 pub const BLOCK_TARGET_TIME_SECS: u64 = 120;
 
-/// Minimum stake (in Flakes) required to become a validator (100 OPL).
+/// Minimum stake (in Flakes) required for a **new** bond entry (1 OPL).
 ///
-/// This prevents Sybil attacks by requiring a meaningful economic commitment
-/// before a node can participate in block production.
-pub const MIN_BOND_STAKE: u64 = 100 * FLAKES_PER_OPL;
+/// The natural unit — no arbitrary cap. FIFO unbonding consumes the oldest
+/// entries first, and residuals from split entries require no minimum.
+/// Only brand-new bond entries enforce this 1 OPL floor.
+pub const MIN_BOND_STAKE: u64 = FLAKES_PER_OPL;
 
-/// Maximum block capacity in bytes per second of target block time.
-///
-/// A block's serialized size must not exceed `BLOCK_TARGET_TIME_SECS × BLOCK_CAPACITY_RATE`.
-/// This throttles chain growth and ensures nodes can sync on modest bandwidth.
-pub const BLOCK_CAPACITY_RATE: u64 = 10_000;
+/// Block header version number. Incremented for protocol upgrades.
+/// Version 1 is the initial protocol version with EVO-OMAP PoW and
+/// ed25519 signatures.
+pub const BLOCK_VERSION: u32 = 1;
 
-/// Returns the maximum allowed serialized block size in bytes.
-///
-/// Computed as `BLOCK_TARGET_TIME_SECS × BLOCK_CAPACITY_RATE` (120 × 10,000 = 1,200,000 bytes).
-/// This is the bandwidth budget for a single block.
-pub fn block_max_capacity_bytes() -> u64 {
-    BLOCK_TARGET_TIME_SECS * BLOCK_CAPACITY_RATE
-}
+/// Signature type constant for ed25519 signatures.
+/// Currently the only supported type. Post-quantum signatures (Dilithium)
+/// use reserved values (1+), but are not yet implemented.
+pub const SIGNATURE_TYPE_ED25519: u8 = 0;
+
+/// Extension type constant: no extension data in this block.
+pub const EXTENSION_TYPE_NONE: u8 = 0;
+
+/// Extension type constant: rollup data included in this block.
+/// Reserved for future use — rollups can anchor data via extension_root.
+pub const EXTENSION_TYPE_ROLLUP: u8 = 1;
 
 // ─── Node Networking ─────────────────────────────────────────────────────────
 // These values are NOT consensus-critical — they can be tuned per-node.
+
+/// Network protocol version string advertised during P2P handshakes
+/// and returned by the `opl_getNetworkVersion` RPC.
+pub const NETWORK_PROTOCOL_VERSION: &str = "1.0.0";
 
 /// Maximum number of inbound (peer-initiated) connections a node will accept.
 pub const MAX_INBOUND_CONNECTIONS: usize = 50;
@@ -153,9 +179,6 @@ pub const DEFAULT_LISTEN_PORT: u16 = 4170;
 /// Prevents memory exhaustion from oversized network messages.
 pub const GOSSIP_MAX_MESSAGE_SIZE_BYTES: usize = 5_242_880;
 
-/// Protocol version string advertised during handshakes.
-pub const NETWORK_PROTOCOL_VERSION: &str = "1.0.0";
-
 // ─── Mempool & Transaction Limits ───────────────────────────────────────────
 
 /// Maximum total memory (in bytes) the mempool may consume (100 MiB).
@@ -186,11 +209,6 @@ mod tests {
     }
 
     #[test]
-    fn derived_constants() {
-        assert_eq!(block_max_capacity_bytes(), 1_200_000);
-    }
-
-    #[test]
     fn base_reward_gold_derivation() {
         let annual_production_tonnes: u64 = 3_630;
         let troy_oz_per_tonne: f64 = 32_150.7;
@@ -205,8 +223,27 @@ mod tests {
     }
 
     #[test]
-    fn min_bond_stake_in_opl() {
-        let bond_opl = MIN_BOND_STAKE as f64 / FLAKES_PER_OPL as f64;
-        assert!((bond_opl - 100.0).abs() < 0.001);
+    fn min_bond_stake_is_one_opl() {
+        assert_eq!(MIN_BOND_STAKE, FLAKES_PER_OPL);
+    }
+
+    #[test]
+    fn epoch_equals_unbonding_delay() {
+        assert_eq!(UNBONDING_DELAY_BLOCKS, EPOCH);
+    }
+
+    #[test]
+    fn min_fee_is_one_flake() {
+        assert_eq!(MIN_FEE, 1);
+    }
+
+    #[test]
+    fn block_version_is_one() {
+        assert_eq!(BLOCK_VERSION, 1);
+    }
+
+    #[test]
+    fn signature_type_ed25519_is_zero() {
+        assert_eq!(SIGNATURE_TYPE_ED25519, 0);
     }
 }

@@ -11,7 +11,7 @@
 //! constants and attestation fields, ensuring that every node derives the
 //! exact same chain state from the same config.
 
-use opolys_core::{Block, BlockHeader, Hash, MIN_DIFFICULTY, BASE_REWARD, NETWORK_PROTOCOL_VERSION, BLOCK_TARGET_TIME_SECS, MIN_BOND_STAKE, FLAKES_PER_OPL, RETARGET_EPOCH, POS_FINALITY_BLOCKS, BLOCK_CAPACITY_RATE, CURRENCY_NAME, CURRENCY_TICKER, CURRENCY_SMALLEST_UNIT};
+use opolys_core::{Block, BlockHeader, Hash, MIN_DIFFICULTY, BASE_REWARD, NETWORK_PROTOCOL_VERSION, BLOCK_TARGET_TIME_SECS, MIN_BOND_STAKE, FLAKES_PER_OPL, EPOCH, POS_FINALITY_BLOCKS, BLOCK_VERSION, MIN_FEE, CURRENCY_NAME, CURRENCY_TICKER, CURRENCY_SMALLEST_UNIT};
 use borsh::{BorshSerialize, BorshDeserialize};
 use opolys_crypto::Blake3Hasher;
 
@@ -101,10 +101,11 @@ pub fn build_genesis_block(config: &GenesisConfig) -> Block {
     state_hasher.update(&BASE_REWARD.to_be_bytes());
     state_hasher.update(&BLOCK_TARGET_TIME_SECS.to_be_bytes());
     state_hasher.update(&MIN_DIFFICULTY.to_be_bytes());
-    state_hasher.update(&RETARGET_EPOCH.to_be_bytes());
+    state_hasher.update(&EPOCH.to_be_bytes());
     state_hasher.update(&POS_FINALITY_BLOCKS.to_be_bytes());
     state_hasher.update(&MIN_BOND_STAKE.to_be_bytes());
-    state_hasher.update(&BLOCK_CAPACITY_RATE.to_be_bytes());
+    state_hasher.update(&MIN_FEE.to_be_bytes());
+    state_hasher.update(&BLOCK_VERSION.to_be_bytes());
     state_hasher.update(&config.attestation.ceremony_timestamp.to_be_bytes());
     state_hasher.update(&config.attestation.annual_production_tonnes.to_be_bytes());
     state_hasher.update(&config.attestation.total_above_ground_tonnes.to_be_bytes());
@@ -116,12 +117,15 @@ pub fn build_genesis_block(config: &GenesisConfig) -> Block {
 
     Block {
         header: BlockHeader {
+            version: BLOCK_VERSION,
             height: 0,
             previous_hash: Hash::zero(),
             state_root,
             transaction_root: Hash::zero(),
             timestamp: config.attestation.ceremony_timestamp,
             difficulty: config.initial_difficulty,
+            suggested_fee: MIN_FEE,
+            extension_root: None,
             pow_proof: None,
             validator_signature: None,
         },

@@ -66,19 +66,26 @@ pub enum BlockStatus {
 ///
 /// Note: `pow_proof` and `validator_signature` are intentionally excluded
 /// because they are populated after mining — the proof must satisfy the hash,
-/// not the other way around.
+/// not the other way around. The `version`, `suggested_fee`, and
+/// `extension_root` fields are included to bind the PoW to the complete
+/// header state.
 pub fn compute_block_hash(header: &BlockHeader) -> Hash {
     let mut hasher = Blake3Hasher::new();
     // Hash every field of the header in a fixed order for determinism.
     // pow_proof and validator_signature are excluded because:
     // - pow_proof is set AFTER mining (the proof must satisfy the hash, not vice versa)
     // - validator_signature (ed25519) is appended after block producer selection
+    hasher.update(&header.version.to_be_bytes());
     hasher.update(&header.height.to_be_bytes());
     hasher.update(&header.previous_hash.0);
     hasher.update(&header.state_root.0);
     hasher.update(&header.transaction_root.0);
     hasher.update(&header.timestamp.to_be_bytes());
     hasher.update(&header.difficulty.to_be_bytes());
+    hasher.update(&header.suggested_fee.to_be_bytes());
+    if let Some(ref ext_root) = header.extension_root {
+        hasher.update(ext_root.as_bytes());
+    }
     hasher.finalize()
 }
 
@@ -132,6 +139,7 @@ mod tests {
             },
             fee: 1000,
             signature: vec![1, 2, 3],
+            signature_type: 0,
             nonce: 0,
             data: vec![],
         };
@@ -140,15 +148,34 @@ mod tests {
         assert_eq!(root1, root2);
     }
 
+    fn test_header(height: u64, difficulty: u64) -> BlockHeader {
+        BlockHeader {
+            version: 1,
+            height,
+            previous_hash: Hash::zero(),
+            state_root: Hash::from_bytes([0u8; 32]),
+            transaction_root: Hash::from_bytes([0u8; 32]),
+            timestamp: 1000,
+            difficulty,
+            suggested_fee: 1,
+            extension_root: None,
+            pow_proof: None,
+            validator_signature: None,
+        }
+    }
+
     #[test]
     fn compute_block_hash_deterministic() {
         let header = BlockHeader {
+            version: 1,
             height: 42,
             previous_hash: Hash::zero(),
             state_root: Hash::from_bytes([1u8; 32]),
             transaction_root: Hash::from_bytes([2u8; 32]),
             timestamp: 1700000000,
             difficulty: 100,
+            suggested_fee: 1,
+            extension_root: None,
             pow_proof: None,
             validator_signature: None,
         };
@@ -160,16 +187,7 @@ mod tests {
 
     #[test]
     fn block_hash_differs_for_different_heights() {
-        let base = BlockHeader {
-            height: 1,
-            previous_hash: Hash::zero(),
-            state_root: Hash::zero(),
-            transaction_root: Hash::zero(),
-            timestamp: 100,
-            difficulty: 1,
-            pow_proof: None,
-            validator_signature: None,
-        };
+        let base = test_header(1, 1);
         let h1 = compute_block_hash(&BlockHeader { height: 1, ..base.clone() });
         let h2 = compute_block_hash(&BlockHeader { height: 2, ..base.clone() });
         assert_ne!(h1, h2);
@@ -177,17 +195,7 @@ mod tests {
 
     #[test]
     fn block_hash_chain_linkage() {
-        // Simulate a 3-block chain where each block references the previous hash
-        let genesis_header = BlockHeader {
-            height: 0,
-            previous_hash: Hash::zero(),
-            state_root: Hash::from_bytes([0u8; 32]),
-            transaction_root: Hash::from_bytes([0u8; 32]),
-            timestamp: 1000,
-            difficulty: 1,
-            pow_proof: None,
-            validator_signature: None,
-        };
+        let genesis_header = test_header(0, 1);
         let genesis_hash = compute_block_hash(&genesis_header);
 
         let block1_header = BlockHeader {
@@ -196,9 +204,7 @@ mod tests {
             state_root: Hash::from_bytes([1u8; 32]),
             transaction_root: Hash::from_bytes([1u8; 32]),
             timestamp: 1120,
-            difficulty: 1,
-            pow_proof: None,
-            validator_signature: None,
+            ..test_header(1, 1)
         };
         let block1_hash = compute_block_hash(&block1_header);
 
@@ -208,18 +214,39 @@ mod tests {
             state_root: Hash::from_bytes([2u8; 32]),
             transaction_root: Hash::from_bytes([2u8; 32]),
             timestamp: 1240,
-            difficulty: 1,
-            pow_proof: None,
-            validator_signature: None,
+            ..test_header(2, 1)
         };
         let _block2_hash = compute_block_hash(&block2_header);
 
-        // Block 1 must reference genesis hash
         assert_eq!(block1_header.previous_hash, genesis_hash);
-        // Block 2 must reference block 1 hash
         assert_eq!(block2_header.previous_hash, block1_hash);
-        // Genesis has zero previous hash
         assert_eq!(genesis_header.previous_hash, Hash::zero());
+    }
+
+    #[test]
+    fn block_hash_includes_version() {
+        let h1 = test_header(1, 1);
+        let h2 = BlockHeader { version: 2, ..h1.clone() };
+        assert_ne!(compute_block_hash(&h1), compute_block_hash(&h2));
+    }
+
+    #[test]
+    fn block_hash_includes_suggested_fee() {
+        let h1 = test_header(1, 1);
+        let h2 = BlockHeader { suggested_fee: 999, ..h1.clone() };
+        assert_ne!(compute_block_hash(&h1), compute_block_hash(&h2));
+    }
+
+    #[test]
+    fn suggested_fee_ema() {
+        use crate::emission::compute_suggested_fee;
+        // Initial fee
+        let fee = compute_suggested_fee(0, 0);
+        assert_eq!(fee, 1); // MIN_FEE floor
+
+        // EMA: (10000 + 9 * 1000) / 10 = 1900
+        let fee = compute_suggested_fee(10_000, 1_000);
+        assert_eq!(fee, 1900);
     }
 
     #[test]

@@ -112,12 +112,18 @@ impl ObjectId {
 /// Each variant carries all data needed to execute it:
 /// - **Transfer**: move OPL from sender to recipient; the fee is burned
 /// - **ValidatorBond**: lock `amount` OPL as stake (new entry or top-up)
-/// - **ValidatorUnbond**: withdraw a specific bond entry by its ID
+/// - **ValidatorUnbond**: unbond `amount` OPL using FIFO order (oldest first)
 ///
 /// Validators can hold multiple bond entries, each with its own stake, seniority
-/// clock, and bond_id. Top-up bonding creates a new entry; unbonding removes a
-/// specific one. There are no pool primitives in the protocol — pools are a
-/// market innovation built on top of per-entry bonds.
+/// clock, and bond_id. Top-up bonding creates a new entry; unbonding follows FIFO
+/// order — the oldest entries are consumed first. If the unbond amount exceeds
+/// an oldest entry's stake, that entry is fully consumed and the remainder comes
+/// from the next oldest. Split entries keep their original `bonded_at_timestamp`
+/// for weight calculation. There are no pool primitives in the protocol — pools
+/// are a market innovation built on top of per-entry bonds.
+///
+/// Invalid bond amounts (below MIN_FEE floor) result in no fee burn and no
+/// nonce advance.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TransactionAction {
     /// Transfer `amount` Flakes from the sender to `recipient`.
@@ -127,14 +133,17 @@ pub enum TransactionAction {
     /// Bond `amount` Flakes as validator stake. If the sender is already a
     /// validator, this creates a new bond entry (top-up) with its own seniority
     /// clock. If not, this creates the validator with their first bond entry.
-    /// Each entry requires `>= MIN_BOND_STAKE` (100 OPL).
+    /// Each entry requires `>= MIN_BOND_STAKE` (1 OPL) for new entries only.
     ValidatorBond { amount: FlakeAmount },
 
-    /// Unbond a specific bond entry by its `bond_id`. The entry's stake is
-    /// returned to the sender and the fee is burned. If the validator has no
-    /// remaining entries, they are removed from the validator set entirely.
-    /// If the bond_id doesn't exist, the transaction fails with no fee burn.
-    ValidatorUnbond { bond_id: u64 },
+    /// Unbond `amount` Flakes from the validator's stake using FIFO order.
+    /// The oldest bond entries are consumed first. If the amount exceeds an
+    /// entry's stake, that entry is fully consumed and the remainder comes from
+    /// the next oldest. Split entries keep their original timestamp for weight.
+    /// The fee is burned. After a UNBONDING_DELAY_BLOCKS delay, the unbonded
+    /// stake is returned to the sender. Unbonding stake still earns rewards
+    /// during the delay period.
+    ValidatorUnbond { amount: FlakeAmount },
 }
 
 /// The current consensus phase for a given block height.
@@ -179,6 +188,10 @@ pub enum ValidatorStatus {
 /// proof-of-work and state roots without downloading the full block body.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize, Serialize, Deserialize)]
 pub struct BlockHeader {
+    /// Protocol version number. Allows future upgrades while maintaining
+    /// backward compatibility. Version 1 is the initial protocol with
+    /// EVO-OMAP PoW and ed25519 signatures.
+    pub version: u32,
     /// The sequential height of this block (0 for genesis).
     pub height: BlockHeight,
     /// The hash of the previous block's header. `Hash::zero()` for genesis.
@@ -191,6 +204,14 @@ pub struct BlockHeader {
     pub timestamp: u64,
     /// The difficulty target for this block — lower values mean harder PoW.
     pub difficulty: u64,
+    /// Suggested fee in Flakes for the next block. Computed as an EMA of the
+    /// previous block's transaction fees, floored at MIN_FEE (1 Flake).
+    /// Miners/validators should include this in the block template so wallets
+    /// can estimate appropriate fees, but any fee >= MIN_FEE is valid.
+    pub suggested_fee: FlakeAmount,
+    /// Optional Merkle root of extension data (e.g., rollup anchors).
+    /// `None` for normal blocks. Reserved for future protocol extensions.
+    pub extension_root: Option<Hash>,
     /// The nonce/solution that satisfies the difficulty target (present in PoW phases).
     pub pow_proof: Option<Vec<u8>>,
     /// The validator's ed25519 signature over the header (present in PoS phases).
@@ -214,6 +235,9 @@ pub struct Transaction {
     pub fee: FlakeAmount,
     /// Cryptographic signature over the transaction body by the sender.
     pub signature: Vec<u8>,
+    /// Signature type: 0 = ed25519 (currently the only supported type).
+    /// Reserved for post-quantum signatures in future protocol versions.
+    pub signature_type: u8,
     /// Sender's nonce for replay protection — must equal the account's current nonce + 1.
     pub nonce: u64,
     /// Arbitrary data attachment (e.g., memos). Not interpreted by consensus.
@@ -332,12 +356,12 @@ mod tests {
 
     #[test]
     fn transaction_action_variants() {
-        let transfer = TransactionAction::Transfer {
+        let _transfer = TransactionAction::Transfer {
             recipient: ObjectId::zero(),
             amount: 100,
         };
         let bond = TransactionAction::ValidatorBond { amount: 10_000_000 };
-        let unbond = TransactionAction::ValidatorUnbond { bond_id: 0 };
+        let unbond = TransactionAction::ValidatorUnbond { amount: 5_000_000 };
         assert_ne!(bond, unbond);
     }
 

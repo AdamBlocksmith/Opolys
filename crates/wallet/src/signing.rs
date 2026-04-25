@@ -7,10 +7,10 @@
 //!
 //! Transactions are:
 //! - **Transfer** — move OPL between accounts (fees are burned, not collected)
-//! - **ValidatorBond** — lock OPL as stake to become a validator (min 100 OPL per entry)
-//! - **ValidatorUnbond** — release a specific bond entry's stake back to balance
+//! - **ValidatorBond** — lock OPL as stake to become a validator (min 1 OPL per entry)
+//! - **ValidatorUnbond** — release stake using FIFO order (oldest entries first)
 
-use opolys_core::{FlakeAmount, ObjectId, Transaction, TransactionAction};
+use opolys_core::{FlakeAmount, ObjectId, Transaction, TransactionAction, SIGNATURE_TYPE_ED25519};
 use crate::key::KeyPair;
 use opolys_crypto::hash_to_object_id;
 
@@ -47,6 +47,7 @@ impl TransactionSigner {
             action,
             fee,
             signature,
+            signature_type: SIGNATURE_TYPE_ED25519,
             nonce,
             data: vec![],
         }
@@ -56,8 +57,8 @@ impl TransactionSigner {
     ///
     /// Locks `amount` OPL (in flakes) as validator stake. If the sender is
     /// already a validator, this creates a new bond entry (top-up) with its
-    /// own seniority clock starting from zero. Each entry must be at least
-    /// `MIN_BOND_STAKE` (100 OPL).
+    /// own seniority clock starting from zero. Each new entry must be at least
+    /// `MIN_BOND_STAKE` (1 OPL).
     pub fn create_validator_bond(
         sender: &KeyPair,
         amount: FlakeAmount,
@@ -77,23 +78,26 @@ impl TransactionSigner {
             action,
             fee,
             signature,
+            signature_type: SIGNATURE_TYPE_ED25519,
             nonce,
             data: vec![],
         }
     }
 
-    /// Create a signed validator unbond transaction for a specific bond entry.
+    /// Create a signed validator unbond transaction for FIFO amount-based unbonding.
     ///
-    /// Releases the stake from bond entry `bond_id` back to the sender's balance.
-    /// The fee is burned. If the validator has no remaining entries after this
-    /// unbond, they are removed from the validator set entirely.
+    /// Unbonds `amount` Flakes from the validator's stake using FIFO order —
+    /// the oldest entries are consumed first. If the amount exceeds an entry's
+    /// stake, that entry is fully consumed and the remainder comes from the next
+    /// oldest. After a UNBONDING_DELAY_BLOCKS delay, the unbonded stake is
+    /// returned to the sender's wallet.
     pub fn create_validator_unbond(
         sender: &KeyPair,
-        bond_id: u64,
+        amount: FlakeAmount,
         fee: FlakeAmount,
         nonce: u64,
     ) -> Transaction {
-        let action = TransactionAction::ValidatorUnbond { bond_id };
+        let action = TransactionAction::ValidatorUnbond { amount };
         let sender_id = sender.object_id().clone();
 
         let tx_id = Self::compute_tx_id(&sender_id, &action, fee, nonce);
@@ -106,6 +110,7 @@ impl TransactionSigner {
             action,
             fee,
             signature,
+            signature_type: SIGNATURE_TYPE_ED25519,
             nonce,
             data: vec![],
         }
@@ -113,17 +118,19 @@ impl TransactionSigner {
 
     /// Deterministic transaction ID derived from sender, action, fee, and nonce via Blake3-256.
     ///
-    /// Ensures each transaction has a unique identifier without relying on
-    /// randomness. Two transactions with the same sender, action, fee, and nonce
-    /// will have the same ID — which is correct because the nonce prevents
-    /// replay.
+    /// The action is included in the hash to prevent transaction ID collisions
+    /// between different action types. Two transactions with the same sender,
+    /// fee, and nonce but different actions will have different IDs.
     fn compute_tx_id(
         sender: &ObjectId,
-        _action: &TransactionAction,
+        action: &TransactionAction,
         fee: FlakeAmount,
         nonce: u64,
     ) -> ObjectId {
         let mut data = sender.0.to_hex().as_bytes().to_vec();
+        // Include the action in the hash to prevent ID collisions between
+        // different action types with the same sender, fee, and nonce.
+        data.extend_from_slice(borsh::to_vec(action).unwrap_or_default().as_slice());
         data.extend_from_slice(&fee.to_be_bytes());
         data.extend_from_slice(&nonce.to_be_bytes());
         hash_to_object_id(&data)
@@ -148,13 +155,14 @@ mod tests {
         );
         assert_eq!(tx.nonce, 0);
         assert_eq!(tx.fee, FLAKES_PER_OPL / 10);
+        assert_eq!(tx.signature_type, SIGNATURE_TYPE_ED25519);
         assert!(matches!(tx.action, TransactionAction::Transfer { .. }));
     }
 
     #[test]
     fn create_bond_transaction() {
         let keypair = KeyPair::generate();
-        let bond_amount = 100 * FLAKES_PER_OPL;
+        let bond_amount = FLAKES_PER_OPL;
         let tx = TransactionSigner::create_validator_bond(
             &keypair,
             bond_amount,
@@ -162,18 +170,30 @@ mod tests {
             0,
         );
         assert!(matches!(tx.action, TransactionAction::ValidatorBond { amount } if amount == bond_amount));
+        assert_eq!(tx.signature_type, SIGNATURE_TYPE_ED25519);
     }
 
     #[test]
-    fn create_unbond_transaction_with_bond_id() {
+    fn create_unbond_transaction_with_amount() {
         let keypair = KeyPair::generate();
         let tx = TransactionSigner::create_validator_unbond(
             &keypair,
-            0,
+            FLAKES_PER_OPL,
             FLAKES_PER_OPL / 100,
             1,
         );
-        assert!(matches!(tx.action, TransactionAction::ValidatorUnbond { bond_id } if bond_id == 0));
+        assert!(matches!(tx.action, TransactionAction::ValidatorUnbond { amount } if amount == FLAKES_PER_OPL));
         assert_eq!(tx.nonce, 1);
+        assert_eq!(tx.signature_type, SIGNATURE_TYPE_ED25519);
+    }
+
+    #[test]
+    fn tx_id_includes_action() {
+        let keypair = KeyPair::generate();
+        let recipient = hash_to_object_id(b"recipient");
+        let transfer = TransactionSigner::create_transfer(&keypair, recipient.clone(), 1000, 100, 0);
+        let bond = TransactionSigner::create_validator_bond(&keypair, 1000, 100, 0);
+        // Same sender, same fee, same nonce, different action → different tx_id
+        assert_ne!(transfer.tx_id, bond.tx_id);
     }
 }

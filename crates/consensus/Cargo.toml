@@ -7,10 +7,14 @@ license.workspace = true
 [dependencies]
 opolys-core.workspace = true
 opolys-crypto.workspace = true
+evo-omap.workspace = true
 borsh.workspace = true
 blake3.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 hex.workspace = true
 thiserror.workspace = true
+rayon.workspace = true
+
+[dev-dependencies]
 rand.workspace = true
