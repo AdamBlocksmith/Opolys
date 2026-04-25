@@ -11,6 +11,8 @@ use libp2p::swarm::NetworkBehaviour;
 use libp2p::StreamProtocol;
 use opolys_core::NETWORK_PROTOCOL_VERSION;
 
+pub use libp2p::request_response::InboundRequestId;
+
 /// Gossip topic for transaction propagation.
 pub const GOSSIP_TX_TOPIC: &str = "opolys/tx/v1";
 /// Gossip topic for block propagation.
@@ -85,8 +87,11 @@ pub enum OpolysNetworkEvent {
     },
 
     /// A sync request was received from a peer.
+    /// The node should call `network.respond_sync_request(request_id, response)`
+    /// to send blocks back to the requesting peer.
     SyncRequestReceived {
         peer_id: libp2p::PeerId,
+        request_id: InboundRequestId,
         request: SyncRequest,
     },
 }

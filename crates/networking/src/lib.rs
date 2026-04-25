@@ -22,3 +22,4 @@ pub use behaviour::*;
 pub use network::*;
 pub use sync::{SyncRequest, SyncResponse, SyncConfig, MAX_SYNC_BLOCKS, MAX_SYNC_HEADERS};
 pub use discovery::DiscoveryConfig;
+pub use libp2p::request_response::InboundRequestId;

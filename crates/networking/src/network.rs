@@ -7,13 +7,14 @@
 //! - **Dial** bootstrap peers for initial network discovery
 //! - **Broadcast** transactions and blocks via gossipsub
 //! - **Request blocks** from peers via request-response for chain sync
+//! - **Respond** to block sync requests from other peers
 //! - **Process** incoming network events in a background task
 //!
 //! The network runs on a Tokio runtime and communicates with the node
 //! via channels. The node sends commands through `NetworkCommand` and
 //! receives events via `NetworkEvent`.
 
-use crate::behaviour::{OpolysBehaviour, GOSSIP_BLOCK_TOPIC, GOSSIP_TX_TOPIC, opolys_agent_string, sync_protocol};
+use crate::behaviour::{OpolysBehaviour, GOSSIP_BLOCK_TOPIC, GOSSIP_TX_TOPIC, opolys_agent_string, sync_protocol, OpolysBehaviourEvent};
 use crate::discovery::DiscoveryConfig;
 use crate::gossip::GossipConfig;
 use crate::sync::{SyncConfig, SyncRequest, SyncResponse};
@@ -25,6 +26,7 @@ use libp2p::swarm::SwarmEvent;
 use libp2p::PeerId;
 use libp2p::StreamProtocol;
 use futures::StreamExt;
+use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 use tokio::sync::mpsc;
@@ -47,7 +49,13 @@ pub enum NetworkCommand {
     RequestBlocks {
         peer_id: PeerId,
         request: SyncRequest,
-        response_channel: oneshot::Sender<Result<SyncResponse, NetworkError>>,
+    },
+
+    /// Respond to an inbound sync request with blocks.
+    /// Takes the request_id (from SyncRequestReceived event) and the response.
+    RespondSyncRequest {
+        request_id: request_response::InboundRequestId,
+        response: SyncResponse,
     },
 
     /// Dial a specific peer address.
@@ -190,7 +198,7 @@ impl OpolysNetwork {
         let swarm = libp2p::SwarmBuilder::with_existing_identity(local_key.clone())
             .with_tokio()
             .with_quic()
-            .with_relay_client(libp2p::noise::Config::new, libp2p::yamux::Config::default)?
+            .with_relay_client(libp2p::noise::Config::new, || libp2p::yamux::Config::default())?
             .with_behaviour(|_, _| behaviour)?
             .with_swarm_config(|cfg| {
                 cfg.with_idle_connection_timeout(std::time::Duration::from_secs(60))
@@ -211,6 +219,10 @@ impl OpolysNetwork {
             swarm,
             command_rx,
             event_tx,
+            // Tracks inbound sync request response channels keyed by request_id.
+            // When we receive a SyncRequestReceived event, we store the channel
+            // here so the node can respond via RespondSyncRequest.
+            inbound_request_channels: HashMap::new(),
         };
         tokio::spawn(network_task.run(config));
 
@@ -244,21 +256,28 @@ impl OpolysNetwork {
     }
 
     /// Request blocks from a peer for chain synchronization.
+    /// The response will be delivered as a SyncResponseReceived event.
     pub async fn request_blocks(
         &self,
         peer_id: PeerId,
         request: SyncRequest,
-    ) -> Result<SyncResponse, NetworkError> {
-        let (tx, rx) = oneshot::channel();
+    ) -> Result<(), NetworkError> {
         self.command_tx
-            .send(NetworkCommand::RequestBlocks {
-                peer_id,
-                request,
-                response_channel: tx,
-            })
+            .send(NetworkCommand::RequestBlocks { peer_id, request })
             .await
-            .map_err(|_| NetworkError::ChannelClosed)?;
-        rx.await.map_err(|_| NetworkError::ChannelClosed)?
+            .map_err(|_| NetworkError::ChannelClosed)
+    }
+
+    /// Respond to an inbound sync request with blocks.
+    pub async fn respond_sync_request(
+        &self,
+        request_id: request_response::InboundRequestId,
+        response: SyncResponse,
+    ) -> Result<(), NetworkError> {
+        self.command_tx
+            .send(NetworkCommand::RespondSyncRequest { request_id, response })
+            .await
+            .map_err(|_| NetworkError::ChannelClosed)
     }
 
     /// Get the list of currently connected peers.
@@ -277,6 +296,10 @@ struct SwarmTask {
     swarm: libp2p::Swarm<OpolysBehaviour>,
     command_rx: mpsc::Receiver<NetworkCommand>,
     event_tx: mpsc::Sender<crate::behaviour::OpolysNetworkEvent>,
+    /// Pending inbound sync request response channels, keyed by request_id.
+    /// When the node receives a SyncRequestReceived event, it can respond
+    /// using NetworkCommand::RespondSyncRequest, which looks up the channel here.
+    inbound_request_channels: HashMap<request_response::InboundRequestId, request_response::ResponseChannel<SyncResponse>>,
 }
 
 impl SwarmTask {
@@ -293,7 +316,7 @@ impl SwarmTask {
             tracing::error!("Failed to subscribe to block topic: {}", e);
         }
 
-        // Start listening
+        // Start listening on QUIC
         let listen_addr = libp2p::Multiaddr::from(libp2p::multiaddr::Protocol::Ip4(
             std::net::Ipv4Addr::UNSPECIFIED,
         ))
@@ -364,8 +387,18 @@ impl SwarmTask {
                     tracing::warn!("Failed to broadcast block: {}", e);
                 }
             }
-            NetworkCommand::RequestBlocks { peer_id, request, response_channel: _ } => {
-                self.swarm.behaviour_mut().request_response.send_request(&peer_id, request);
+            NetworkCommand::RequestBlocks { peer_id, request } => {
+                let request_id = self.swarm.behaviour_mut().request_response.send_request(&peer_id, request);
+                tracing::debug!(%peer_id, ?request_id, "Sent sync request to peer");
+            }
+            NetworkCommand::RespondSyncRequest { request_id, response } => {
+                if let Some(channel) = self.inbound_request_channels.remove(&request_id) {
+                    if let Err(e) = self.swarm.behaviour_mut().request_response.send_response(channel, response) {
+                        tracing::warn!(?request_id, "Failed to send sync response: {:?}", e);
+                    }
+                } else {
+                    tracing::warn!(?request_id, "No pending inbound request channel for sync response");
+                }
             }
             NetworkCommand::DialPeer { addr } => {
                 if let Err(e) = self.swarm.dial(addr) {
@@ -386,9 +419,8 @@ impl SwarmTask {
         >,
     ) {
         match event {
-            SwarmEvent::Behaviour(behaviour_event) => {
-                // Route the composed behaviour event to the appropriate handler
-                tracing::debug!("Composed behaviour event: {:?}", behaviour_event);
+            SwarmEvent::Behaviour(composed_event) => {
+                self.handle_composed_event(composed_event);
             }
             SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                 tracing::info!("Peer connected: {}", peer_id);
@@ -409,7 +441,149 @@ impl SwarmTask {
                 tracing::warn!("Outgoing connection error to {:?}: {}", peer_id, error);
             }
             _ => {
-                tracing::trace!("Swarm event: {:?}", event);
+                tracing::trace!("Unhandled swarm event: {:?}", event);
+            }
+        }
+    }
+
+    /// Route composed behaviour events to the appropriate handler.
+    ///
+    /// The `#[derive(NetworkBehaviour)]` macro generates `OpolysBehaviourEvent`
+    /// with variants matching the struct field names (in UpperCamelCase):
+    /// Gossipsub, Kademlia, Identify, Ping, RequestResponse.
+    fn handle_composed_event(
+        &mut self,
+        event: OpolysBehaviourEvent,
+    ) {
+        match event {
+            // ── Gossipsub events ─────────────────────────────────────────
+            // Route incoming gossip messages to the node based on their topic.
+            // Transactions arrive on the tx topic; blocks on the block topic.
+            OpolysBehaviourEvent::Gossipsub(gossip_event) => {
+                match gossip_event {
+                    libp2p::gossipsub::Event::Message {
+                        propagation_source,
+                        message,
+                        ..
+                    } => {
+                        let topic = message.topic.to_string();
+                        let data = message.data;
+                        let source = propagation_source;
+
+                        if topic == GOSSIP_TX_TOPIC {
+                            let _ = self.event_tx.try_send(
+                                crate::behaviour::OpolysNetworkEvent::GossipTransaction {
+                                    data,
+                                    source,
+                                },
+                            );
+                        } else if topic == GOSSIP_BLOCK_TOPIC {
+                            let _ = self.event_tx.try_send(
+                                crate::behaviour::OpolysNetworkEvent::GossipBlock {
+                                    data,
+                                    source,
+                                },
+                            );
+                        } else {
+                            tracing::warn!(topic = %topic, "Unknown gossip topic");
+                        }
+                    }
+                    libp2p::gossipsub::Event::Subscribed { peer_id, topic } => {
+                        tracing::debug!(peer = %peer_id, topic = %topic, "Peer subscribed to topic");
+                    }
+                    libp2p::gossipsub::Event::Unsubscribed { peer_id, topic } => {
+                        tracing::debug!(peer = %peer_id, topic = %topic, "Peer unsubscribed from topic");
+                    }
+                    libp2p::gossipsub::Event::GossipsubNotSupported { peer_id } => {
+                        tracing::debug!(peer = %peer_id, "Peer does not support gossipsub");
+                    }
+                }
+            }
+
+            // ── Request-Response events ────────────────────────────────────
+            // Sync requests arrive as inbound Request messages; sync responses
+            // arrive as inbound Response messages for our outbound requests.
+            OpolysBehaviourEvent::RequestResponse(rr_event) => {
+                match rr_event {
+                    libp2p::request_response::Event::Message { peer, message } => {
+                        match message {
+                            // Inbound sync request from a peer — save the response
+                            // channel and emit an event so the node can look up blocks
+                            // and respond asynchronously.
+                            libp2p::request_response::Message::Request { request_id, request, channel } => {
+                                tracing::info!(peer = %peer, ?request_id, start_height = request.start_height, count = request.count, "Sync request received");
+                                self.inbound_request_channels.insert(request_id, channel);
+                                let _ = self.event_tx.try_send(
+                                    crate::behaviour::OpolysNetworkEvent::SyncRequestReceived {
+                                        peer_id: peer,
+                                        request_id,
+                                        request,
+                                    },
+                                );
+                            }
+                            // Inbound response to our outbound sync request — forward
+                            // to the node as a SyncResponseReceived event.
+                            libp2p::request_response::Message::Response { request_id, response } => {
+                                tracing::debug!(peer = %peer, ?request_id, blocks = response.blocks.len(), "Sync response received");
+                                let _ = self.event_tx.try_send(
+                                    crate::behaviour::OpolysNetworkEvent::SyncResponseReceived {
+                                        peer_id: peer,
+                                        response,
+                                    },
+                                );
+                            }
+                        }
+                    }
+                    libp2p::request_response::Event::OutboundFailure { peer, request_id, error } => {
+                        tracing::warn!(peer = %peer, ?request_id, ?error, "Outbound sync request failed");
+                    }
+                    libp2p::request_response::Event::InboundFailure { peer, request_id, error } => {
+                        tracing::warn!(peer = %peer, ?request_id, ?error, "Inbound sync request failed");
+                    }
+                    libp2p::request_response::Event::ResponseSent { peer, request_id } => {
+                        tracing::debug!(peer = %peer, ?request_id, "Sync response sent");
+                    }
+                }
+            }
+
+            // ── Identify events ────────────────────────────────────────────
+            OpolysBehaviourEvent::Identify(identify_event) => {
+                match identify_event {
+                    libp2p::identify::Event::Received { peer_id, info, .. } => {
+                        tracing::debug!(peer = %peer_id, agent = %info.agent_version, "Identify received");
+                        // Add peer addresses to Kademlia DHT for better routing
+                        for addr in info.listen_addrs {
+                            self.swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
+                        }
+                    }
+                    libp2p::identify::Event::Sent { peer_id, .. } => {
+                        tracing::trace!(peer = %peer_id, "Identify sent");
+                    }
+                    libp2p::identify::Event::Pushed { peer_id, .. } => {
+                        tracing::trace!(peer = %peer_id, "Identify pushed");
+                    }
+                    libp2p::identify::Event::Error { peer_id, error, .. } => {
+                        tracing::debug!(peer = %peer_id, ?error, "Identify error");
+                    }
+                }
+            }
+
+            // ── Kademlia events ───────────────────────────────────────────
+            OpolysBehaviourEvent::Kademlia(kad_event) => {
+                tracing::trace!("Kademlia event: {:?}", kad_event);
+            }
+
+            // ── Ping events ────────────────────────────────────────────────
+            // The ping event is a struct (not an enum) in libp2p 0.54.
+            OpolysBehaviourEvent::Ping(ping_event) => {
+                match ping_event.result {
+                    Ok(rtt) => {
+                        tracing::trace!(peer = %ping_event.peer, rtt_ms = rtt.as_millis(), "Ping succeeded");
+                    }
+                    Err(error) => {
+                        tracing::debug!(peer = %ping_event.peer, ?error, "Ping failed");
+                    }
+                }
             }
         }
     }
