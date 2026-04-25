@@ -57,14 +57,15 @@ pub const DECIMAL_PLACES: u32 = 6;
 
 /// Base block reward in Flakes — the only source of new OPL issuance.
 ///
-/// Derived from real-world gold production:
+/// Derived from real-world gold production data:
 /// ```text
 /// annual_oz = 3,630 tonnes × 32,150.7 oz/tonne ≈ 116,707,041 oz
-/// blocks_per_year = 365.25 × 86400 ÷ 120 ≈ 262,980
-/// reward = floor(116,707,041 ÷ 262,980) = 440 OPL per block
+/// blocks_per_year = 365.25 × 86400 ÷ 84.375 ≈ 374,267
+/// reward = floor(116,707,041 ÷ 374,267) ≈ 312 OPL per block
 /// ```
-/// This equates to ~440 OPL per 120-second block, mirroring the rate at which
-/// physical gold is mined worldwide. See module-level docs for full derivation.
+/// With 84.375-second blocks (exactly 1,024 blocks per 24 hours),
+/// each block earns a base of 440 OPL. The natural equilibrium model
+/// adjusts this via vein yield and difficulty without governance.
 pub const BASE_REWARD: u64 = 440 * FLAKES_PER_OPL;
 
 // ─── Consensus Parameters ────────────────────────────────────────────────────
@@ -102,11 +103,21 @@ pub const MIN_FEE: u64 = 1;
 /// After this many subsequent PoS blocks, a block cannot be reverted.
 pub const POS_FINALITY_BLOCKS: u64 = 3;
 
-/// Target time between blocks in seconds. 120s ≈ one block every 2 minutes.
+/// Target time between blocks in milliseconds.
+/// 84,375 ms = 84.375 seconds per block.
 ///
-/// This is chosen so that ~262,980 blocks are produced per year, aligning
-/// block issuance with real-world gold mining rates.
-pub const BLOCK_TARGET_TIME_SECS: u64 = 120;
+/// Chosen so that exactly 1,024 blocks (one epoch) takes 24 hours:
+/// 1,024 × 84,375 ms = 86,400,000 ms = 86,400 seconds = 24 hours.
+///
+/// This yields ~374,267 blocks per year, aligning block issuance with
+/// real-world gold mining rates. BASE_REWARD (440 OPL) per block produces
+/// an annual emission of ~440 × 374,267 ≈ 164.7 million OPL, which
+/// tracks the ~3,630 tonnes of annual gold production.
+pub const BLOCK_TARGET_TIME_MS: u64 = 84_375;
+
+/// Target time between blocks in seconds, rounded for convenience.
+/// Use BLOCK_TARGET_TIME_MS for precise calculations.
+pub const BLOCK_TARGET_TIME_SECS: u64 = 84;
 
 /// Minimum stake (in Flakes) required for a **new** bond entry (1 OPL).
 ///

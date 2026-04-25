@@ -11,7 +11,7 @@
 //! constants and attestation fields, ensuring that every node derives the
 //! exact same chain state from the same config.
 
-use opolys_core::{Block, BlockHeader, Hash, ObjectId, MIN_DIFFICULTY, BASE_REWARD, NETWORK_PROTOCOL_VERSION, BLOCK_TARGET_TIME_SECS, MIN_BOND_STAKE, FLAKES_PER_OPL, EPOCH, POS_FINALITY_BLOCKS, BLOCK_VERSION, MIN_FEE, CURRENCY_NAME, CURRENCY_TICKER, CURRENCY_SMALLEST_UNIT};
+use opolys_core::{Block, BlockHeader, Hash, ObjectId, MIN_DIFFICULTY, BASE_REWARD, NETWORK_PROTOCOL_VERSION, BLOCK_TARGET_TIME_MS, MIN_BOND_STAKE, FLAKES_PER_OPL, EPOCH, POS_FINALITY_BLOCKS, BLOCK_VERSION, MIN_FEE, CURRENCY_NAME, CURRENCY_TICKER, CURRENCY_SMALLEST_UNIT};
 use borsh::{BorshSerialize, BorshDeserialize};
 use opolys_crypto::Blake3Hasher;
 
@@ -99,7 +99,7 @@ pub fn build_genesis_block(config: &GenesisConfig) -> Block {
     state_hasher.update(CURRENCY_SMALLEST_UNIT.as_bytes());
     state_hasher.update(&FLAKES_PER_OPL.to_be_bytes());
     state_hasher.update(&BASE_REWARD.to_be_bytes());
-    state_hasher.update(&BLOCK_TARGET_TIME_SECS.to_be_bytes());
+    state_hasher.update(&BLOCK_TARGET_TIME_MS.to_be_bytes());
     state_hasher.update(&MIN_DIFFICULTY.to_be_bytes());
     state_hasher.update(&EPOCH.to_be_bytes());
     state_hasher.update(&POS_FINALITY_BLOCKS.to_be_bytes());

@@ -280,7 +280,7 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
             tracing::info!(miner_id = %validating_node.miner_id.to_hex(), "Validator block production loop starting");
             loop {
                 // Wait for the target block time before producing
-                tokio::time::sleep(std::time::Duration::from_secs(opolys_core::BLOCK_TARGET_TIME_SECS)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(opolys_core::BLOCK_TARGET_TIME_MS)).await;
 
                 // Only produce if we're in PoS mode (stake coverage > 0)
                 let chain = validating_node.chain.read().await;

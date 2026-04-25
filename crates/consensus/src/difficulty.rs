@@ -105,10 +105,13 @@ fn compute_retarget(current_difficulty: u64, current_height: BlockHeight, block_
     }
 
     let actual_time = block_timestamps[end_idx].saturating_sub(block_timestamps[start_idx]);
-    let expected_time = EPOCH * opolys_core::BLOCK_TARGET_TIME_SECS;
+    // Use milliseconds for precision: 84,375 ms * 1,024 blocks = 86,400,000 ms = 24 hours exactly
+    let expected_time_ms = EPOCH * opolys_core::BLOCK_TARGET_TIME_MS;
+    // Convert actual time to milliseconds for consistent comparison
+    let actual_time_ms = actual_time.saturating_mul(1_000);
 
     // If timestamps are degenerate (zero elapsed time), spike difficulty.
-    if actual_time == 0 {
+    if actual_time_ms == 0 {
         return current_difficulty.saturating_mul(4);
     }
 
@@ -116,8 +119,8 @@ fn compute_retarget(current_difficulty: u64, current_height: BlockHeight, block_
     // If blocks were too fast (actual < expected), difficulty increases.
     // If blocks were too slow (actual > expected), difficulty decreases.
     // Uses u128 intermediate to prevent overflow on large difficulty values.
-    let numerator = current_difficulty as u128 * expected_time as u128;
-    let denominator = actual_time as u128;
+    let numerator = current_difficulty as u128 * expected_time_ms as u128;
+    let denominator = actual_time_ms as u128;
     let new_difficulty = (numerator / denominator) as u64;
 
     // No maximum clamp — difficulty adjusts freely.
@@ -185,26 +188,27 @@ mod tests {
 
     #[test]
     fn retarget_at_epoch_boundary() {
-        let timestamps: Vec<u64> = (0..=2000).map(|i| i * 120).collect();
+        // Timestamps spaced at target block time (84,375 ms ≈ 84.375 seconds)
+        let timestamps: Vec<u64> = (0..=2000).map(|i| i * 84).collect();
         let new_diff = compute_retarget(100, 1024, &timestamps);
         assert!(new_diff >= MIN_DIFFICULTY);
     }
 
     #[test]
     fn retarget_no_clamp_max() {
-// If blocks are 10x too slow, difficulty should drop proportionally
-    // without an artificial maximum clamp
-    let timestamps: Vec<u64> = (0..=2000).map(|i| i * 1200).collect();
-    let new_diff = compute_retarget(100, 1024, &timestamps);
-    // 1200s per block × 1024 blocks = 1,228,800s actual
-    // Expected: 120s × 1024 = 122,880s
-    // Ratio: 122,880 / 1,228,800 ≈ 0.1x, so difficulty drops from 100 to ~10
-    assert!(new_diff < 100, "Difficulty should drop when blocks are too slow: got {}", new_diff);
+        // If blocks are 10x too slow, difficulty should drop proportionally
+        // without an artificial maximum clamp
+        let timestamps: Vec<u64> = (0..=2000).map(|i| i * 840).collect();
+        let new_diff = compute_retarget(100, 1024, &timestamps);
+        // 840s per block × 1,024 blocks = 860,160s actual
+        // Expected: 84,375ms × 1,024 = 86,400,000ms ≈ 86,400s
+        // Ratio: 86,400,000 / 860,160,000 ≈ 0.1x, so difficulty drops from 100 to ~10
+        assert!(new_diff < 100, "Difficulty should drop when blocks are too slow: got {}", new_diff);
     }
 
     #[test]
     fn compute_next_difficulty_integrates_consensus_floor() {
-        let timestamps: Vec<u64> = (0..=2000).map(|i| i * 120).collect();
+        let timestamps: Vec<u64> = (0..=2000).map(|i| i * 84).collect();
         let result = compute_next_difficulty(100, 1024, &timestamps, 10_000_000, 1_000_000);
         assert!(result.effective_difficulty() >= 10);
     }
