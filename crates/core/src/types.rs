@@ -240,11 +240,19 @@ pub struct BlockHeader {
 /// Every transaction carries a fee (in Flakes) that is **burned**, not collected.
 /// This implements Opolys' market-driven fee model — users set whatever fee they
 /// choose, and the fee permanently removes OPL from circulation.
+///
+/// Signature verification flow:
+/// 1. Check `Blake3(public_key) == sender` (binds the key to the identity)
+/// 2. Check `tx_id == compute_tx_id(sender, action, fee, nonce)` (integrity)
+/// 3. Check `ed25519_verify(signed_data, signature, public_key)` (authenticity)
+///
+/// The `signed_data` is `borsh::to_vec((sender, action, fee, nonce))`.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize, Serialize, Deserialize)]
 pub struct Transaction {
     /// Unique identifier for this transaction (hash of its content).
     pub tx_id: ObjectId,
     /// The account sending this transaction (pays the fee, signs the tx).
+    /// Must equal `Blake3(public_key)` for the signature to be valid.
     pub sender: ObjectId,
     /// The action this transaction performs (transfer, bond, or unbond).
     pub action: TransactionAction,
@@ -255,10 +263,14 @@ pub struct Transaction {
     /// Signature type: 0 = ed25519 (currently the only supported type).
     /// Reserved for post-quantum signatures in future protocol versions.
     pub signature_type: u8,
-    /// Sender's nonce for replay protection — must equal the account's current nonce + 1.
+    /// Sender's nonce for replay protection — must equal the account's current nonce.
     pub nonce: u64,
     /// Arbitrary data attachment (e.g., memos). Not interpreted by consensus.
     pub data: Vec<u8>,
+    /// The ed25519 public key of the sender (32 bytes).
+    /// Required for signature verification. Must satisfy `Blake3(public_key) == sender`.
+    /// This is the raw compressed point, not the ObjectId (which is the hash of it).
+    pub public_key: Vec<u8>,
 }
 
 /// A complete block: header + ordered list of transactions.

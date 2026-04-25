@@ -289,6 +289,7 @@ mod tests {
             signature_type: 0,
             nonce: 0,
             data: vec![],
+            public_key: vec![],
         };
         let root1 = compute_transaction_root(&[tx.clone()]);
         let root2 = compute_transaction_root(&[tx]);

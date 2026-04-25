@@ -50,6 +50,7 @@ impl TransactionSigner {
             signature_type: SIGNATURE_TYPE_ED25519,
             nonce,
             data: vec![],
+            public_key: sender.public_key_bytes(),
         }
     }
 
@@ -81,6 +82,7 @@ impl TransactionSigner {
             signature_type: SIGNATURE_TYPE_ED25519,
             nonce,
             data: vec![],
+            public_key: sender.public_key_bytes(),
         }
     }
 
@@ -113,6 +115,7 @@ impl TransactionSigner {
             signature_type: SIGNATURE_TYPE_ED25519,
             nonce,
             data: vec![],
+            public_key: sender.public_key_bytes(),
         }
     }
 

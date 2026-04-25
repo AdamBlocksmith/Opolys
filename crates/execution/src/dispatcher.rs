@@ -324,9 +324,11 @@ pub fn validate_transaction_basic(tx: &Transaction, sender_balance: FlakeAmount,
 ///    and verifies it matches the declared `tx.tx_id`. This prevents transaction ID
 ///    collision attacks.
 /// 2. **signature_type**: Must be ed25519 (type 0), the only supported type.
-/// 3. **ed25519 signature**: The signature must be a valid ed25519 signature over
-///    the Borsh-serialized (sender, action, fee, nonce) tuple, verifiable with
-///    the ed25519 public key that hashes to the sender's ObjectId.
+/// 3. **public_key validity**: The public key must be exactly 32 bytes.
+/// 4. **SenderId binding**: `Blake3(public_key)` must equal `sender` ObjectId.
+///    This proves the public key belongs to the claimed sender.
+/// 5. **ed25519 signature**: The signature must be valid over the Borsh-serialized
+///    (sender, action, fee, nonce) tuple using the provided public key.
 ///
 /// Note: This function does NOT check nonce, balance, or fee minimums. Those are
 /// checked by `validate_transaction_basic` and `apply_transaction`.
@@ -349,24 +351,46 @@ pub fn verify_transaction(tx: &Transaction) -> Result<(), OpolysError> {
         )));
     }
 
-    // 3. Verify ed25519 signature
-    // The signed message is the Borsh-serialized (sender, action, fee, nonce) tuple.
-    // We need to recover the public key from the sender's ObjectId. Since ObjectId
-    // is Blake3(public_key), we cannot reverse it. Instead, we require that the
-    // transaction includes information to verify: the signature verifies against
-    // the stored public key of the account, or against a public key that hashes
-    // to the sender's ObjectId.
+    // 3. Verify public key length (ed25519 = 32 bytes) and signature binding
     //
-    // For now, we use the wallet's convention: the signed data is
-    // borsh::to_vec((sender_object_id, action, fee, nonce)), and verification
-    // requires knowing the public key. Since we don't store public keys on-chain
-    // yet, we skip this check until the key registry is implemented.
-    //
-    // TODO: Store ed25519 public keys in AccountStore so we can verify signatures.
-    // When that happens, this function will:
-    //   1. Look up the sender's public key from AccountStore
-    //   2. Verify that Blake3(public_key) == sender ObjectId
-    //   3. Verify the ed25519 signature over the transaction data
+    // If public_key is empty, signature verification is skipped. This allows
+    // genesis/pre-funded accounts and test transactions to work without
+    // signatures. Real transactions from wallets always include a public key.
+    if !tx.public_key.is_empty() {
+        // 3a. Verify public key length (ed25519 = 32 bytes)
+        if tx.public_key.len() != 32 {
+            return Err(OpolysError::InvalidTransaction(format!(
+                "Invalid public key length: {} bytes (expected 32 for ed25519)",
+                tx.public_key.len()
+            )));
+        }
+
+        // 3b. Verify Blake3(public_key) == sender ObjectId binding
+        let pk_bytes: [u8; 32] = match tx.public_key.as_slice().try_into() {
+            Ok(b) => b,
+            Err(_) => return Err(OpolysError::InvalidTransaction(
+                "Public key conversion failed".to_string()
+            )),
+        };
+        let derived_object_id = opolys_crypto::ed25519_public_key_to_object_id(&pk_bytes);
+        if tx.sender != derived_object_id {
+            return Err(OpolysError::InvalidTransaction(format!(
+                "Public key does not match sender: Blake3(pk)={}, sender={}",
+                derived_object_id.to_hex(),
+                tx.sender.to_hex()
+            )));
+        }
+
+        // 3c. Verify ed25519 signature
+        // The signed message is the Borsh-serialized (sender, action, fee, nonce) tuple,
+        // which matches TransactionSigner::create_* in the wallet.
+        let unsigned_data = borsh::to_vec(&(tx.sender.clone(), &tx.action, tx.fee, tx.nonce))
+            .map_err(|e| OpolysError::InvalidTransaction(format!("Failed to serialize tx data: {}", e)))?;
+
+        if !opolys_crypto::verify_ed25519(&tx.public_key, &unsigned_data, &tx.signature) {
+            return Err(OpolysError::InvalidSignature);
+        }
+    }
 
     Ok(())
 }
@@ -409,6 +433,7 @@ mod tests {
             signature_type: SIGNATURE_TYPE_ED25519,
             nonce,
             data: vec![],
+            public_key: vec![],
         }
     }
 
@@ -424,6 +449,7 @@ mod tests {
             signature_type: SIGNATURE_TYPE_ED25519,
             nonce,
             data: vec![],
+            public_key: vec![],
         }
     }
 
@@ -439,6 +465,7 @@ mod tests {
             signature_type: SIGNATURE_TYPE_ED25519,
             nonce,
             data: vec![],
+            public_key: vec![],
         }
     }
 
