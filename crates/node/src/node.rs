@@ -356,7 +356,7 @@ impl OpolysNode {
     /// Apply a mined or received block to the chain state.
     ///
     /// This is the core state transition function:
-    /// 1. Verify block links to our chain tip
+    /// 1. Validate block (version, height, previous_hash, difficulty, PoW, etc.)
     /// 2. Compute the block hash and update chain linkage
     /// 3. Execute all transactions (Transfer/Bond/Unbond), burning fees
     /// 4. Compute block reward using vein yield (integer-only natural log)
@@ -369,16 +369,34 @@ impl OpolysNode {
         let mut validators = self.validators.write().await;
         let mut mempool = self.mempool.write().await;
 
-        // Verify the block links to our chain tip
-        if block.header.previous_hash != Hash::zero() && block.header.previous_hash != chain.latest_block_hash {
-            return Err(format!(
-                "Block does not link to chain tip: expected {}, got {}",
-                chain.latest_block_hash.to_hex(),
-                block.header.previous_hash.to_hex(),
-            ));
-        }
-
         let bonded_stake = validators.total_bonded_stake();
+
+        // Compute expected next difficulty for validation
+        let expected_difficulty = compute_next_difficulty(
+            chain.current_difficulty,
+            chain.current_height,
+            &chain.block_timestamps,
+            chain.total_issued,
+            bonded_stake,
+        ).effective_difficulty();
+
+        // Compute parent timestamp (0 for genesis)
+        let parent_timestamp = chain.block_timestamps.last().copied().unwrap_or(0);
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        // Comprehensive block validation
+        let expected_height = chain.current_height + 1;
+        opolys_consensus::block::validate_block(
+            block,
+            expected_height,
+            &chain.latest_block_hash,
+            parent_timestamp,
+            expected_difficulty,
+            now_secs,
+        ).map_err(|e| format!("Block validation failed: {}", e))?;
 
         // Compute vein yield from the EVO-OMAP PoW hash
         let pow_hash_value = pow::compute_pow_hash_value(&block.header).unwrap_or(0u64);
@@ -413,6 +431,12 @@ impl OpolysNode {
             );
             if result.success {
                 total_fees_burned = total_fees_burned.saturating_add(result.fee_burned);
+            } else {
+                tracing::warn!(
+                    tx_id = %tx.tx_id.to_hex(),
+                    error = ?result.error,
+                    "Transaction failed in block"
+                );
             }
             mempool.remove_transaction(&tx.tx_id);
         }

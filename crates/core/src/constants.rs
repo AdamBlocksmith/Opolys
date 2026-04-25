@@ -194,6 +194,24 @@ pub const MEMPOOL_TX_EXPIRY_SECS: u64 = 86_400;
 /// Maximum serialized size (in bytes) of a single transaction.
 pub const TX_MAX_SIZE_BYTES: usize = 100_000;
 
+/// Maximum number of transactions in a single block.
+/// Prevents blocks from growing indefinitely. At ~120s block time, 10,000
+/// transactions per block = ~83 tx/s, which is generous for a digital gold chain.
+pub const MAX_TRANSACTIONS_PER_BLOCK: usize = 10_000;
+
+/// Maximum serialized size (in bytes) of a single block including all transactions.
+/// 10 MiB allows ~100 full-size transactions or many small ones.
+pub const MAX_BLOCK_SIZE_BYTES: usize = 10_485_760;
+
+/// Maximum size (in bytes) of the `data` field in a transaction.
+/// 1 KiB is enough for memo/attachment data without enabling block bloat.
+pub const MAX_TX_DATA_SIZE_BYTES: usize = 1_024;
+
+/// Maximum clock skew (in seconds) between a block's timestamp and the
+/// local node's clock. Blocks with timestamps more than this many seconds
+/// in the future are rejected.
+pub const MAX_FUTURE_BLOCK_TIME_SECS: u64 = 300; // 5 minutes
+
 #[cfg(test)]
 mod tests {
     use super::*;

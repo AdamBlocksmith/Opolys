@@ -9,7 +9,7 @@
 //! Fees included in blocks are **burned** rather than collected by any party,
 //! keeping the fee market pure and deflationary.
 
-use opolys_core::{Hash, Block, BlockHeader, FLAKES_PER_OPL};
+use opolys_core::{Hash, Block, BlockHeader, FLAKES_PER_OPL, BLOCK_VERSION, MAX_TRANSACTIONS_PER_BLOCK, MAX_BLOCK_SIZE_BYTES, MAX_TX_DATA_SIZE_BYTES, MAX_FUTURE_BLOCK_TIME_SECS, OpolysError};
 use borsh::{BorshSerialize, BorshDeserialize};
 use serde::{Deserialize, Serialize};
 use opolys_crypto::Blake3Hasher;
@@ -114,6 +114,153 @@ pub fn format_opl(flakes: u64) -> String {
     let whole = flakes / FLAKES_PER_OPL;
     let frac = flakes % FLAKES_PER_OPL;
     format!("{}.{:06} OPL", whole, frac)
+}
+
+/// Comprehensive validation of a block before it is applied to the chain.
+///
+/// Checks every invariant that a well-formed block must satisfy:
+///
+/// 1. **Version**: Must match `BLOCK_VERSION` (currently 1).
+/// 2. **Height**: Must be exactly `expected_height` (parent height + 1).
+/// 3. **Previous hash**: Must match the parent block's hash (or `Hash::zero()` for genesis).
+/// 4. **Timestamp**: Must be greater than `parent_timestamp` and within
+///    `MAX_FUTURE_BLOCK_TIME_SECS` of the current wall clock.
+/// 5. **Difficulty**: Must match `expected_difficulty`.
+/// 6. **Transaction count**: Must not exceed `MAX_TRANSACTIONS_PER_BLOCK`.
+/// 7. **Block size**: Must not exceed `MAX_BLOCK_SIZE_BYTES`.
+/// 8. **Transaction root**: Must match `compute_transaction_root(block.transactions)`.
+/// 9. **No duplicate transactions**: Each `tx_id` must be unique within the block.
+/// 10. **Transaction data size**: Each `tx.data` must not exceed `MAX_TX_DATA_SIZE_BYTES`.
+/// 11. **Fee minimum**: Each transaction fee must be at least `MIN_FEE`.
+/// 12. **PoW proof**: For PoW blocks, the proof must satisfy the difficulty target.
+///
+/// Returns `Ok(())` if the block is valid, or `Err(OpolysError::BlockValidationFailed)`
+/// with a descriptive message if validation fails.
+pub fn validate_block(
+    block: &Block,
+    expected_height: u64,
+    parent_hash: &Hash,
+    parent_timestamp: u64,
+    expected_difficulty: u64,
+    now_secs: u64,
+) -> Result<(), OpolysError> {
+    // 1. Version check
+    if block.header.version != BLOCK_VERSION {
+        return Err(OpolysError::BlockValidationFailed(format!(
+            "Block version mismatch: expected {}, got {}",
+            BLOCK_VERSION, block.header.version
+        )));
+    }
+
+    // 2. Height check
+    if block.header.height != expected_height {
+        return Err(OpolysError::BlockValidationFailed(format!(
+            "Block height mismatch: expected {}, got {}",
+            expected_height, block.header.height
+        )));
+    }
+
+    // 3. Previous hash check
+    // Genesis block has previous_hash = Hash::zero()
+    if &block.header.previous_hash != parent_hash {
+        return Err(OpolysError::BlockValidationFailed(format!(
+            "Block previous_hash mismatch: expected {}, got {}",
+            parent_hash.to_hex(),
+            block.header.previous_hash.to_hex()
+        )));
+    }
+
+    // 4. Timestamp check: must be strictly greater than parent, and not too far in the future
+    if block.header.timestamp <= parent_timestamp && expected_height > 0 {
+        return Err(OpolysError::BlockValidationFailed(format!(
+            "Block timestamp {} must be greater than parent timestamp {}",
+            block.header.timestamp, parent_timestamp
+        )));
+    }
+    if block.header.timestamp > now_secs.saturating_add(MAX_FUTURE_BLOCK_TIME_SECS) {
+        return Err(OpolysError::BlockValidationFailed(format!(
+            "Block timestamp {} is too far in the future (max allowed: {})",
+            block.header.timestamp,
+            now_secs.saturating_add(MAX_FUTURE_BLOCK_TIME_SECS)
+        )));
+    }
+
+    // 5. Difficulty check
+    if block.header.difficulty != expected_difficulty {
+        return Err(OpolysError::BlockValidationFailed(format!(
+            "Block difficulty mismatch: expected {}, got {}",
+            expected_difficulty, block.header.difficulty
+        )));
+    }
+
+    // 6. Transaction count check
+    if block.transactions.len() > MAX_TRANSACTIONS_PER_BLOCK {
+        return Err(OpolysError::BlockValidationFailed(format!(
+            "Too many transactions: {} > {}",
+            block.transactions.len(), MAX_TRANSACTIONS_PER_BLOCK
+        )));
+    }
+
+    // 7. Block size check
+    let block_size = borsh::to_vec(block)
+        .map(|v| v.len())
+        .unwrap_or(usize::MAX);
+    if block_size > MAX_BLOCK_SIZE_BYTES {
+        return Err(OpolysError::BlockValidationFailed(format!(
+            "Block too large: {} bytes > {} bytes",
+            block_size, MAX_BLOCK_SIZE_BYTES
+        )));
+    }
+
+    // 8. Transaction root check
+    let computed_root = compute_transaction_root(&block.transactions);
+    if block.header.transaction_root != computed_root {
+        return Err(OpolysError::BlockValidationFailed(format!(
+            "Transaction root mismatch: expected {}, got {}",
+            computed_root.to_hex(),
+            block.header.transaction_root.to_hex()
+        )));
+    }
+
+    // 9. Duplicate transaction check
+    let mut seen_tx_ids = std::collections::HashSet::new();
+    for tx in &block.transactions {
+        if !seen_tx_ids.insert(&tx.tx_id) {
+            return Err(OpolysError::BlockValidationFailed(format!(
+                "Duplicate transaction {} in block {}",
+                tx.tx_id.to_hex(), block.header.height
+            )));
+        }
+    }
+
+    // 10. Transaction data size check
+    for tx in &block.transactions {
+        if tx.data.len() > MAX_TX_DATA_SIZE_BYTES {
+            return Err(OpolysError::BlockValidationFailed(format!(
+                "Transaction {} data too large: {} bytes > {} bytes",
+                tx.tx_id.to_hex(), tx.data.len(), MAX_TX_DATA_SIZE_BYTES
+            )));
+        }
+    }
+
+    // 11. Fee minimum check
+    for tx in &block.transactions {
+        if tx.fee < opolys_core::MIN_FEE {
+            return Err(OpolysError::BlockValidationFailed(format!(
+                "Transaction {} fee below minimum: {} < {}",
+                tx.tx_id.to_hex(), tx.fee, opolys_core::MIN_FEE
+            )));
+        }
+    }
+
+    // 12. PoW proof check (skip for genesis and PoS blocks)
+    if expected_height > 0 && block.header.pow_proof.is_some() {
+        if let Err(e) = crate::pow::verify_pow(&block.header, block.header.difficulty) {
+            return Err(e);
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
