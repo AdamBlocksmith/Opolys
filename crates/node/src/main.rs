@@ -228,8 +228,24 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
         let mining_node = node.clone();
         let mining_broadcast = block_broadcast_tx.clone();
         mining_handle = Some(tokio::spawn(async move {
+            // Mining parameters:
+            // - RETRY_BACKOFF_MS: sleep between failed attempts to avoid CPU spinning
+            // - BASE_ATTEMPTS: starting nonce range per attempt; scales with difficulty
+            //   Low difficulty = fewer attempts per round (easy to find blocks)
+            //   High difficulty = more attempts per round (harder, but we try harder)
+            // - MAX_ATTEMPTS: upper bound to prevent runaway computation
+            const RETRY_BACKOFF_MS: u64 = 500;
+            const BASE_ATTEMPTS: u64 = 100_000;
+            const MAX_ATTEMPTS: u64 = 10_000_000;
+
             loop {
-                match mining_node.mine_block(10_000_000).await {
+                // Scale attempts with difficulty: at difficulty 1, use BASE_ATTEMPTS;
+                // at difficulty 10, use BASE_ATTEMPTS * 10, etc. Capped at MAX_ATTEMPTS.
+                let difficulty = mining_node.chain.read().await.current_difficulty;
+                let attempts = (BASE_ATTEMPTS * difficulty.max(1))
+                    .min(MAX_ATTEMPTS);
+
+                match mining_node.mine_block(attempts).await {
                     Some(block) => {
                         let height = block.header.height;
                         let tx_count = block.transactions.len();
@@ -263,7 +279,9 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
                         }
                     }
                     None => {
-                        // No block found within the attempt limit — continue trying
+                        // No block found within the attempt limit — sleep briefly
+                        // before retrying to avoid spinning the CPU indefinitely
+                        tokio::time::sleep(std::time::Duration::from_millis(RETRY_BACKOFF_MS)).await;
                     }
                 }
             }
