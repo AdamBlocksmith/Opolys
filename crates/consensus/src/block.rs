@@ -437,6 +437,6 @@ mod tests {
         assert_eq!(format_opl(1_000_000), "1.000000 OPL");
         assert_eq!(format_opl(0), "0.000000 OPL");
         assert_eq!(format_opl(1), "0.000001 OPL");
-        assert_eq!(format_opl(440 * 1_000_000), "440.000000 OPL");
+        assert_eq!(format_opl(312 * 1_000_000), "312.000000 OPL");
     }
 }

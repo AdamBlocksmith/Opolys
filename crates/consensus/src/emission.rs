@@ -305,8 +305,8 @@ mod tests {
     }
 
     #[test]
-    fn base_reward_is_440_opl() {
-        assert_eq!(BASE_REWARD, 440 * opolys_core::FLAKES_PER_OPL);
+    fn base_reward_is_312_opl() {
+        assert_eq!(BASE_REWARD, 312 * opolys_core::FLAKES_PER_OPL);
     }
 
     #[test]

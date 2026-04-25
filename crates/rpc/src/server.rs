@@ -793,7 +793,7 @@ mod tests {
         assert_eq!(format_flake(1_000_000), "1.000000 OPL");
         assert_eq!(format_flake(0), "0.000000 OPL");
         assert_eq!(format_flake(1), "0.000001 OPL");
-        assert_eq!(format_flake(440_000_000), "440.000000 OPL");
+        assert_eq!(format_flake(312_000_000), "312.000000 OPL");
     }
 
     #[test]

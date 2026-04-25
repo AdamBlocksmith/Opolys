@@ -313,7 +313,7 @@ pub struct Block {
 /// ```
 /// use opolys_core::opl_to_flake;
 /// assert_eq!(opl_to_flake(1), 1_000_000);
-/// assert_eq!(opl_to_flake(440), 440_000_000);
+/// assert_eq!(opl_to_flake(312), 312_000_000);
 /// ```
 pub fn opl_to_flake(opl: u64) -> FlakeAmount {
     opl.saturating_mul(crate::FLAKES_PER_OPL)
@@ -342,7 +342,7 @@ pub fn flake_to_opl(flakes: FlakeAmount) -> u64 {
 /// use opolys_core::format_flake_as_opl;
 /// assert_eq!(format_flake_as_opl(1_000_000), "1.000000 OPL");
 /// assert_eq!(format_flake_as_opl(1), "0.000001 OPL");
-/// assert_eq!(format_flake_as_opl(440 * 1_000_000), "440.000000 OPL");
+/// assert_eq!(format_flake_as_opl(312 * 1_000_000), "312.000000 OPL");
 /// ```
 pub fn format_flake_as_opl(flakes: u64) -> String {
     let opl = flakes / crate::FLAKES_PER_OPL;
@@ -395,6 +395,6 @@ mod tests {
         assert_eq!(format_flake_as_opl(1_000_000), "1.000000 OPL");
         assert_eq!(format_flake_as_opl(0), "0.000000 OPL");
         assert_eq!(format_flake_as_opl(1), "0.000001 OPL");
-        assert_eq!(format_flake_as_opl(440 * 1_000_000), "440.000000 OPL");
+        assert_eq!(format_flake_as_opl(312 * 1_000_000), "312.000000 OPL");
     }
 }

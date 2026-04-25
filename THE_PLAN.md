@@ -69,10 +69,8 @@ From `crates/core/src/constants.rs`:
 | `CURRENCY_TICKER` | `"OPL"` | Exchange ticker |
 | `CURRENCY_SMALLEST_UNIT` | `"Flake"` | Name of 1/1,000,000 OPL |
 | `FLAKES_PER_OPL` | `1_000_000` | Fundamental unit ratio |
-| `PENNYWEIGHTS_PER_OPL` | `100` | 1 dwt = 0.01 OPL |
-| `GRAINS_PER_OPL` | `10_000` | 1 gr = 0.0001 OPL |
 | `DECIMAL_PLACES` | `6` | Always 6 decimal places |
-| `BASE_REWARD` | `440,000,000` Flakes (440 OPL) | Gold-derived block reward base |
+| `BASE_REWARD` | `312,000,000` Flakes (312 OPL) | Gold-derived block reward base |
 | `MIN_DIFFICULTY` | `1` | Mathematical floor (not a cap) |
 | `EPOCH` | `1,024` blocks | Unified epoch for retarget, dataset regen, unbonding |
 | `UNBONDING_DELAY_BLOCKS` | `1,024` | One epoch delay for unbonding |
@@ -83,7 +81,7 @@ From `crates/core/src/constants.rs`:
 | `EXTENSION_TYPE_NONE` | `0` | No extension data |
 | `EXTENSION_TYPE_ROLLUP` | `1` | Rollup data (reserved) |
 | `POS_FINALITY_BLOCKS` | `3` | PoS finality depth |
-| `BLOCK_TARGET_TIME_SECS` | `120` | One block every 2 minutes |
+| `BLOCK_TARGET_TIME_SECS` | `84` | One block every ~84 seconds |
 | `NETWORK_PROTOCOL_VERSION` | `"1.0.0"` | Protocol version string |
 | `DEFAULT_LISTEN_PORT` | `4170` | P2P listen port |
 
@@ -142,8 +140,8 @@ Opolys uses **hybrid PoW/PoS** with a smooth transition:
 |---|---|---|
 | Annual gold production | 3,630 tonnes | USGS/WGC 2024-2025 avg |
 | Annual production in troy oz | ~116,707,041 | 3,630 × 32,150.7 |
-| Blocks per year | 262,980 | 365.25 × 86400 / 120 |
-| **BASE_REWARD** | **440 OPL** | floor(116,707,041 / 262,980) |
+| Blocks per year | 374,256 | 365.25 × 1,024 |
+| **BASE_REWARD** | **312 OPL** | floor(116,707,041 / 374,256) |
 
 ### Block Reward Formula
 
@@ -152,7 +150,7 @@ block_reward = (BASE_REWARD / difficulty) × vein_yield
 ```
 
 Where:
-- `BASE_REWARD = 440 × FLAKES_PER_OPL = 440,000,000 flakes`
+- `BASE_REWARD = 312 × FLAKES_PER_OPL = 312,000,000 flakes`
 - `difficulty` = effective difficulty (max of retarget, consensus_floor, MIN_DIFFICULTY)
 - `vein_yield` = `1 + ln(target / hash_int)` (see Section 12)
 

@@ -14,7 +14,7 @@
 //! | Annual gold production | 3,630 tonnes | USGS/WGC 2024-2025 avg |
 //! | Annual production in troy oz | ~116,707,041 | 3,630 × 32,150.7 |
 //! | Blocks per year | 374,267 | 365.25 × 86,400 ÷ 84.375 |
-//! | **BASE_REWARD** | **440 OPL** | floor(116,707,041 ÷ 262,980) |
+//! | **BASE_REWARD** | **312 OPL** | floor(116,707,041 ÷ 374,256) |
 //!
 //! # Currency Units (6 decimal places)
 //!
@@ -52,13 +52,13 @@ pub const DECIMAL_PLACES: u32 = 6;
 /// Derived from real-world gold production data:
 /// ```text
 /// annual_oz = 3,630 tonnes × 32,150.7 oz/tonne ≈ 116,707,041 oz
-/// blocks_per_year = 365.25 × 86400 ÷ 84.375 ≈ 374,267
-/// reward = floor(116,707,041 ÷ 374,267) ≈ 312 OPL per block
+/// blocks_per_year = 365.25 epochs × 1,024 blocks = 374,256
+/// reward = floor(116,707,041 ÷ 374,256) = 312 OPL per block
 /// ```
-/// With 84.375-second blocks (exactly 1,024 blocks per 24 hours),
-/// each block earns a base of 440 OPL. The natural equilibrium model
-/// adjusts this via vein yield and difficulty without governance.
-pub const BASE_REWARD: u64 = 440 * FLAKES_PER_OPL;
+/// With 84,375-second blocks (exactly 1,024 blocks per 24 hours),
+/// each block earns a base of 312 OPL. Vein yield and difficulty adjust
+/// the actual reward upward or downward from this base.
+pub const BASE_REWARD: u64 = 312 * FLAKES_PER_OPL;
 
 // ─── Consensus Parameters ────────────────────────────────────────────────────
 
@@ -102,8 +102,8 @@ pub const POS_FINALITY_BLOCKS: u64 = 3;
 /// 1,024 × 84,375 ms = 86,400,000 ms = 86,400 seconds = 24 hours.
 ///
 /// This yields ~374,267 blocks per year, aligning block issuance with
-/// real-world gold mining rates. BASE_REWARD (440 OPL) per block produces
-/// an annual emission of ~440 × 374,267 ≈ 164.7 million OPL, which
+/// real-world gold mining rates. BASE_REWARD (312 OPL) per block produces
+/// an annual emission of ~312 × 374,256 ≈ 116.7 million OPL, closely
 /// tracks the ~3,630 tonnes of annual gold production.
 pub const BLOCK_TARGET_TIME_MS: u64 = 84_375;
 
@@ -226,10 +226,10 @@ mod tests {
     }
 
     #[test]
-    fn base_reward_is_440_opl() {
-        assert_eq!(BASE_REWARD, 440 * FLAKES_PER_OPL);
+    fn base_reward_is_312_opl() {
+        assert_eq!(BASE_REWARD, 312 * FLAKES_PER_OPL);
         let base_reward_opl = BASE_REWARD / FLAKES_PER_OPL;
-        assert_eq!(base_reward_opl, 440);
+        assert_eq!(base_reward_opl, 312);
     }
 
     #[test]

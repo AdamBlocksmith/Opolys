@@ -61,7 +61,7 @@ cargo test -- --nocapture
 | **No schedules** | Difficulty and rewards emerge from chain state, not from a calendar |
 | **No hardcoded fees** | Fees are market-driven and burned entirely — validators earn from block rewards |
 | **Only double-signing slashed** | No reversal windows, no confiscation for any other reason |
-| **Gold-derived emission** | BASE_REWARD = 440 OPL, derived from annual gold production (~3,630 tonnes) |
+| **Gold-derived emission** | BASE_REWARD = 312 OPL, derived from annual gold production (~3,630 tonnes) |
 
 ---
 
@@ -141,12 +141,12 @@ There is no fixed supply cap. Instead, OPL models real gold dynamics:
 - **Burning**: All transaction fees are permanently destroyed, reducing circulation
 - **Deflationary pressure**: As more OPL is issued and more fees are burned, the circulating supply can actually decrease over time — just like gold jewelry being melted or coins being lost
 
-The BASE_REWARD of 440 OPL/block at minimum difficulty is derived from:
+The BASE_REWARD of 312 OPL/block at minimum difficulty is derived from:
 
 ```
 annual_gold_production ≈ 3,630 tonnes
-total_above_ground     ≈ 219,891 tonnes
-annual_granular_change ≈ floor(3,630 × 32,150.7 / 212,000) = ... ultimately 440 OPL
+blocks_per_year        = 365.25 × 1,024 = 374,256
+BASE_REWARD             = floor(3,630 × 32,150.7 / 374,256) = 312 OPL
 ```
 
 This ratio mirrors how new gold production constantly dilutes the above-ground stock.
@@ -377,7 +377,7 @@ block_reward = BASE_REWARD / effective_difficulty × discovery_bonus
 ```
 
 Where:
-- `BASE_REWARD = 440 × FLAKES_PER_OPL = 440,000,000 flakes`
+- `BASE_REWARD = 312 × FLAKES_PER_OPL = 312,000,000 flakes`
 - `effective_difficulty = max(retarget, consensus_floor, MIN_DIFFICULTY)`
 - `discovery_bonus ≈ √(MAX / (difficulty × hash))` — sub-linear reward for lucky miners
 
@@ -416,14 +416,12 @@ To unbond, specify which entry by `bond_id`. Invalid bond IDs fail with no fee b
 | Constant | Value | Description |
 |---|---|---|
 | `FLAKES_PER_OPL` | 1,000,000 | Smallest unit ratio |
-| `BASE_REWARD` | 440,000,000 flakes (440 OPL) | Gold-derived block reward |
+| `BASE_REWARD` | 312,000,000 flakes (312 OPL) | Gold-derived block reward |
 | `MIN_DIFFICULTY` | 1 | Floor difficulty |
 | `RETARGET_EPOCH` | 1,024 blocks | Difficulty adjustment interval |
-| `BLOCK_TARGET_TIME_SECS` | 120 | Target block time |
-| `MIN_BOND_STAKE` | 100,000,000 flakes (100 OPL) | Minimum validator bond |
+| `BLOCK_TARGET_TIME_SECS` | 84 | Target block time (~84.375s) |
+| `MIN_BOND_STAKE` | 1,000,000 flakes (1 OPL) | Minimum validator bond |
 | `NETWORK_PROTOCOL_VERSION` | `"opolys/0.1.0"` | Protocol identifier |
-| `PENNYWEIGHTS_PER_OPL` | 100 | 1 dwt = 0.01 OPL |
-| `GRAINS_PER_OPL` | 10,000 | 1 gr = 0.0001 OPL |
 | `DEFAULT_LISTEN_PORT` | 4170 | P2P listen port |
 | `BLOCK_CAPACITY_RATE` | 1.5 | Max transactions per second |
 | `POS_FINALITY_BLOCKS` | 720 | PoS finality depth |
