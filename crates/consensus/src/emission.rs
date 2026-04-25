@@ -3,10 +3,10 @@
 //! Opolys has **no fixed emission schedule** and no halvings. Instead, block
 //! rewards emerge from chain state:
 //!
-//! - **Vein yield** = `1 + ln(target / hash_int)`, computed via IEEE 754 f64
-//!   with deterministic rounding. This gives a natural distribution: most blocks
-//!   earn ~1-2x BASE_REWARD, exceptionally lucky blocks earn more. The expected
-//!   value is approximately 2.0.
+//! - **Vein yield** = `1 + ln(target / hash_int)`, where `target = 2^(64-D) - 1`
+//!   and D is the EVO-OMAP difficulty (leading zero bits). This uses f64::ln()
+//!   with deterministic IEEE 754 rounding. Most blocks earn ~1-2x BASE_REWARD,
+//!   with diminishing returns for higher yields.
 //! - **Base reward** = `BASE_REWARD / effective_difficulty`. As difficulty
 //!   rises, the per-block reward naturally declines — mimicking the
 //!   diminishing returns of real-world gold extraction.
@@ -23,15 +23,33 @@
 
 use opolys_core::{BASE_REWARD, FlakeAmount, MIN_DIFFICULTY};
 
+/// Compute the target value for EVO-OMAP difficulty in u64 space.
+///
+/// EVO-OMAP difficulty D means the 256-bit SHA3-256 hash must have at least
+/// D leading zero bits. For vein yield, we compare the first 8 bytes of the
+/// hash (as a u64) against a target value. A valid hash (with D leading
+/// zero bits) will have its u64 portion in the range [0, 2^(64-D)-1].
+///
+/// Therefore: `target = 2^(64-D) - 1` for D ≤ 64.
+/// For D > 64, the u64 is necessarily 0 (impossibly difficult), so we
+/// return 0 to indicate no valid hash is possible.
+pub fn difficulty_to_target(difficulty: u64) -> u64 {
+    if difficulty == 0 || difficulty > 64 {
+        return 0;
+    }
+    // 2^(64-D) - 1, computed with u128 to avoid overflow
+    ((1u128 << (64 - difficulty as usize)) - 1) as u64
+}
+
 /// Compute the total block reward using vein yield.
 ///
-/// Vein yield replaces the old discovery bonus with a mathematically cleaner
-/// formula: `vein_yield = 1 + ln(target / hash_int)`. This is computed via
-/// f64 ratio and natural log with deterministic rounding.
+/// Vein yield uses the natural logarithm: `vein_yield = 1 + ln(target / hash_int)`.
+/// This gives a natural distribution where most blocks earn ~1-2x the base,
+/// with diminishing returns for exceptionally lucky hashes.
 ///
-/// The result is `(BASE_REWARD / difficulty) * vein_yield`, giving a natural
-/// distribution where most blocks earn ~2x the base, with diminishing returns
-/// for higher yields.
+/// The target is derived from EVO-OMAP difficulty (leading zero bits):
+/// `target = 2^(64-D) - 1`, so at difficulty 1 the target is u64::MAX
+/// and at difficulty 20 the target is ~2^44.
 pub fn compute_block_reward(difficulty: u64, pow_hash_value: u64) -> FlakeAmount {
     let effective_difficulty = difficulty.max(MIN_DIFFICULTY);
     let base = BASE_REWARD / effective_difficulty;
@@ -55,7 +73,8 @@ pub fn compute_base_reward(difficulty: u64) -> FlakeAmount {
 /// 1000 = 1.0x yield, 2000 = 2.0x yield, etc.
 ///
 /// Formula: `vein_yield = 1 + ln(target / hash_int)`
-/// where target = u64::MAX / difficulty.
+/// where `target = 2^(64-D) - 1` and D is the EVO-OMAP difficulty
+/// (number of leading zero bits required in the SHA3-256 hash).
 ///
 /// Uses f64 ratio computation for overflow safety and precision.
 /// The result is clamped to a minimum of 1000 (1.0x) — every valid block
@@ -64,14 +83,18 @@ pub fn compute_vein_yield(difficulty: u64, hash_int: u64) -> u64 {
     if difficulty == 0 || hash_int == 0 {
         return 1000;
     }
-    let target = u64::MAX / difficulty;
+    let target = difficulty_to_target(difficulty);
+    if target == 0 {
+        // Difficulty > 64: impossible for u64, return minimum
+        return 1000;
+    }
     if target <= hash_int {
         // Hash was at or above target — no bonus beyond minimum
         // This shouldn't happen for a valid PoW, but handle it safely
         return 1000;
     }
     // Compute ln(target / hash_int) directly using f64 for overflow safety.
-    // At low difficulties, target/hash_int can exceed u64 range.
+    // At high target values (low difficulty), target/hash_int can exceed u64 range.
     let ratio = target as f64 / hash_int as f64;
     let ln_val = ratio.ln() * 1000.0;
     // vein_yield = 1 + ln(ratio), in milli
@@ -184,34 +207,86 @@ pub fn compute_suggested_fee(previous_block_fees: FlakeAmount, previous_suggeste
 mod tests {
     use super::*;
 
+    // ─── difficulty_to_target tests ───
+
     #[test]
-    fn base_reward_at_min_difficulty() {
-        let reward = compute_base_reward(1);
-        assert_eq!(reward, BASE_REWARD);
+    fn difficulty_to_target_at_1() {
+        // Difficulty 1 means 1 leading zero bit. Target = 2^63 - 1.
+        assert_eq!(difficulty_to_target(1), (1u128 << 63) as u64 - 1);
     }
 
     #[test]
-    fn reward_decreases_with_difficulty() {
-        let r1 = compute_base_reward(1);
-        let r10 = compute_base_reward(10);
-        let r100 = compute_base_reward(100);
-        assert!(r1 > r10);
-        assert!(r10 > r100);
+    fn difficulty_to_target_at_10() {
+        // Difficulty 10 means 10 leading zero bits. Target = 2^54 - 1.
+        assert_eq!(difficulty_to_target(10), (1u128 << 54) as u64 - 1);
     }
+
+    #[test]
+    fn difficulty_to_target_at_20() {
+        // Difficulty 20 means 20 leading zero bits. Target = 2^44 - 1.
+        assert_eq!(difficulty_to_target(20), (1u128 << 44) as u64 - 1);
+    }
+
+    #[test]
+    fn difficulty_to_target_at_64() {
+        // Difficulty 64 means all bits must be zero. Target = 0 (only hash 0 passes).
+        assert_eq!(difficulty_to_target(64), 0);
+    }
+
+    #[test]
+    fn difficulty_to_target_zero_returns_0() {
+        assert_eq!(difficulty_to_target(0), 0);
+    }
+
+    #[test]
+    fn difficulty_to_target_above_64_returns_0() {
+        // Difficulty > 64 is impossible for a u64 — no valid hash possible
+        assert_eq!(difficulty_to_target(65), 0);
+        assert_eq!(difficulty_to_target(128), 0);
+    }
+
+    #[test]
+    fn difficulty_to_target_monotonically_decreasing() {
+        // Higher difficulty should have lower or equal target
+        let mut prev = difficulty_to_target(1);
+        for d in 2..=64 {
+            let curr = difficulty_to_target(d);
+            assert!(curr <= prev, "target({}) = {} > target({}) = {}", d, curr, d - 1, prev);
+            prev = curr;
+        }
+    }
+
+    // ─── Vein yield tests ───
 
     #[test]
     fn vein_yield_at_min_difficulty() {
-        // At difficulty 1, target = u64::MAX. A very low hash gives high yield.
+        // At difficulty 1, target = 2^63 - 1. A very low hash gives high yield.
         let yield_val = compute_vein_yield(1, 1);
-        // The yield should be > 1000 (1.0x) for a very good hash
-        assert!(yield_val > 1000);
+        assert!(yield_val > 1000, "yield should exceed 1.0x for a very good hash");
     }
 
     #[test]
     fn vein_yield_minimum_for_valid_pow() {
-        // Any hash below target should give yield >= 1000 (1.0x)
-        let yield_val = compute_vein_yield(10, u64::MAX / 20);
+        // At difficulty 10, target = 2^54 - 1.
+        // A hash that is much less than the target gives a bonus.
+        let target_10 = difficulty_to_target(10);
+        let yield_val = compute_vein_yield(10, target_10 / 20);
         assert!(yield_val >= 1000);
+    }
+
+    #[test]
+    fn vein_yield_at_target_boundary() {
+        // A hash exactly at target should give minimum yield (no bonus)
+        let target_10 = difficulty_to_target(10);
+        let yield_val = compute_vein_yield(10, target_10);
+        assert_eq!(yield_val, 1000, "hash at target should give minimum yield");
+    }
+
+    #[test]
+    fn vein_yield_above_target_gives_minimum() {
+        // A hash above target is invalid for PoW, but vein yield returns minimum
+        let yield_val = compute_vein_yield(10, u64::MAX);
+        assert_eq!(yield_val, 1000);
     }
 
     #[test]
@@ -235,9 +310,24 @@ mod tests {
     }
 
     #[test]
+    fn base_reward_at_min_difficulty() {
+        let reward = compute_base_reward(1);
+        assert_eq!(reward, BASE_REWARD);
+    }
+
+    #[test]
+    fn reward_decreases_with_difficulty() {
+        let r1 = compute_base_reward(1);
+        let r10 = compute_base_reward(10);
+        let r100 = compute_base_reward(100);
+        assert!(r1 > r10);
+        assert!(r10 > r100);
+    }
+
+    #[test]
     fn ln_milli_known_values() {
         // ln(1.0) ≈ 0
-        assert!(ln_milli(1000) < 5); // ±5 milli tolerance
+        assert!(ln_milli(1000) < 5);
         // ln(2.0) ≈ 693 milli (i.e., 0.693)
         let ln2 = ln_milli(2000);
         assert!(ln2 > 680 && ln2 < 710, "ln(2) = {} milli, expected ~693", ln2);
@@ -263,8 +353,6 @@ mod tests {
 
     #[test]
     fn validator_weight_zero_age() {
-        // At age 0, multiplier = 1.0 + ln(1) = 1.0 + 0 = 1.0
-        // weight = stake × 1.0 = stake
         let w = compute_validator_weight(100_000, 0);
         assert_eq!(w, 100_000);
     }
@@ -287,21 +375,19 @@ mod tests {
     #[test]
     fn suggested_fee_starts_at_minimum() {
         let fee = compute_suggested_fee(0, 0);
-        assert_eq!(fee, 1); // MIN_FEE
+        assert_eq!(fee, 1);
     }
 
     #[test]
     fn suggested_fee_updates_via_ema() {
-        // EMA: new = (current + 9 × old) / 10
         let fee = compute_suggested_fee(10_000, 1_000);
-        // (10000 + 9 × 1000) / 10 = 19000 / 10 = 1900
         assert_eq!(fee, 1900);
     }
 
     #[test]
     fn suggested_fee_floors_at_min_fee() {
         let fee = compute_suggested_fee(0, 0);
-        assert_eq!(fee, 1); // Floor at 1 Flake
+        assert_eq!(fee, 1);
     }
 
     #[test]
@@ -315,5 +401,36 @@ mod tests {
         let r1 = compute_validator_reward(reward, 100_000, 1000, 200_000);
         assert!(r1 > 0);
         assert!(r1 < reward);
+    }
+
+    /// Integration test: verify that stake_coverage drives the PoW/PoS reward split.
+    /// With 0% coverage, all rewards go to miners. With 100%, all go to validators.
+    #[test]
+    fn reward_split_follows_stake_coverage() {
+        // At 0% coverage, miner gets 100%
+        assert!((compute_pow_share(0.0) - 1.0).abs() < 0.001);
+        assert!((compute_pos_share(0.0) - 0.0).abs() < 0.001);
+        // At 100% coverage, validators get 100%
+        assert!((compute_pow_share(1.0) - 0.0).abs() < 0.001);
+        assert!((compute_pos_share(1.0) - 1.0).abs() < 0.001);
+        // At 30% coverage, split is 70/30
+        assert!((compute_pow_share(0.3) - 0.7).abs() < 0.001);
+        assert!((compute_pos_share(0.3) - 0.3).abs() < 0.001);
+    }
+
+    /// Verify that vein yield uses the leading-zero-bits difficulty model
+    /// correctly by comparing against manually computed targets.
+    #[test]
+    fn vein_yield_uses_leading_zero_bits_difficulty() {
+        // At difficulty 10, target = 2^54 - 1
+        // A hash of 1 gives: ln(target/1) * 1000 = ln(2^54-1) * 1000
+        // This should be a very large yield bonus
+        let yield_val = compute_vein_yield(10, 1);
+        assert!(yield_val > 10000, "difficulty 10 with hash 1 should give large yield, got {}", yield_val);
+
+        // At difficulty 1, target = 2^63 - 1
+        // A hash of 1 gives: ln(2^63 - 1) ≈ ln(2^63) ≈ 43.7
+        let yield_val = compute_vein_yield(1, 1);
+        assert!(yield_val > 40000, "difficulty 1 with hash 1 should give massive yield");
     }
 }

@@ -73,10 +73,10 @@ pub struct ChainInfo {
     pub total_burned: u64,
     /// Circulating supply (total_issued - total_burned).
     pub circulating_supply: u64,
-    /// Blake3-256 hash of the most recent block header (hex).
-    pub latest_block_hash: String,
-    /// Blake3-256 hash of the state root after the most recent block (hex).
-    pub state_root: String,
+    /// Blake3-256 hash of the most recent block header.
+    pub latest_block_hash: Hash,
+    /// Blake3-256 hash of the state root after the most recent block.
+    pub state_root: Hash,
     /// Current consensus phase: "ProofOfWork" or "ProofOfStake".
     pub phase: String,
     /// Rolling window of block timestamps for difficulty retargeting.
@@ -456,22 +456,48 @@ async fn handle_get_mining_job(state: &RpcState) -> Result<serde_json::Value, Js
         .take(100)
         .cloned()
         .collect();
-    let transaction_root = opolys_consensus::block::compute_transaction_root(&transactions).to_hex();
+    let transaction_root = opolys_consensus::block::compute_transaction_root(&transactions);
+    let transaction_root_hex = transaction_root.to_hex();
 
-    let job = MiningJobResponse {
+    // Build a template block header for mining
+    let header = opolys_core::BlockHeader {
         version: opolys_core::BLOCK_VERSION,
         height: chain.height + 1,
         previous_hash: chain.latest_block_hash.clone(),
         state_root: chain.state_root.clone(),
         transaction_root,
-        difficulty,
-        target: u64::MAX / difficulty,
-        suggested_fee: chain.suggested_fee,
         timestamp: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs(),
+        difficulty,
+        suggested_fee: chain.suggested_fee,
+        extension_root: None,
+        producer: opolys_core::ObjectId::zero(), // Miner fills this in
+        pow_proof: None,
+        validator_signature: None,
+    };
+
+    // Pre-serialize the header for EVO-OMAP mining
+    let header_bytes = opolys_consensus::pow::serialize_header_for_pow(&header);
+    let header_bytes_hex = hex::encode(&header_bytes);
+
+    // Convert difficulty to u64 target using EVO-OMAP leading-zero-bits model
+    let target = opolys_consensus::emission::difficulty_to_target(difficulty);
+
+let job = MiningJobResponse {
+        version: opolys_core::BLOCK_VERSION,
+        height: chain.height + 1,
+        previous_hash: chain.latest_block_hash.to_hex(),
+        state_root: chain.state_root.to_hex(),
+        transaction_root: transaction_root_hex,
+        difficulty,
+        target,
+        suggested_fee: chain.suggested_fee,
+        timestamp: header.timestamp,
         transaction_count: transactions.len(),
+        producer: header.producer.to_hex(),
+        header_bytes: header_bytes_hex,
     };
 
     serde_json::to_value(job).map_err(|e| JsonRpcError::internal_error(&e.to_string()))
@@ -728,16 +754,39 @@ pub struct SendTransactionResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MiningJobResponse {
+    /// Protocol version for the block template.
     pub version: u32,
+    /// Height of the next block to mine.
     pub height: u64,
+    /// Blake3-256 hash of the previous block header (hex).
     pub previous_hash: String,
+    /// Blake3-256 hash of the current state root (hex).
     pub state_root: String,
+    /// Blake3-256 Merkle root of the proposed transactions (hex).
     pub transaction_root: String,
+    /// EVO-OMAP difficulty (leading zero bits required in SHA3-256 hash).
+    /// This is NOT a u64 divisor — difficulty D means the hash must have
+    /// at least D leading zero bits. For vein yield, the corresponding
+    /// u64 target is `target` (see below).
     pub difficulty: u64,
+    /// u64 hash target derived from difficulty using leading-zero-bits model:
+    /// `target = 2^(64-D) - 1`. A valid block has SHA3-256 hash where the
+    /// first 8 bytes (as u64 big-endian) are <= this target.
     pub target: u64,
+    /// Suggested fee for the next block (Flakes), computed via EMA.
     pub suggested_fee: u64,
+    /// Unix timestamp (seconds) for the block template.
     pub timestamp: u64,
+    /// Number of transactions in the template.
     pub transaction_count: usize,
+    /// ObjectId (hex) of the block producer — miner's on-chain identity.
+    /// Blake3(public_key) == ObjectId. The miner must include this in the
+    /// submitted block so the block reward is credited correctly.
+    pub producer: String,
+    /// Pre-serialized header bytes for EVO-OMAP mining. Miners append
+    /// the 8-byte nonce and compute EVO-OMAP hash over this. This
+    /// eliminates the need for miners to re-serialize the header.
+    pub header_bytes: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

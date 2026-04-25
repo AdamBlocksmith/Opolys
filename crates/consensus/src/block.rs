@@ -9,7 +9,7 @@
 //! Fees included in blocks are **burned** rather than collected by any party,
 //! keeping the fee market pure and deflationary.
 
-use opolys_core::{Hash, ObjectId, Block, BlockHeader, FLAKES_PER_OPL, BLOCK_VERSION, MAX_TRANSACTIONS_PER_BLOCK, MAX_BLOCK_SIZE_BYTES, MAX_TX_DATA_SIZE_BYTES, MAX_FUTURE_BLOCK_TIME_SECS, OpolysError};
+use opolys_core::{Hash, Block, BlockHeader, FLAKES_PER_OPL, BLOCK_VERSION, MAX_TRANSACTIONS_PER_BLOCK, MAX_BLOCK_SIZE_BYTES, MAX_TX_DATA_SIZE_BYTES, MAX_FUTURE_BLOCK_TIME_SECS, OpolysError};
 use borsh::{BorshSerialize, BorshDeserialize};
 use serde::{Deserialize, Serialize};
 use opolys_crypto::Blake3Hasher;
@@ -302,7 +302,7 @@ pub fn validate_block(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opolys_core::{Transaction, TransactionAction};
+    use opolys_core::{Transaction, TransactionAction, ObjectId};
     use opolys_crypto::hash_to_object_id;
 
     #[test]

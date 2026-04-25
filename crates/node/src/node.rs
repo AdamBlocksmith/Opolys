@@ -228,9 +228,15 @@ pub fn from_persisted(p: &opolys_storage::PersistedChainState) -> Self {
     }
 
     /// Stake coverage = bonded_stake / total_issued.
-    pub fn stake_coverage(&self) -> f64 {
+    ///
+    /// Requires the actual bonded stake from the validator set — this cannot
+    /// be computed from chain state alone since bonded stake lives in
+    /// ValidatorSet, not ChainState. Passing total_issued for both parameters
+    /// would always return 1.0, which is the critical bug this method now
+    /// avoids by requiring the caller to supply bonded_stake.
+    pub fn stake_coverage(&self, bonded_stake: FlakeAmount) -> f64 {
         emission::compute_stake_coverage(
-            self.total_issued,
+            bonded_stake,
             self.total_issued,
         )
     }
@@ -663,22 +669,59 @@ impl OpolysNode {
             }
         }
 
-        // Compute vein yield from the EVO-OMAP PoW hash
-        let pow_hash_value = pow::compute_pow_hash_value(&block.header).unwrap_or(0u64);
+        // Compute vein yield from the EVO-OMAP PoW hash.
+        // For PoW blocks, this is the hash of the nonce solution.
+        // For PoS blocks (no PoW), vein yield defaults to the minimum (1000 = 1.0x).
+        let pow_hash_value = if block.header.pow_proof.is_some() {
+            pow::compute_pow_hash_value(&block.header).unwrap_or(0u64)
+        } else {
+            0u64
+        };
 
-        // Block reward uses vein yield: BASE_REWARD / difficulty * vein_yield
+        // Block reward uses vein yield: BASE_REWARD / effective_difficulty * vein_yield
         let block_reward = emission::compute_block_reward(block.header.difficulty, pow_hash_value);
 
-        // Credit the block reward to the producer's account.
-        // The producer is the miner (PoW) or validator (PoS) identified by
-        // block.header.producer. If the producer account doesn't exist yet,
-        // it is auto-created with zero balance before crediting.
+        // Split the block reward between miners and validators based on stake coverage.
+        // pow_share goes to the block producer (miner or selected validator).
+        // pos_share is distributed among all active validators proportional to weight.
+        // coverage_milli = (bonded_stake × 1000) / total_issued, avoiding floating point.
+        let coverage_milli: u64 = if chain.total_issued > 0 {
+            ((bonded_stake as u128 * 1000) / chain.total_issued as u128).min(1000) as u64
+        } else {
+            0
+        };
+        // pow_share_amount = block_reward × (1000 - coverage_milli) / 1000
+        // pos_share_amount = block_reward - pow_share_amount (avoids rounding drift)
+        let pow_share_amount = ((block_reward as u128 * (1000 - coverage_milli) as u128) / 1000) as FlakeAmount;
+        let pos_share_amount = block_reward.saturating_sub(pow_share_amount);
+
+        // Credit the PoW share to the block producer (miner or selected validator).
+        // The producer is identified by block.header.producer.
         let producer = &block.header.producer;
-        if !producer.0.is_zero() && block_reward > 0 {
+        if !producer.0.is_zero() && pow_share_amount > 0 {
             if accounts.get_account(producer).is_none() {
                 accounts.create_account(producer.clone()).ok();
             }
-            accounts.credit(producer, block_reward).ok();
+            accounts.credit(producer, pow_share_amount).ok();
+        }
+
+        // Distribute the PoS share among active validators proportional to weight.
+        // Each validator's share = pos_share_amount × (their_weight / total_weight).
+        if pos_share_amount > 0 {
+            let current_timestamp = chain.block_timestamps.last().copied().unwrap_or(0);
+            let total_weight = validators.total_weight(current_timestamp);
+            if total_weight > 0 {
+                for v in validators.active_validators() {
+                    let v_weight = v.weight(current_timestamp);
+                    let v_share = ((pos_share_amount as u128 * v_weight as u128) / total_weight as u128) as FlakeAmount;
+                    if v_share > 0 {
+                        if accounts.get_account(&v.object_id).is_none() {
+                            accounts.create_account(v.object_id.clone()).ok();
+                        }
+                        accounts.credit(&v.object_id, v_share).ok();
+                    }
+                }
+            }
         }
 
         // Compute the block hash — this is the new chain tip
@@ -742,8 +785,11 @@ impl OpolysNode {
             );
         }
 
-        // Update consensus phase based on stake coverage
-        if bonded_stake > 0 && emission::compute_stake_coverage(bonded_stake, chain.total_issued) > 0.0 {
+        // Update consensus phase based on stake coverage.
+        // Any bonded stake shifts to PoS — the smooth transition model means
+        // there's no threshold, just a gradual shift as coverage increases.
+        let coverage = chain.stake_coverage(bonded_stake);
+        if bonded_stake > 0 && coverage > 0.0 {
             chain.phase = ConsensusPhase::ProofOfStake;
         } else {
             chain.phase = ConsensusPhase::ProofOfWork;

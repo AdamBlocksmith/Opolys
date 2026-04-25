@@ -16,7 +16,7 @@
 //! circulation exclusively through block rewards.
 
 use opolys_core::{Block, BlockHeader, BlockHeight, OpolysError, EPOCH};
-use evo_omap::{mine_parallel, verify, verify_light, DatasetCache};
+use evo_omap::{mine_parallel, verify_light, DatasetCache};
 
 /// EVO-OMAP dataset cache for efficient epoch-based mining.
 ///
@@ -143,7 +143,11 @@ pub fn serialize_header_for_pow(header: &BlockHeader) -> Vec<u8> {
 
 /// Verify that a block's EVO-OMAP PoW proof is valid for the given difficulty.
 ///
-/// Uses full verification (requires generating the 256 MiB dataset).
+/// Uses light verification (on-demand node reconstruction) to avoid generating
+/// the full 256 MiB dataset. This is suitable for regular block validation where
+/// dataset generation latency would be unacceptable (~7.5s per block).
+/// For mining, use the cached dataset path instead.
+///
 /// Returns `Ok(())` if valid, `Err(InvalidProofOfWork)` otherwise.
 pub fn verify_pow(header: &BlockHeader, difficulty: u64) -> Result<(), OpolysError> {
     if difficulty == 0 {
@@ -162,7 +166,7 @@ pub fn verify_pow(header: &BlockHeader, difficulty: u64) -> Result<(), OpolysErr
     );
 
     let header_bytes = serialize_header_for_pow(header);
-    verify(&header_bytes, header.height, nonce, difficulty)
+    verify_light(&header_bytes, header.height, nonce, difficulty)
         .then_some(())
         .ok_or(OpolysError::InvalidProofOfWork)
 }

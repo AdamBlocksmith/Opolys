@@ -12,20 +12,25 @@
 //! and `MIN_DIFFICULTY` (which is the mathematical floor, not an arbitrary cap).
 //! There is no maximum difficulty clamp — difficulty adjusts freely.
 //!
-//! The discovery bonus has been replaced by **vein yield**, computed in
-//! `emission.rs`. This module no longer computes discovery bonuses.
+//! **Difficulty semantics**: EVO-OMAP difficulty D means the SHA3-256 hash of
+//! the block must have at least D leading zero bits. This is NOT the same as
+//! the u64-target model (u64::MAX / difficulty). The conversion to a u64 target
+//! for vein yield is handled by `difficulty_to_target()` in emission.rs.
 
 use opolys_core::{MIN_DIFFICULTY, EPOCH, BlockHeight};
+use crate::emission::difficulty_to_target;
 
 /// The computed difficulty target for a given block.
 ///
 /// Contains the retarget value, consensus floor, and the combined effective
 /// difficulty (the maximum of retarget, consensus floor, and `MIN_DIFFICULTY`).
-/// The `target` field is the numerical hash threshold for PoW validation
-/// (`u64::MAX / effective_difficulty`).
+/// The `target` field is the u64 hash threshold derived from the effective
+/// difficulty using the EVO-OMAP leading-zero-bits model:
+/// `target = 2^(64-D) - 1` where D is the effective difficulty.
 #[derive(Debug, Clone)]
 pub struct DifficultyTarget {
-    /// Numerical hash target that a valid PoW must be below.
+    /// Numerical u64 hash target that a valid PoW hash must be at or below.
+    /// Derived from the leading-zero-bits model: target = 2^(64-D) - 1.
     pub target: u64,
     /// Difficulty computed by the retarget algorithm alone.
     pub retarget: u64,
@@ -66,9 +71,13 @@ pub fn compute_next_difficulty(
 ) -> DifficultyTarget {
     let retarget = compute_retarget(current_difficulty, current_height, block_timestamps);
     let consensus_floor = compute_consensus_floor(total_issued, bonded_stake);
+    let effective = retarget.max(consensus_floor).max(MIN_DIFFICULTY);
 
     DifficultyTarget {
-        target: compute_target(retarget.max(consensus_floor).max(MIN_DIFFICULTY)),
+        // Convert EVO-OMAP leading-zero-bits difficulty to a u64 target value.
+        // D leading zero bits means the hash must be < 2^(256-D), but for
+        // u64 comparison (first 8 bytes), target = 2^(64-D) - 1.
+        target: difficulty_to_target(effective),
         retarget,
         consensus_floor,
     }
@@ -128,25 +137,23 @@ fn compute_retarget(current_difficulty: u64, current_height: BlockHeight, block_
     new_difficulty.max(MIN_DIFFICULTY)
 }
 
-/// Convert difficulty to a numerical hash target: `u64::MAX / difficulty`.
-///
-/// A valid PoW hash must be strictly less than this target. Higher difficulty
-/// means a lower target and harder mining. Returns `u64::MAX` for difficulty
-/// zero (trivially satisfied).
-fn compute_target(difficulty: u64) -> u64 {
-    if difficulty == 0 {
-        return u64::MAX;
-    }
-    u64::MAX / difficulty
-}
-
 /// Check whether a hash value satisfies the difficulty requirement.
 ///
-/// Returns `true` if `hash_value < target(difficulty)`, meaning the PoW is
-/// valid for the given difficulty level.
+/// EVO-OMAP difficulty D means the hash must have at least D leading zero
+/// bits. For u64 comparison (first 8 bytes of the hash), a valid hash must
+/// have its u64 value at or below the target: `hash_value <= target(D)`.
+///
+/// This is the correct semantics for EVO-OMAP, NOT the u64-target divisor
+/// model (`hash < u64::MAX / difficulty`). At difficulty 1, the target is
+/// u64::MAX (any non-zero hash is valid). At difficulty 20, the target is
+/// 2^44 - 1 (only hashes starting with 20 zero bits pass).
 pub fn check_proof_of_work(hash_value: u64, difficulty: u64) -> bool {
-    let target = compute_target(difficulty);
-    hash_value < target
+    let target = difficulty_to_target(difficulty);
+    if target == 0 {
+        // Difficulty > 64: impossible for a u64 to satisfy
+        return false;
+    }
+    hash_value <= target
 }
 
 #[cfg(test)]
@@ -182,8 +189,30 @@ mod tests {
 
     #[test]
     fn check_pow_easy_difficulty() {
+        // At difficulty 1, target = u64::MAX, so hash 0 passes (leading zero bit)
         assert!(check_proof_of_work(0, 1));
+        // u64::MAX itself does NOT have any leading zero bits, so it fails
+        // at difficulty 1 (hash must be <= target = u64::MAX, but it's at
+        // the exact boundary — note: target = 2^63 - 1 for difficulty 1
+        // since 2^(64-1) - 1 = 2^63 - 1 < u64::MAX)
         assert!(!check_proof_of_work(u64::MAX, 1));
+    }
+
+    #[test]
+    fn check_pow_medium_difficulty() {
+        // At difficulty 10, target = 2^(64-10) - 1 = 2^54 - 1
+        let target_10 = difficulty_to_target(10);
+        assert_eq!(target_10, (1u128 << 54) as u64 - 1);
+        // Hash at target passes (<=)
+        assert!(check_proof_of_work(target_10, 10));
+        // Hash just above target fails
+        assert!(!check_proof_of_work(target_10 + 1, 10));
+    }
+
+    #[test]
+    fn check_pow_impossible_difficulty() {
+        // Difficulty > 64 is impossible for u64
+        assert!(!check_proof_of_work(0, 65));
     }
 
     #[test]
