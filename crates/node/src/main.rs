@@ -160,6 +160,7 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
             node.mempool.clone(),
             node.store.as_ref().unwrap().clone(),
             block_sender,
+            node.miner_id.clone(),
         );
 
         let rpc_port = config.rpc_port;

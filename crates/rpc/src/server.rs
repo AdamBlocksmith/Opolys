@@ -110,6 +110,9 @@ pub struct RpcState {
     pub store: Arc<BlockchainStore>,
     /// Channel for submitting externally-mined blocks to the node.
     pub block_sender: tokio::sync::mpsc::Sender<BlockSubmission>,
+    /// The miner's on-chain identity (Blake3 hash of their public key).
+    /// Set to ObjectId::zero() if no key file is provided.
+    pub miner_id: ObjectId,
 }
 
 /// A block submitted by an external miner, along with a oneshot channel
@@ -139,8 +142,9 @@ impl RpcState {
         mempool: Arc<RwLock<Mempool>>,
         store: Arc<BlockchainStore>,
         block_sender: tokio::sync::mpsc::Sender<BlockSubmission>,
+        miner_id: ObjectId,
     ) -> Self {
-        RpcState { chain, accounts, validators, mempool, store, block_sender }
+        RpcState { chain, accounts, validators, mempool, store, block_sender, miner_id }
     }
 }
 
@@ -473,7 +477,7 @@ async fn handle_get_mining_job(state: &RpcState) -> Result<serde_json::Value, Js
         difficulty,
         suggested_fee: chain.suggested_fee,
         extension_root: None,
-        producer: opolys_core::ObjectId::zero(), // Miner fills this in
+        producer: state.miner_id.clone(),
         pow_proof: None,
         validator_signature: None,
     };
@@ -485,7 +489,7 @@ async fn handle_get_mining_job(state: &RpcState) -> Result<serde_json::Value, Js
     // Convert difficulty to u64 target using EVO-OMAP leading-zero-bits model
     let target = opolys_consensus::emission::difficulty_to_target(difficulty);
 
-let job = MiningJobResponse {
+    let job = MiningJobResponse {
         version: opolys_core::BLOCK_VERSION,
         height: chain.height + 1,
         previous_hash: chain.latest_block_hash.to_hex(),
@@ -496,7 +500,7 @@ let job = MiningJobResponse {
         suggested_fee: chain.suggested_fee,
         timestamp: header.timestamp,
         transaction_count: transactions.len(),
-        producer: header.producer.to_hex(),
+        producer: state.miner_id.to_hex(),
         header_bytes: header_bytes_hex,
     };
 

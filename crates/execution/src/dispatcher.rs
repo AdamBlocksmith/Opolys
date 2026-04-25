@@ -24,7 +24,7 @@
 //! keep their original `bonded_at_timestamp`. Invalid amounts (below
 //! MIN_FEE floor or exceeding total stake) result in an error.
 
-use opolys_core::{Transaction, TransactionAction, ObjectId, FlakeAmount, OpolysError, MIN_BOND_STAKE, MIN_FEE, SIGNATURE_TYPE_ED25519, EPOCH};
+use opolys_core::{Transaction, TransactionAction, ObjectId, FlakeAmount, OpolysError, MIN_BOND_STAKE, MIN_FEE, SIGNATURE_TYPE_ED25519};
 use opolys_consensus::account::{AccountStore, TransferResult};
 use opolys_consensus::pos::ValidatorSet;
 use opolys_crypto::hash_to_object_id;
@@ -423,7 +423,7 @@ fn compute_tx_id(
 mod tests {
     use super::*;
     use opolys_crypto::hash_to_object_id;
-    use opolys_core::opl_to_flake;
+    use opolys_core::{opl_to_flake, EPOCH};
 
     fn make_transfer(sender: &ObjectId, recipient: &ObjectId, amount: FlakeAmount, fee: FlakeAmount, nonce: u64) -> Transaction {
         let action = TransactionAction::Transfer {
@@ -679,6 +679,7 @@ mod tests {
     }
 
     #[cfg(test)]
+    #[test]
     fn validate_transaction_basic_bond() {
         let alice = hash_to_object_id(b"alice");
         let tx = make_bond(&alice, MIN_BOND_STAKE, opl_to_flake(1), 0);
