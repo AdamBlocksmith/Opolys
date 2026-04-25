@@ -795,6 +795,18 @@ impl OpolysNode {
             chain.phase = ConsensusPhase::ProofOfWork;
         }
 
+        // Recompute the state root from the updated account and validator state.
+        // This provides a cryptographic commitment to the entire application state
+        // after applying this block, enabling light client verification and
+        // detecting state divergence between nodes.
+        let mut account_hasher = opolys_crypto::Blake3Hasher::new();
+        account_hasher.update(accounts.compute_state_root().as_bytes());
+        account_hasher.update(validators.compute_state_root().as_bytes());
+        account_hasher.update(&chain.total_issued.to_be_bytes());
+        account_hasher.update(&chain.total_burned.to_be_bytes());
+        account_hasher.update(&chain.current_height.to_be_bytes());
+        chain.state_root = account_hasher.finalize();
+
         // Persist state to disk
         if let Some(ref store) = self.store {
             if let Err(e) = Self::persist_state(store, &chain, &accounts, &validators, block) {

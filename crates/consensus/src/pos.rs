@@ -31,6 +31,7 @@ use opolys_core::{FlakeAmount, ObjectId, ValidatorStatus, MIN_BOND_STAKE, EPOCH}
 use borsh::{BorshSerialize, BorshDeserialize};
 use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
+use opolys_crypto::Blake3Hasher;
 
 /// A pending unbonding entry that matures after a delay of EPOCH blocks.
 ///
@@ -427,6 +428,34 @@ impl ValidatorSet {
             set.validators.insert(v.object_id.clone(), v);
         }
         set
+    }
+
+    /// Compute a deterministic Blake3-256 state root hash over all validators
+    /// and their bond entries. Validators are sorted by ObjectId for determinism.
+    /// Also includes the unbonding queue to capture pending stake withdrawals.
+    pub fn compute_state_root(&self) -> opolys_core::Hash {
+        let mut sorted_ids: Vec<&ObjectId> = self.validators.keys().collect();
+        sorted_ids.sort_by(|a, b| a.0 .0.cmp(&b.0 .0));
+
+        let mut hasher = Blake3Hasher::new();
+
+        // Hash all validator state (sorted by ObjectId)
+        for id in sorted_ids {
+            if let Some(validator) = self.validators.get(id) {
+                if let Ok(bytes) = borsh::to_vec(validator) {
+                    hasher.update(&bytes);
+                }
+            }
+        }
+
+        // Hash the unbonding queue (order matters — it's FIFO)
+        for entry in &self.unbonding_queue {
+            if let Ok(bytes) = borsh::to_vec(entry) {
+                hasher.update(&bytes);
+            }
+        }
+
+        hasher.finalize()
     }
 
     /// Select the next block producer via weighted random sampling.

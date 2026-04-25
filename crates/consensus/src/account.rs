@@ -11,6 +11,7 @@
 
 use opolys_core::{FlakeAmount, ObjectId, OpolysError};
 use borsh::{BorshSerialize, BorshDeserialize};
+use opolys_crypto::Blake3Hasher;
 
 /// A single account in the Opolys ledger.
 ///
@@ -200,6 +201,27 @@ impl AccountStore {
     /// Returns the total number of accounts in the store.
     pub fn account_count(&self) -> usize {
         self.accounts.len()
+    }
+
+    /// Compute a deterministic Blake3-256 state root hash over all accounts.
+    ///
+    /// Accounts are sorted by ObjectId to ensure deterministic output across
+    /// nodes. Each account is serialized using Borsh and streamed into the
+    /// hasher. The resulting hash captures the complete account state:
+    /// balances, nonces, and public keys.
+    pub fn compute_state_root(&self) -> opolys_core::Hash {
+        let mut sorted_ids: Vec<&ObjectId> = self.accounts.keys().collect();
+        sorted_ids.sort_by(|a, b| a.0 .0.cmp(&b.0 .0));
+
+        let mut hasher = Blake3Hasher::new();
+        for id in sorted_ids {
+            if let Some(account) = self.accounts.get(id) {
+                if let Ok(bytes) = borsh::to_vec(account) {
+                    hasher.update(&bytes);
+                }
+            }
+        }
+        hasher.finalize()
     }
 }
 
