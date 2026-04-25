@@ -422,12 +422,21 @@ SLIP-0044 coin type 999 for OPL. Single ed25519 key handles both transaction sig
 
 ## 17. Networking (libp2p)
 
-- **Transport**: libp2p 0.54 with TCP, noise, yamux
-- **Discovery**: Kademlia DHT (bucket size 20)
-- **Gossip**: Gossipsub for block/transaction propagation
-- **Sync**: Request-response protocol for block/header download
+- **Transport**: libp2p 0.54 with QUIC, TCP, noise, yamux, relay client
+- **Discovery**: Kademlia DHT (bucket size 20) + identify protocol
+- **Gossip**: Gossipsub for block/transaction propagation (`opolys/tx/v1`, `opolys/block/v1`)
+- **Sync**: CBOR request-response protocol for block download (`/opolys/sync/1`)
+- **Ping**: Liveness checks with 30s interval, 10s timeout
 
-Scaffold exists in `crates/networking/`. Not yet wired to the node.
+All five protocols composed into `OpolysBehaviour` via `#[derive(NetworkBehaviour)]`. Events routed through `OpolysBehaviourEvent` → `OpolysNetworkEvent` to the node's main event loop.
+
+**Wired features:**
+- Incoming gossipsub **transactions** → deserialized and added to mempool
+- Incoming gossipsub **blocks** → deserialized, validated, and applied (with height dedup)
+- Incoming **sync requests** → serve blocks from RocksDB storage, respond via `ResponseChannel`
+- Incoming **sync responses** → apply received blocks to catch up to chain tip
+- Mined/submitted blocks → broadcast to P2P peers via gossipsub
+- Identify protocol → adds peer addresses to Kademlia DHT
 
 ---
 
@@ -468,10 +477,15 @@ Opolys/
 │   │   ├── key.rs                      # KeyPair
 │   │   └── account.rs                  # AccountInfo
 │   ├── rpc/src/server.rs              # JSON-RPC 2.0 with suggested_fee, MiningJob
-│   ├── networking/src/                 # Scaffold only (libp2p)
+│   ├── networking/src/
+│   │   ├── behaviour.rs              # OpolysBehaviour (gossipsub+kad+identify+ping+request_response)
+│   │   ├── network.rs               # OpolysNetwork, SwarmTask, NetworkCommand, event routing
+│   │   ├── gossip.rs                # GossipConfig (tx/block topics, max message size)
+│   │   ├── sync.rs                  # SyncRequest, SyncResponse (CBOR), SyncConfig
+│   │   └── discovery.rs            # DiscoveryConfig (Kad bucket size)
 │   └── node/src/
-│       ├── main.rs                     # CLI, mining loop, block processor
-│       └── node.rs                     # OpolysNode with PowContext, vein yield, apply_block
+│       ├── main.rs                   # CLI, P2P event loop, mempool wiring, block sync
+│       └── node.rs                   # OpolysNode with PowContext, vein yield, apply_block
 ```
 
 ### Key External Dependencies
@@ -503,7 +517,7 @@ Opolys/
 | 6: Wallet | **DONE** | BIP-39, SLIP-0010, ed25519 signing |
 | 7: RPC | **DONE** | JSON-RPC 2.0 with mining endpoints |
 | 8: Node | **DONE** | Full node with mining loop and block application |
-| 9: Networking | **PLANNED** | Wire libp2p gossip/sync/discovery |
+| 9: Networking | **DONE** | P2P gossip/sync/discovery wired to node |
 | 10: Staking | **PLANNED** | `--validate` flag, PoS block production |
 | 11: Security | **PLANNED** | Code audit, fuzz, overflow checks |
 | 12: Testnet | **PLANNED** | Deploy and test |
