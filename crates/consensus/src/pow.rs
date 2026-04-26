@@ -25,7 +25,7 @@ use evo_omap::{mine_parallel, verify_light, DatasetCache};
 /// a ~7.5 second cost that would otherwise be paid per nonce attempt.
 pub struct PowContext {
     cache: DatasetCache,
-    last_epoch: u64,
+    last_epoch: Option<u64>,
 }
 
 impl PowContext {
@@ -33,7 +33,7 @@ impl PowContext {
     pub fn new() -> Self {
         PowContext {
             cache: DatasetCache::new(),
-            last_epoch: u64::MAX,
+            last_epoch: None,
         }
     }
 
@@ -41,9 +41,9 @@ impl PowContext {
     /// Only regenerates when the epoch changes (every EPOCH blocks).
     pub fn get_dataset(&mut self, height: BlockHeight) -> &evo_omap::Dataset {
         let epoch = height / EPOCH;
-        if epoch != self.last_epoch {
+        if self.last_epoch != Some(epoch) {
             self.cache.get_dataset(height);
-            self.last_epoch = epoch;
+            self.last_epoch = Some(epoch);
         }
         self.cache.get_dataset(height)
     }
@@ -141,40 +141,11 @@ pub fn serialize_header_for_pow(header: &BlockHeader) -> Vec<u8> {
     buf
 }
 
-/// Verify that a block's EVO-OMAP PoW proof is valid for the given difficulty.
-///
-/// Uses light verification (on-demand node reconstruction) to avoid generating
-/// the full 256 MiB dataset. This is suitable for regular block validation where
-/// dataset generation latency would be unacceptable (~7.5s per block).
-/// For mining, use the cached dataset path instead.
-///
-/// Returns `Ok(())` if valid, `Err(InvalidProofOfWork)` otherwise.
-pub fn verify_pow(header: &BlockHeader, difficulty: u64) -> Result<(), OpolysError> {
-    if difficulty == 0 {
-        return Ok(());
-    }
-
-    let nonce_bytes = header.pow_proof.as_ref()
-        .ok_or(OpolysError::InvalidProofOfWork)?;
-
-    if nonce_bytes.len() < 8 {
-        return Err(OpolysError::InvalidProofOfWork);
-    }
-
-    let nonce = u64::from_be_bytes(
-        nonce_bytes[..8].try_into().map_err(|_| OpolysError::InvalidProofOfWork)?
-    );
-
-    let header_bytes = serialize_header_for_pow(header);
-    verify_light(&header_bytes, header.height, nonce, difficulty)
-        .then_some(())
-        .ok_or(OpolysError::InvalidProofOfWork)
-}
-
 /// Verify a block's PoW using light verification (on-demand node reconstruction).
 ///
 /// Requires no pre-generated cache — nodes reconstruct dataset nodes as needed.
 /// Trades computation for memory (~7.5s verification time, no 256 MiB cache).
+/// Returns `Ok(())` if valid, `Err(InvalidProofOfWork)` otherwise.
 pub fn verify_pow_light(header: &BlockHeader, difficulty: u64) -> Result<(), OpolysError> {
     if difficulty == 0 {
         return Ok(());
@@ -224,11 +195,8 @@ pub fn mine_block(
     difficulty: u64,
     max_attempts: u64,
 ) -> Option<Block> {
-    let num_threads = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1);
     let mut ctx = PowContext::new();
-    ctx.mine_parallel(header, difficulty, max_attempts, num_threads)
+    ctx.mine_parallel(header, difficulty, max_attempts, 0)
 }
 
 #[cfg(test)]
@@ -256,7 +224,7 @@ mod tests {
     #[test]
     fn test_pow_context_creation() {
         let ctx = PowContext::new();
-        assert_eq!(ctx.last_epoch, u64::MAX);
+        assert_eq!(ctx.last_epoch, None);
     }
 
     #[test]
@@ -294,7 +262,7 @@ mod tests {
     #[test]
     fn test_verify_pow_rejects_missing_proof() {
         let header = make_header(1, 1);
-        let result = verify_pow(&header, 1);
+        let result = verify_pow_light(&header, 1);
         assert!(result.is_err());
     }
 
@@ -302,7 +270,7 @@ mod tests {
     fn test_verify_pow_rejects_short_proof() {
         let mut header = make_header(1, 1);
         header.pow_proof = Some(vec![0u8; 4]);
-        let result = verify_pow(&header, 1);
+        let result = verify_pow_light(&header, 1);
         assert!(result.is_err());
     }
 
@@ -310,7 +278,7 @@ mod tests {
     fn test_verify_pow_zero_difficulty() {
         let mut header = make_header(1, 0);
         header.pow_proof = None;
-        let result = verify_pow(&header, 0);
+        let result = verify_pow_light(&header, 0);
         assert!(result.is_ok());
     }
 }

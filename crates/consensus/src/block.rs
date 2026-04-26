@@ -263,7 +263,7 @@ pub fn validate_block(
     if expected_height > 0 {
         if block.header.pow_proof.is_some() {
             // PoW block — verify the proof-of-work
-            if let Err(e) = crate::pow::verify_pow(&block.header, block.header.difficulty) {
+            if let Err(e) = crate::pow::verify_pow_light(&block.header, block.header.difficulty) {
                 return Err(e);
             }
         } else if block.header.validator_signature.is_some() {
