@@ -435,7 +435,7 @@ impl OpolysNode {
         let mempool = self.mempool.read().await;
         let transactions: Vec<Transaction> = mempool.get_ordered_transactions()
             .into_iter()
-            .take(100)
+            .take(MAX_TRANSACTIONS_PER_BLOCK)
             .cloned()
             .collect();
 
@@ -477,12 +477,8 @@ impl OpolysNode {
         drop(validators);
         drop(mempool);
 
-        let num_threads = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1);
-
         let mut ctx = self.pow_context.write().await;
-        ctx.mine_parallel(header, difficulty, max_attempts, num_threads)
+        ctx.mine_parallel(header, difficulty, max_attempts, 0)
     }
 
     /// Produce a PoS block as a validator.
@@ -634,31 +630,42 @@ impl OpolysNode {
             now_secs,
         ).map_err(|e| format!("Block validation failed: {}", e))?;
 
+        // Verify the block's declared state root matches our current (pre-application) state root
+        if block.header.state_root != chain.state_root {
+            return Err(format!(
+                "State root mismatch at height {}: expected {}, got {}",
+                block.header.height,
+                chain.state_root.to_hex(),
+                block.header.state_root.to_hex()
+            ));
+        }
+
         // Verify PoS validator signature if present
         if block.header.validator_signature.is_some() && !block.header.producer.0.is_zero() {
             if let Some(ref sig_bytes) = block.header.validator_signature {
-                if sig_bytes.len() == 64 {
-                    let block_hash = compute_block_hash(&block.header);
-                    // Look up the producer's public key from their on-chain account
-                    if let Some(account) = accounts.get_account(&block.header.producer) {
-                        if let Some(ref pk_bytes) = account.public_key {
-                            if pk_bytes.len() == 32 {
-                                let mut sig_array = [0u8; 64];
-                                sig_array.copy_from_slice(sig_bytes);
-                                let mut pk_array = [0u8; 32];
-                                pk_array.copy_from_slice(pk_bytes);
-                                if let Ok(verifying_key) = ed25519_dalek::VerifyingKey::from_bytes(&pk_array) {
-                                    let signature = ed25519_dalek::Signature::from_bytes(&sig_array);
-                                    if verifying_key.verify(block_hash.0.as_ref(), &signature).is_err() {
-                                        return Err("PoS block validator signature verification failed".to_string());
-                                    }
-                                }
-                            }
-                        }
-                    }
-// If the producer has no stored public key yet, we accept the block
-                    // (first-time producers need their first transaction to register the key)
+                if sig_bytes.len() != 64 {
+                    return Err("PoS block validator signature must be 64 bytes".to_string());
                 }
+                let block_hash = compute_block_hash(&block.header);
+                let (pk_array, sig_array) = {
+                    let account = accounts.get_account(&block.header.producer)
+                        .ok_or_else(|| "PoS block producer account not found".to_string())?;
+                    let pk_bytes = account.public_key.as_ref()
+                        .ok_or_else(|| "PoS block producer public key not registered".to_string())?;
+                    if pk_bytes.len() != 32 {
+                        return Err("PoS block producer public key must be 32 bytes".to_string());
+                    }
+                    let mut pk_array = [0u8; 32];
+                    pk_array.copy_from_slice(pk_bytes);
+                    let mut sig_array = [0u8; 64];
+                    sig_array.copy_from_slice(sig_bytes);
+                    (pk_array, sig_array)
+                };
+                let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&pk_array)
+                    .map_err(|_| "PoS block producer public key is invalid".to_string())?;
+                let signature = ed25519_dalek::Signature::from_bytes(&sig_array);
+                verifying_key.verify(block_hash.0.as_ref(), &signature)
+                    .map_err(|_| "PoS block validator signature verification failed".to_string())?;
             }
         }
 
@@ -706,17 +713,23 @@ impl OpolysNode {
             }
         }
 
-        // Compute vein yield from the EVO-OMAP PoW hash.
-        // For PoW blocks, this is the hash of the nonce solution.
-        // For PoS blocks (no PoW), vein yield defaults to the minimum (1000 = 1.0x).
-        let pow_hash_value = if block.header.pow_proof.is_some() {
-            pow::compute_pow_hash_value(&block.header).unwrap_or(0u64)
+        // Genesis block (height 0) issues zero reward.
+        // Supply starts at exactly zero.
+        // First OPL enters circulation at block 1 when real mining begins.
+        // Matches gold analogy — nobody found gold until someone dug.
+        let block_reward = if block.header.height == 0 {
+            0
         } else {
-            0u64
+            // Compute vein yield from the EVO-OMAP PoW hash.
+            // For PoW blocks, this is the hash of the nonce solution.
+            // For PoS blocks (no PoW), vein yield defaults to the minimum (1000 = 1.0x).
+            let pow_hash_value = if block.header.pow_proof.is_some() {
+                pow::compute_pow_hash_value(&block.header).unwrap_or(0u64)
+            } else {
+                0u64
+            };
+            emission::compute_block_reward(block.header.difficulty, pow_hash_value)
         };
-
-        // Block reward uses vein yield: BASE_REWARD / effective_difficulty * vein_yield
-        let block_reward = emission::compute_block_reward(block.header.difficulty, pow_hash_value);
 
         // Split the block reward between miners and validators based on stake coverage.
         // pow_share goes to the block producer (miner or selected validator).
