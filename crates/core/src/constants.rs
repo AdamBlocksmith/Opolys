@@ -227,9 +227,6 @@ pub const MAINNET_CHAIN_ID: u64 = 1;
 /// Chain ID for the Opolys testnet.
 pub const TESTNET_CHAIN_ID: u64 = 2;
 
-/// Chain ID for a local development network.
-pub const DEVNET_CHAIN_ID: u64 = 3;
-
 #[cfg(test)]
 mod tests {
     use super::*;
