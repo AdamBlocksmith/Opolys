@@ -134,12 +134,24 @@ fn testnet_genesis_config() -> opolys_consensus::GenesisConfig {
     // 10,000 OPL per testnet account
     let testnet_funding = 10_000 * FLAKES_PER_OPL;
     config.genesis_accounts = vec![
-        // Testnet Account 0
-        (ObjectId::from_hex("eef4d70ed7c6ae9e70e900da4633a4fb3c9ab4dfaab788c7793fab46389242d4").unwrap(), testnet_funding),
-        // Testnet Account 1
-        (ObjectId::from_hex("c1d4059214449f375b86d3fa918d2b0e6201753ec3452fee4976acf38c31f538").unwrap(), testnet_funding),
-        // Testnet Account 2
-        (ObjectId::from_hex("9ec9dbbd1c9d739e1a9792e95ec941423e16f55ad8c00fcfd422fbe9efa6cf76").unwrap(), testnet_funding),
+        // Testnet Account 0 — see testnet-data/testnet-keys.txt for seed
+        (
+            ObjectId::from_hex("12865e52536fc1d6e63e1c5430f01134efd540514b4d66df76a990dd7875dc16").unwrap(),
+            testnet_funding,
+            hex::decode("7e6db137e7e59a3f96ae682b5c7292f9ecc0529f8c55c728a631456190a97a66").unwrap(),
+        ),
+        // Testnet Account 1 — see testnet-data/testnet-keys.txt for seed
+        (
+            ObjectId::from_hex("558af9966416c04a2b2aff355f386aeb5d356b100861992069b8592a0021dc8b").unwrap(),
+            testnet_funding,
+            hex::decode("8aef2fc5caa3343aac5000072d2a6fe837746f912c6c26b1071b39c2b83a35c4").unwrap(),
+        ),
+        // Testnet Account 2 — see testnet-data/testnet-keys.txt for seed
+        (
+            ObjectId::from_hex("e024a035a42f9858bb498f0a64c28d9702783265fb7f6cc484b7f986d48eef9d").unwrap(),
+            testnet_funding,
+            hex::decode("cd606e8a8f63b78c1a8fb2f063bd9a9db8699dc44a6f0447ba2505276efca57a").unwrap(),
+        ),
     ];
     config
 }
