@@ -211,6 +211,7 @@ mod tests {
             fee,
             signature: vec![],
             nonce,
+            chain_id: opolys_core::MAINNET_CHAIN_ID,
             data: vec![],
             signature_type: opolys_core::SIGNATURE_TYPE_ED25519,
             public_key: vec![],

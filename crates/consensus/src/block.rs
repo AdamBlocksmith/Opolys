@@ -324,6 +324,7 @@ mod tests {
             signature: vec![1, 2, 3],
             signature_type: 0,
             nonce: 0,
+            chain_id: opolys_core::MAINNET_CHAIN_ID,
             data: vec![],
             public_key: vec![],
         };

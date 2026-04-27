@@ -27,18 +27,23 @@ impl TransactionSigner {
     /// Moves `amount` OPL (in flakes) from sender to recipient. The `fee` is
     /// **burned** (permanently removed from supply), not collected by any validator.
     /// This is a core Opolys design choice: fees are market-driven and burned.
+    ///
+    /// `chain_id` must match the target network (use `MAINNET_CHAIN_ID` for mainnet,
+    /// `TESTNET_CHAIN_ID` for testnet). It is included in both the tx_id hash and
+    /// the signed data to prevent cross-chain replay attacks.
     pub fn create_transfer(
         sender: &KeyPair,
         recipient: ObjectId,
         amount: FlakeAmount,
         fee: FlakeAmount,
         nonce: u64,
+        chain_id: u64,
     ) -> Transaction {
         let action = TransactionAction::Transfer { recipient, amount };
         let sender_id = sender.object_id().clone();
 
-        let tx_id = Self::compute_tx_id(&sender_id, &action, fee, nonce);
-        let unsigned_data = borsh::to_vec(&(sender_id.clone(), &action, fee, nonce)).unwrap_or_default();
+        let tx_id = Self::compute_tx_id(&sender_id, &action, fee, nonce, chain_id);
+        let unsigned_data = borsh::to_vec(&(sender_id.clone(), &action, fee, nonce, chain_id)).unwrap_or_default();
         let signature = sender.sign(&unsigned_data);
 
         Transaction {
@@ -49,6 +54,7 @@ impl TransactionSigner {
             signature,
             signature_type: SIGNATURE_TYPE_ED25519,
             nonce,
+            chain_id,
             data: vec![],
             public_key: sender.public_key_bytes(),
         }
@@ -60,17 +66,20 @@ impl TransactionSigner {
     /// already a validator, this creates a new bond entry (top-up) with its
     /// own seniority clock starting from zero. Each new entry must be at least
     /// `MIN_BOND_STAKE` (1 OPL).
+    ///
+    /// `chain_id` must match the target network to prevent cross-chain replay attacks.
     pub fn create_validator_bond(
         sender: &KeyPair,
         amount: FlakeAmount,
         fee: FlakeAmount,
         nonce: u64,
+        chain_id: u64,
     ) -> Transaction {
         let action = TransactionAction::ValidatorBond { amount };
         let sender_id = sender.object_id().clone();
 
-        let tx_id = Self::compute_tx_id(&sender_id, &action, fee, nonce);
-        let unsigned_data = borsh::to_vec(&(sender_id.clone(), &action, fee, nonce)).unwrap_or_default();
+        let tx_id = Self::compute_tx_id(&sender_id, &action, fee, nonce, chain_id);
+        let unsigned_data = borsh::to_vec(&(sender_id.clone(), &action, fee, nonce, chain_id)).unwrap_or_default();
         let signature = sender.sign(&unsigned_data);
 
         Transaction {
@@ -81,6 +90,7 @@ impl TransactionSigner {
             signature,
             signature_type: SIGNATURE_TYPE_ED25519,
             nonce,
+            chain_id,
             data: vec![],
             public_key: sender.public_key_bytes(),
         }
@@ -93,17 +103,20 @@ impl TransactionSigner {
     /// stake, that entry is fully consumed and the remainder comes from the next
     /// oldest. After a UNBONDING_DELAY_BLOCKS delay, the unbonded stake is
     /// returned to the sender's wallet.
+    ///
+    /// `chain_id` must match the target network to prevent cross-chain replay attacks.
     pub fn create_validator_unbond(
         sender: &KeyPair,
         amount: FlakeAmount,
         fee: FlakeAmount,
         nonce: u64,
+        chain_id: u64,
     ) -> Transaction {
         let action = TransactionAction::ValidatorUnbond { amount };
         let sender_id = sender.object_id().clone();
 
-        let tx_id = Self::compute_tx_id(&sender_id, &action, fee, nonce);
-        let unsigned_data = borsh::to_vec(&(sender_id.clone(), &action, fee, nonce)).unwrap_or_default();
+        let tx_id = Self::compute_tx_id(&sender_id, &action, fee, nonce, chain_id);
+        let unsigned_data = borsh::to_vec(&(sender_id.clone(), &action, fee, nonce, chain_id)).unwrap_or_default();
         let signature = sender.sign(&unsigned_data);
 
         Transaction {
@@ -114,28 +127,26 @@ impl TransactionSigner {
             signature,
             signature_type: SIGNATURE_TYPE_ED25519,
             nonce,
+            chain_id,
             data: vec![],
             public_key: sender.public_key_bytes(),
         }
     }
 
-    /// Deterministic transaction ID derived from sender, action, fee, and nonce via Blake3-256.
-    ///
-    /// The action is included in the hash to prevent transaction ID collisions
-    /// between different action types. Two transactions with the same sender,
-    /// fee, and nonce but different actions will have different IDs.
+    /// Deterministic transaction ID derived from sender, action, fee, nonce, and chain_id
+    /// via Blake3-256. Including chain_id prevents cross-chain replay attacks.
     fn compute_tx_id(
         sender: &ObjectId,
         action: &TransactionAction,
         fee: FlakeAmount,
         nonce: u64,
+        chain_id: u64,
     ) -> ObjectId {
         let mut data = sender.0.to_hex().as_bytes().to_vec();
-        // Include the action in the hash to prevent ID collisions between
-        // different action types with the same sender, fee, and nonce.
         data.extend_from_slice(borsh::to_vec(action).unwrap_or_default().as_slice());
         data.extend_from_slice(&fee.to_be_bytes());
         data.extend_from_slice(&nonce.to_be_bytes());
+        data.extend_from_slice(&chain_id.to_be_bytes());
         hash_to_object_id(&data)
     }
 }
@@ -143,7 +154,7 @@ impl TransactionSigner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opolys_core::FLAKES_PER_OPL;
+    use opolys_core::{FLAKES_PER_OPL, MAINNET_CHAIN_ID, TESTNET_CHAIN_ID};
 
     #[test]
     fn create_transfer_transaction() {
@@ -155,9 +166,11 @@ mod tests {
             FLAKES_PER_OPL,
             FLAKES_PER_OPL / 10,
             0,
+            MAINNET_CHAIN_ID,
         );
         assert_eq!(tx.nonce, 0);
         assert_eq!(tx.fee, FLAKES_PER_OPL / 10);
+        assert_eq!(tx.chain_id, MAINNET_CHAIN_ID);
         assert_eq!(tx.signature_type, SIGNATURE_TYPE_ED25519);
         assert!(matches!(tx.action, TransactionAction::Transfer { .. }));
     }
@@ -171,8 +184,10 @@ mod tests {
             bond_amount,
             FLAKES_PER_OPL,
             0,
+            MAINNET_CHAIN_ID,
         );
         assert!(matches!(tx.action, TransactionAction::ValidatorBond { amount } if amount == bond_amount));
+        assert_eq!(tx.chain_id, MAINNET_CHAIN_ID);
         assert_eq!(tx.signature_type, SIGNATURE_TYPE_ED25519);
     }
 
@@ -184,9 +199,11 @@ mod tests {
             FLAKES_PER_OPL,
             FLAKES_PER_OPL / 100,
             1,
+            MAINNET_CHAIN_ID,
         );
         assert!(matches!(tx.action, TransactionAction::ValidatorUnbond { amount } if amount == FLAKES_PER_OPL));
         assert_eq!(tx.nonce, 1);
+        assert_eq!(tx.chain_id, MAINNET_CHAIN_ID);
         assert_eq!(tx.signature_type, SIGNATURE_TYPE_ED25519);
     }
 
@@ -194,9 +211,21 @@ mod tests {
     fn tx_id_includes_action() {
         let keypair = KeyPair::generate();
         let recipient = hash_to_object_id(b"recipient");
-        let transfer = TransactionSigner::create_transfer(&keypair, recipient.clone(), 1000, 100, 0);
-        let bond = TransactionSigner::create_validator_bond(&keypair, 1000, 100, 0);
+        let transfer = TransactionSigner::create_transfer(&keypair, recipient.clone(), 1000, 100, 0, MAINNET_CHAIN_ID);
+        let bond = TransactionSigner::create_validator_bond(&keypair, 1000, 100, 0, MAINNET_CHAIN_ID);
         // Same sender, same fee, same nonce, different action → different tx_id
         assert_ne!(transfer.tx_id, bond.tx_id);
+    }
+
+    #[test]
+    fn tx_id_differs_across_chain_ids() {
+        let keypair = KeyPair::generate();
+        let recipient = hash_to_object_id(b"recipient");
+        let mainnet_tx = TransactionSigner::create_transfer(&keypair, recipient.clone(), 1000, 100, 0, MAINNET_CHAIN_ID);
+        let testnet_tx = TransactionSigner::create_transfer(&keypair, recipient.clone(), 1000, 100, 0, TESTNET_CHAIN_ID);
+        // Same sender, action, fee, nonce — but different chain_id → different tx_id
+        assert_ne!(mainnet_tx.tx_id, testnet_tx.tx_id);
+        assert_eq!(mainnet_tx.chain_id, MAINNET_CHAIN_ID);
+        assert_eq!(testnet_tx.chain_id, TESTNET_CHAIN_ID);
     }
 }

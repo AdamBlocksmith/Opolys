@@ -12,7 +12,7 @@
 //!   opl send <tx_hex>          — Broadcast a signed transaction via RPC
 
 use clap::Parser;
-use opolys_core::{FlakeAmount, FLAKES_PER_OPL};
+use opolys_core::{FlakeAmount, FLAKES_PER_OPL, MAINNET_CHAIN_ID, TESTNET_CHAIN_ID};
 use opolys_wallet::{Bip39Mnemonic, TransactionSigner};
 
 #[derive(Parser, Debug)]
@@ -21,6 +21,10 @@ struct Cli {
     /// RPC server URL (default: http://localhost:4171)
     #[arg(long, default_value = "http://localhost:4171")]
     rpc_url: String,
+
+    /// Use testnet chain ID instead of mainnet. Prevents mainnet/testnet replay attacks.
+    #[arg(long)]
+    testnet: bool,
 
     #[command(subcommand)]
     command: Command,
@@ -156,6 +160,7 @@ async fn main() {
 }
 
 async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let chain_id = if cli.testnet { TESTNET_CHAIN_ID } else { MAINNET_CHAIN_ID };
     match cli.command {
         Command::New { account } => {
             let mnemonic = Bip39Mnemonic::generate();
@@ -220,6 +225,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 amount_flakes,
                 fee_flakes,
                 nonce_val,
+                chain_id,
             );
 
             let tx_bytes = borsh::to_vec(&tx)?;
@@ -244,6 +250,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 amount_flakes,
                 fee_flakes,
                 nonce_val,
+                chain_id,
             );
 
             let tx_bytes = borsh::to_vec(&tx)?;
@@ -268,6 +275,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 amount_flakes,
                 fee_flakes,
                 nonce_val,
+                chain_id,
             );
 
             let tx_bytes = borsh::to_vec(&tx)?;

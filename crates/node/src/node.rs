@@ -800,6 +800,7 @@ impl OpolysNode {
         chain.suggested_fee = next_suggested_fee;
 
         // Execute all transactions in order
+        let expected_chain_id = if self.config.testnet { TESTNET_CHAIN_ID } else { MAINNET_CHAIN_ID };
         let mut total_fees_burned: FlakeAmount = 0;
         for tx in &block.transactions {
             let result = TransactionDispatcher::apply_transaction(
@@ -808,6 +809,7 @@ impl OpolysNode {
                 &mut validators,
                 block.header.height,
                 block.header.timestamp,
+                expected_chain_id,
             );
             if result.success {
                 total_fees_burned = total_fees_burned.saturating_add(result.fee_burned);

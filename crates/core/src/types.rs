@@ -260,10 +260,12 @@ pub struct BlockHeader {
 ///
 /// Signature verification flow:
 /// 1. Check `Blake3(public_key) == sender` (binds the key to the identity)
-/// 2. Check `tx_id == compute_tx_id(sender, action, fee, nonce)` (integrity)
+/// 2. Check `tx_id == compute_tx_id(sender, action, fee, nonce, chain_id)` (integrity)
 /// 3. Check `ed25519_verify(signed_data, signature, public_key)` (authenticity)
 ///
-/// The `signed_data` is `borsh::to_vec((sender, action, fee, nonce))`.
+/// The `signed_data` is `borsh::to_vec((sender, action, fee, nonce, chain_id))`.
+/// Including `chain_id` in both the tx_id and signed data prevents cross-chain
+/// replay attacks — a valid mainnet transaction is invalid on testnet.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize, Serialize, Deserialize)]
 pub struct Transaction {
     /// Unique identifier for this transaction (hash of its content).
@@ -282,6 +284,10 @@ pub struct Transaction {
     pub signature_type: u8,
     /// Sender's nonce for replay protection — must equal the account's current nonce.
     pub nonce: u64,
+    /// Chain ID for cross-chain replay protection. Must match the network's expected
+    /// chain ID (MAINNET_CHAIN_ID=1, TESTNET_CHAIN_ID=2, DEVNET_CHAIN_ID=3).
+    /// Included in both the tx_id hash and the signed data.
+    pub chain_id: u64,
     /// Arbitrary data attachment (e.g., memos). Not interpreted by consensus.
     pub data: Vec<u8>,
     /// The ed25519 public key of the sender (32 bytes).
