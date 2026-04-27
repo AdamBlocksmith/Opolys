@@ -61,9 +61,11 @@ pub struct GenesisConfig {
     pub protocol_version: String,
     /// The ceremony attestation anchoring genesis to gold data.
     pub attestation: GenesisAttestation,
-    /// Genesis accounts that receive initial OPL balances.
-    /// Each entry is (ObjectId, FlakeAmount) — no transactions needed.
-    pub genesis_accounts: Vec<(ObjectId, FlakeAmount)>,
+    /// Genesis accounts that receive initial OPL balances and their ed25519 public keys.
+    /// Each entry is (ObjectId, FlakeAmount, pubkey_bytes) — public key is 32 bytes
+    /// (ed25519 verifying key). Required so accounts can sign transactions immediately
+    /// without an empty-key bypass.
+    pub genesis_accounts: Vec<(ObjectId, FlakeAmount, Vec<u8>)>,
 }
 
 impl Default for GenesisConfig {
@@ -126,9 +128,10 @@ pub fn build_genesis_block(config: &GenesisConfig) -> Block {
     state_hasher.update(&config.attestation.wgc_response_hash);
     state_hasher.update(config.attestation.derivation_formula.as_bytes());
     // Include genesis accounts in the state root for deterministic genesis
-    for (account_id, amount) in &config.genesis_accounts {
+    for (account_id, amount, pk) in &config.genesis_accounts {
         state_hasher.update(account_id.as_bytes());
         state_hasher.update(&amount.to_be_bytes());
+        state_hasher.update(pk.as_slice());
     }
     let state_root = state_hasher.finalize();
 
@@ -162,9 +165,14 @@ pub fn apply_genesis_accounts(
     accounts: &mut AccountStore,
 ) -> FlakeAmount {
     let mut total_issued: FlakeAmount = 0;
-    for (account_id, amount) in &config.genesis_accounts {
+    for (account_id, amount, pk) in &config.genesis_accounts {
         if accounts.get_account(account_id).is_none() {
             accounts.create_account(account_id.clone()).ok();
+        }
+        if let Some(account) = accounts.get_account_mut(account_id) {
+            if !pk.is_empty() {
+                account.public_key = Some(pk.clone());
+            }
         }
         accounts.credit(account_id, *amount).ok();
         total_issued = total_issued.saturating_add(*amount);
