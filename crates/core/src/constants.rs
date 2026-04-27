@@ -215,6 +215,21 @@ pub const MAX_TX_DATA_SIZE_BYTES: usize = 1_024;
 /// in the future are rejected.
 pub const MAX_FUTURE_BLOCK_TIME_SECS: u64 = 300; // 5 minutes
 
+// ─── Chain Identity ──────────────────────────────────────────────────────────
+// Chain ID is included in transaction signing and ID computation to prevent
+// cross-chain replay attacks. A valid mainnet transaction cannot be replayed
+// on testnet and vice versa.
+
+/// Chain ID for the Opolys mainnet. Included in transaction signing and tx_id
+/// hashing to prevent replay attacks across networks.
+pub const MAINNET_CHAIN_ID: u64 = 1;
+
+/// Chain ID for the Opolys testnet.
+pub const TESTNET_CHAIN_ID: u64 = 2;
+
+/// Chain ID for a local development network.
+pub const DEVNET_CHAIN_ID: u64 = 3;
+
 #[cfg(test)]
 mod tests {
     use super::*;

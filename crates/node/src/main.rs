@@ -498,8 +498,9 @@ async fn handle_network_event(
 
             match borsh::from_slice::<opolys_core::Transaction>(&data) {
                 Ok(tx) => {
-                    // Basic verification: check tx_id, signature type, and public_key binding
-                    if let Err(e) = opolys_execution::verify_transaction(&tx) {
+                    // Basic verification: check tx_id, signature type, public_key binding, and chain_id
+                    let expected_chain_id = if node.config.testnet { opolys_core::TESTNET_CHAIN_ID } else { opolys_core::MAINNET_CHAIN_ID };
+                    if let Err(e) = opolys_execution::verify_transaction(&tx, expected_chain_id) {
                         tracing::warn!(peer = %source, tx_id = %tx.tx_id.to_hex(), error = %e, "Rejected invalid transaction from peer");
                         return;
                     }

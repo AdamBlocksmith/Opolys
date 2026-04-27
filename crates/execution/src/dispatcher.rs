@@ -81,6 +81,10 @@ impl TransactionDispatcher {
     /// - `ValidatorBond` → `apply_bond`
     /// - `ValidatorUnbond { amount }` → `apply_unbond`
     ///
+    /// `expected_chain_id` must match the network the node is running on
+    /// (MAINNET_CHAIN_ID=1, TESTNET_CHAIN_ID=2). Transactions with a mismatched
+    /// chain_id are rejected to prevent cross-chain replay attacks.
+    ///
     /// Returns an `ApplyResult` indicating success or failure, along with the
     /// fee amount that was burned.
     pub fn apply_transaction(
@@ -89,9 +93,10 @@ impl TransactionDispatcher {
         validators: &mut ValidatorSet,
         block_height: u64,
         block_timestamp: u64,
+        expected_chain_id: u64,
     ) -> ApplyResult {
-        // Verify transaction ID integrity and signature type
-        if let Err(e) = verify_transaction(tx) {
+        // Verify transaction ID integrity, signature, and chain ID
+        if let Err(e) = verify_transaction(tx, expected_chain_id) {
             return ApplyResult::err(&e.to_string());
         }
 
@@ -322,26 +327,34 @@ pub fn validate_transaction_basic(tx: &Transaction, sender_balance: FlakeAmount,
     Ok(())
 }
 
-/// Verify a transaction's cryptographic signature and tx_id integrity.
+/// Verify a transaction's cryptographic signature, tx_id integrity, and chain ID.
 ///
 /// This is the full verification that should be performed before a transaction
 /// enters a block. It checks:
 ///
-/// 1. **tx_id integrity**: Recomputes the transaction ID from (sender, action, fee, nonce)
-///    and verifies it matches the declared `tx.tx_id`. This prevents transaction ID
-///    collision attacks.
-/// 2. **signature_type**: Must be ed25519 (type 0), the only supported type.
-/// 3. **public_key validity**: The public key must be exactly 32 bytes.
-/// 4. **SenderId binding**: `Blake3(public_key)` must equal `sender` ObjectId.
+/// 1. **chain_id**: Must equal `expected_chain_id`. Prevents cross-chain replay attacks.
+/// 2. **tx_id integrity**: Recomputes the transaction ID from (sender, action, fee, nonce, chain_id)
+///    and verifies it matches the declared `tx.tx_id`.
+/// 3. **signature_type**: Must be ed25519 (type 0), the only supported type.
+/// 4. **public_key validity**: The public key must be exactly 32 bytes.
+/// 5. **SenderId binding**: `Blake3(public_key)` must equal `sender` ObjectId.
 ///    This proves the public key belongs to the claimed sender.
-/// 5. **ed25519 signature**: The signature must be valid over the Borsh-serialized
-///    (sender, action, fee, nonce) tuple using the provided public key.
+/// 6. **ed25519 signature**: The signature must be valid over the Borsh-serialized
+///    (sender, action, fee, nonce, chain_id) tuple using the provided public key.
 ///
 /// Note: This function does NOT check nonce, balance, or fee minimums. Those are
 /// checked by `validate_transaction_basic` and `apply_transaction`.
-pub fn verify_transaction(tx: &Transaction) -> Result<(), OpolysError> {
-    // 1. Verify tx_id integrity
-    let expected_tx_id = compute_tx_id(&tx.sender, &tx.action, tx.fee, tx.nonce);
+pub fn verify_transaction(tx: &Transaction, expected_chain_id: u64) -> Result<(), OpolysError> {
+    // 1. Verify chain ID to prevent cross-chain replay attacks
+    if tx.chain_id != expected_chain_id {
+        return Err(OpolysError::InvalidTransaction(format!(
+            "Transaction chain_id {} does not match network chain_id {}",
+            tx.chain_id, expected_chain_id
+        )));
+    }
+
+    // 2. Verify tx_id integrity
+    let expected_tx_id = compute_tx_id(&tx.sender, &tx.action, tx.fee, tx.nonce, tx.chain_id);
     if tx.tx_id != expected_tx_id {
         return Err(OpolysError::InvalidTransaction(format!(
             "Transaction ID mismatch: expected {}, got {}",
@@ -350,7 +363,7 @@ pub fn verify_transaction(tx: &Transaction) -> Result<(), OpolysError> {
         )));
     }
 
-    // 2. Verify signature type
+    // 3. Verify signature type
     if tx.signature_type != SIGNATURE_TYPE_ED25519 {
         return Err(OpolysError::InvalidTransaction(format!(
             "Unsupported signature type: {} (only ed25519 = 0 is supported)",
@@ -358,13 +371,13 @@ pub fn verify_transaction(tx: &Transaction) -> Result<(), OpolysError> {
         )));
     }
 
-    // 3. Verify public key length (ed25519 = 32 bytes) and signature binding
+    // 4. Verify public key length (ed25519 = 32 bytes) and signature binding
     //
     // If public_key is empty, signature verification is skipped. This allows
     // genesis/pre-funded accounts and test transactions to work without
     // signatures. Real transactions from wallets always include a public key.
     if !tx.public_key.is_empty() {
-        // 3a. Verify public key length (ed25519 = 32 bytes)
+        // 4a. Verify public key length (ed25519 = 32 bytes)
         if tx.public_key.len() != 32 {
             return Err(OpolysError::InvalidTransaction(format!(
                 "Invalid public key length: {} bytes (expected 32 for ed25519)",
@@ -372,7 +385,7 @@ pub fn verify_transaction(tx: &Transaction) -> Result<(), OpolysError> {
             )));
         }
 
-        // 3b. Verify Blake3(public_key) == sender ObjectId binding
+        // 4b. Verify Blake3(public_key) == sender ObjectId binding
         let pk_bytes: [u8; 32] = match tx.public_key.as_slice().try_into() {
             Ok(b) => b,
             Err(_) => return Err(OpolysError::InvalidTransaction(
@@ -388,10 +401,10 @@ pub fn verify_transaction(tx: &Transaction) -> Result<(), OpolysError> {
             )));
         }
 
-        // 3c. Verify ed25519 signature
-        // The signed message is the Borsh-serialized (sender, action, fee, nonce) tuple,
-        // which matches TransactionSigner::create_* in the wallet.
-        let unsigned_data = borsh::to_vec(&(tx.sender.clone(), &tx.action, tx.fee, tx.nonce))
+        // 4c. Verify ed25519 signature
+        // The signed message is the Borsh-serialized (sender, action, fee, nonce, chain_id)
+        // tuple, which matches TransactionSigner::create_* in the wallet.
+        let unsigned_data = borsh::to_vec(&(tx.sender.clone(), &tx.action, tx.fee, tx.nonce, tx.chain_id))
             .map_err(|e| OpolysError::InvalidTransaction(format!("Failed to serialize tx data: {}", e)))?;
 
         if !opolys_crypto::verify_ed25519(&tx.public_key, &unsigned_data, &tx.signature) {
@@ -405,17 +418,19 @@ pub fn verify_transaction(tx: &Transaction) -> Result<(), OpolysError> {
 /// Compute the expected transaction ID from the transaction fields.
 ///
 /// Matches the wallet's `TransactionSigner::compute_tx_id` function exactly:
-/// Blake3-256(sender_hex || borsh(action) || fee_bytes || nonce_bytes)
+/// Blake3-256(sender_hex || borsh(action) || fee_bytes || nonce_bytes || chain_id_bytes)
 fn compute_tx_id(
     sender: &ObjectId,
     action: &TransactionAction,
     fee: FlakeAmount,
     nonce: u64,
+    chain_id: u64,
 ) -> ObjectId {
     let mut data = sender.0.to_hex().as_bytes().to_vec();
     data.extend_from_slice(borsh::to_vec(action).unwrap_or_default().as_slice());
     data.extend_from_slice(&fee.to_be_bytes());
     data.extend_from_slice(&nonce.to_be_bytes());
+    data.extend_from_slice(&chain_id.to_be_bytes());
     hash_to_object_id(&data)
 }
 
@@ -423,14 +438,14 @@ fn compute_tx_id(
 mod tests {
     use super::*;
     use opolys_crypto::hash_to_object_id;
-    use opolys_core::{opl_to_flake, EPOCH};
+    use opolys_core::{opl_to_flake, EPOCH, MAINNET_CHAIN_ID};
 
     fn make_transfer(sender: &ObjectId, recipient: &ObjectId, amount: FlakeAmount, fee: FlakeAmount, nonce: u64) -> Transaction {
         let action = TransactionAction::Transfer {
             recipient: recipient.clone(),
             amount,
         };
-        let tx_id = super::compute_tx_id(sender, &action, fee, nonce);
+        let tx_id = super::compute_tx_id(sender, &action, fee, nonce, MAINNET_CHAIN_ID);
         Transaction {
             tx_id,
             sender: sender.clone(),
@@ -439,6 +454,7 @@ mod tests {
             signature: vec![],
             signature_type: SIGNATURE_TYPE_ED25519,
             nonce,
+            chain_id: MAINNET_CHAIN_ID,
             data: vec![],
             public_key: vec![],
         }
@@ -446,7 +462,7 @@ mod tests {
 
     fn make_bond(sender: &ObjectId, amount: FlakeAmount, fee: FlakeAmount, nonce: u64) -> Transaction {
         let action = TransactionAction::ValidatorBond { amount };
-        let tx_id = super::compute_tx_id(sender, &action, fee, nonce);
+        let tx_id = super::compute_tx_id(sender, &action, fee, nonce, MAINNET_CHAIN_ID);
         Transaction {
             tx_id,
             sender: sender.clone(),
@@ -455,6 +471,7 @@ mod tests {
             signature: vec![],
             signature_type: SIGNATURE_TYPE_ED25519,
             nonce,
+            chain_id: MAINNET_CHAIN_ID,
             data: vec![],
             public_key: vec![],
         }
@@ -462,7 +479,7 @@ mod tests {
 
     fn make_unbond(sender: &ObjectId, amount: FlakeAmount, fee: FlakeAmount, nonce: u64) -> Transaction {
         let action = TransactionAction::ValidatorUnbond { amount };
-        let tx_id = super::compute_tx_id(sender, &action, fee, nonce);
+        let tx_id = super::compute_tx_id(sender, &action, fee, nonce, MAINNET_CHAIN_ID);
         Transaction {
             tx_id,
             sender: sender.clone(),
@@ -471,6 +488,7 @@ mod tests {
             signature: vec![],
             signature_type: SIGNATURE_TYPE_ED25519,
             nonce,
+            chain_id: MAINNET_CHAIN_ID,
             data: vec![],
             public_key: vec![],
         }
@@ -488,7 +506,7 @@ mod tests {
 
         let tx = make_transfer(&alice, &bob, opl_to_flake(10), opl_to_flake(1), 0);
         let result = TransactionDispatcher::apply_transaction(
-            &tx, &mut accounts, &mut validators, 1, 100,
+            &tx, &mut accounts, &mut validators, 1, 100, MAINNET_CHAIN_ID,
         );
         assert!(result.success, "Transfer should succeed: {:?}", result.error);
         assert_eq!(result.fee_burned, opl_to_flake(1));
@@ -508,7 +526,7 @@ mod tests {
 
         let tx = make_transfer(&alice, &bob, 200, 10, 0);
         let result = TransactionDispatcher::apply_transaction(
-            &tx, &mut accounts, &mut validators, 1, 100,
+            &tx, &mut accounts, &mut validators, 1, 100, MAINNET_CHAIN_ID,
         );
         assert!(!result.success);
     }
@@ -528,7 +546,7 @@ mod tests {
         let fee = opl_to_flake(1);
         let tx = make_bond(&alice, bond_amount, fee, 0);
         let result = TransactionDispatcher::apply_transaction(
-            &tx, &mut accounts, &mut validators, 1, 100,
+            &tx, &mut accounts, &mut validators, 1, 100, MAINNET_CHAIN_ID,
         );
         assert!(result.success, "Bond should succeed: {:?}", result.error);
         assert_eq!(validators.validator_count(), 1);
@@ -549,7 +567,7 @@ mod tests {
         let too_low = 50; // Below MIN_BOND_STAKE (1 OPL = 1,000,000 flakes)
         let tx = make_bond(&alice, too_low, opl_to_flake(1), 0);
         let result = TransactionDispatcher::apply_transaction(
-            &tx, &mut accounts, &mut validators, 1, 100,
+            &tx, &mut accounts, &mut validators, 1, 100, MAINNET_CHAIN_ID,
         );
         assert!(!result.success);
     }
@@ -567,14 +585,14 @@ mod tests {
         // First bond: 1 OPL
         let tx1 = make_bond(&alice, MIN_BOND_STAKE, opl_to_flake(1), 0);
         let result1 = TransactionDispatcher::apply_transaction(
-            &tx1, &mut accounts, &mut validators, 1, 100,
+            &tx1, &mut accounts, &mut validators, 1, 100, MAINNET_CHAIN_ID,
         );
         assert!(result1.success);
 
         // Second bond (top-up): 2 OPL
         let tx2 = make_bond(&alice, MIN_BOND_STAKE * 2, opl_to_flake(1), 1);
         let result2 = TransactionDispatcher::apply_transaction(
-            &tx2, &mut accounts, &mut validators, 2, 200,
+            &tx2, &mut accounts, &mut validators, 2, 200, MAINNET_CHAIN_ID,
         );
         assert!(result2.success, "Top-up bond should succeed: {:?}", result2.error);
 
@@ -596,12 +614,12 @@ mod tests {
 
         // Bond 1 OPL at t=0
         let tx1 = make_bond(&alice, MIN_BOND_STAKE, opl_to_flake(1), 0);
-        let r1 = TransactionDispatcher::apply_transaction(&tx1, &mut accounts, &mut validators, 1, 100);
+        let r1 = TransactionDispatcher::apply_transaction(&tx1, &mut accounts, &mut validators, 1, 100, MAINNET_CHAIN_ID);
         assert!(r1.success, "First bond should succeed: {:?}", r1.error);
 
         // Bond 2 OPL at t=1000
         let tx2 = make_bond(&alice, MIN_BOND_STAKE * 2, opl_to_flake(1), 1);
-        let r2 = TransactionDispatcher::apply_transaction(&tx2, &mut accounts, &mut validators, 2, 1000);
+        let r2 = TransactionDispatcher::apply_transaction(&tx2, &mut accounts, &mut validators, 2, 1000, MAINNET_CHAIN_ID);
         assert!(r2.success, "Second bond (top-up) should succeed: {:?}", r2.error);
 
         // Alice balance: 500 - 1 - 1 - 2 - 1 = 495 OPL
@@ -610,7 +628,7 @@ mod tests {
         // Unbond 1.5 OPL — consumes first entry (1 OPL) + 0.5 OPL from second entry
         let tx3 = make_unbond(&alice, MIN_BOND_STAKE + MIN_BOND_STAKE / 2, opl_to_flake(1), 2);
         let result = TransactionDispatcher::apply_transaction(
-            &tx3, &mut accounts, &mut validators, 3, 300,
+            &tx3, &mut accounts, &mut validators, 3, 300, MAINNET_CHAIN_ID,
         );
         assert!(result.success, "Unbond should succeed: {:?}", result.error);
 
@@ -640,13 +658,13 @@ mod tests {
         accounts.credit(&alice, opl_to_flake(200)).unwrap();
 
         let tx1 = make_bond(&alice, MIN_BOND_STAKE, opl_to_flake(1), 0);
-        let r = TransactionDispatcher::apply_transaction(&tx1, &mut accounts, &mut validators, 1, 100);
+        let r = TransactionDispatcher::apply_transaction(&tx1, &mut accounts, &mut validators, 1, 100, MAINNET_CHAIN_ID);
         assert!(r.success, "Bond should succeed: {:?}", r.error);
 
         // Try to unbond 10x the total stake
         let tx2 = make_unbond(&alice, MIN_BOND_STAKE * 10, opl_to_flake(1), 1);
         let result = TransactionDispatcher::apply_transaction(
-            &tx2, &mut accounts, &mut validators, 2, 200,
+            &tx2, &mut accounts, &mut validators, 2, 200, MAINNET_CHAIN_ID,
         );
         assert!(result.success);
         // Validator removed because all stake unbonded
@@ -664,7 +682,7 @@ mod tests {
 
         let tx = make_unbond(&alice, MIN_BOND_STAKE, opl_to_flake(1), 0);
         let result = TransactionDispatcher::apply_transaction(
-            &tx, &mut accounts, &mut validators, 1, 100,
+            &tx, &mut accounts, &mut validators, 1, 100, MAINNET_CHAIN_ID,
         );
         assert!(!result.success);
     }
@@ -707,8 +725,8 @@ mod tests {
 
         // Build and sign a bond transaction
         let action = TransactionAction::ValidatorBond { amount: MIN_BOND_STAKE };
-        let tx_id = compute_tx_id(&alice, &action, opl_to_flake(1), 0);
-        let unsigned_data = borsh::to_vec(&(alice.clone(), &action, opl_to_flake(1), 0u64)).unwrap();
+        let tx_id = compute_tx_id(&alice, &action, opl_to_flake(1), 0, MAINNET_CHAIN_ID);
+        let unsigned_data = borsh::to_vec(&(alice.clone(), &action, opl_to_flake(1), 0u64, MAINNET_CHAIN_ID)).unwrap();
         let signature = signing_key.sign(&unsigned_data).to_bytes().to_vec();
 
         let tx = Transaction {
@@ -719,11 +737,12 @@ mod tests {
             signature,
             signature_type: SIGNATURE_TYPE_ED25519,
             nonce: 0,
+            chain_id: MAINNET_CHAIN_ID,
             data: vec![],
             public_key: pk_bytes.clone(),
         };
         let result = TransactionDispatcher::apply_transaction(
-            &tx, &mut accounts, &mut validators, 1, 100,
+            &tx, &mut accounts, &mut validators, 1, 100, MAINNET_CHAIN_ID,
         );
         assert!(result.success, "Bond should succeed: {:?}", result.error);
 
@@ -756,8 +775,8 @@ mod tests {
             recipient: bob.clone(),
             amount: opl_to_flake(10),
         };
-        let tx_id = compute_tx_id(&alice, &action, opl_to_flake(1), 0);
-        let unsigned_data = borsh::to_vec(&(alice.clone(), &action, opl_to_flake(1), 0u64)).unwrap();
+        let tx_id = compute_tx_id(&alice, &action, opl_to_flake(1), 0, MAINNET_CHAIN_ID);
+        let unsigned_data = borsh::to_vec(&(alice.clone(), &action, opl_to_flake(1), 0u64, MAINNET_CHAIN_ID)).unwrap();
         let signature = signing_key.sign(&unsigned_data).to_bytes().to_vec();
 
         let tx = Transaction {
@@ -768,11 +787,12 @@ mod tests {
             signature,
             signature_type: SIGNATURE_TYPE_ED25519,
             nonce: 0,
+            chain_id: MAINNET_CHAIN_ID,
             data: vec![],
             public_key: pk_bytes.clone(),
         };
         let result = TransactionDispatcher::apply_transaction(
-            &tx, &mut accounts, &mut validators, 1, 100,
+            &tx, &mut accounts, &mut validators, 1, 100, MAINNET_CHAIN_ID,
         );
         assert!(result.success, "Transfer should succeed: {:?}", result.error);
 
@@ -795,12 +815,37 @@ mod tests {
         // Transfer with empty public_key (test/genesis mode)
         let tx = make_transfer(&alice, &bob, opl_to_flake(10), opl_to_flake(1), 0);
         let result = TransactionDispatcher::apply_transaction(
-            &tx, &mut accounts, &mut validators, 1, 100,
+            &tx, &mut accounts, &mut validators, 1, 100, MAINNET_CHAIN_ID,
         );
         assert!(result.success, "Transfer should succeed: {:?}", result.error);
 
         // Account should NOT have a public key stored
         let account = accounts.get_account(&alice).unwrap();
         assert!(account.public_key.is_none(), "Empty public_key should not be stored");
+    }
+
+    /// Chain ID mismatch must be rejected — prevents cross-chain replay attacks.
+    #[test]
+    fn wrong_chain_id_rejected() {
+        use opolys_core::TESTNET_CHAIN_ID;
+        let mut accounts = AccountStore::new();
+        let mut validators = ValidatorSet::new();
+        let alice = hash_to_object_id(b"alice");
+        let bob = hash_to_object_id(b"bob");
+
+        accounts.create_account(alice.clone()).unwrap();
+        accounts.credit(&alice, opl_to_flake(1000)).unwrap();
+
+        // Create a mainnet transaction
+        let tx = make_transfer(&alice, &bob, opl_to_flake(10), opl_to_flake(1), 0);
+        assert_eq!(tx.chain_id, MAINNET_CHAIN_ID);
+
+        // Applying it to a testnet node must fail
+        let result = TransactionDispatcher::apply_transaction(
+            &tx, &mut accounts, &mut validators, 1, 100, TESTNET_CHAIN_ID,
+        );
+        assert!(!result.success, "Mainnet tx must be rejected on testnet");
+        let err = result.error.unwrap();
+        assert!(err.contains("chain_id"), "Error must mention chain_id: {}", err);
     }
 }
