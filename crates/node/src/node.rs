@@ -630,7 +630,14 @@ impl OpolysNode {
             now_secs,
         ).map_err(|e| format!("Block validation failed: {}", e))?;
 
-        // Verify the block's declared state root matches our current (pre-application) state root
+        // STATE ROOT CONVENTION (Ethereum-style parent-state-root):
+        // block.header.state_root = state root computed at end of block N-1
+        // This is the pre-execution state of block N.
+        // We verify it matches our local chain.state_root (also post-block N-1)
+        // BEFORE executing any transactions in block N.
+        // The new state root computed at the END of apply_block() will go
+        // into block N+1's header — not this block's header.
+        // Do not move this check after transaction execution.
         if block.header.state_root != chain.state_root {
             return Err(format!(
                 "State root mismatch at height {}: expected {}, got {}",
@@ -845,10 +852,9 @@ impl OpolysNode {
             chain.phase = ConsensusPhase::ProofOfWork;
         }
 
-        // Recompute the state root from the updated account and validator state.
-        // This provides a cryptographic commitment to the entire application state
-        // after applying this block, enabling light client verification and
-        // detecting state divergence between nodes.
+        // This state root goes into the NEXT block's header (block N+1).
+        // It reflects all state changes from this block:
+        // rewards, transactions, unbonds, validator activations.
         let mut account_hasher = opolys_crypto::Blake3Hasher::new();
         account_hasher.update(accounts.compute_state_root().as_bytes());
         account_hasher.update(validators.compute_state_root().as_bytes());
