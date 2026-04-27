@@ -727,12 +727,15 @@ impl OpolysNode {
         let block_reward = if block.header.height == 0 {
             0
         } else {
-            // Compute vein yield from the EVO-OMAP PoW hash.
-            // For PoW blocks, this is the hash of the nonce solution.
-            // For PoS blocks (no PoW), vein yield defaults to the minimum (1000 = 1.0x).
             let pow_hash_value = if block.header.pow_proof.is_some() {
+                // PoW block: use actual hash value for vein yield calculation
+                // Lucky hashes (small hash_int) earn higher yield
                 pow::compute_pow_hash_value(&block.header).unwrap_or(0u64)
             } else {
+                // PoS block: validators earn flat base reward with no luck component
+                // Deliberate design: vaults earn steady fees, miners earn variable ore
+                // hash_int = 0 triggers the 1.0x floor in compute_vein_yield()
+                // This is intentional — not a missing feature
                 0u64
             };
             emission::compute_block_reward(block.header.difficulty, pow_hash_value)

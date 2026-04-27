@@ -208,6 +208,15 @@ entry_weight = entry.stake × (1 + ln(1 + entry.age_years))
 
 Logarithmic seniority means older entries earn more per-coin, but the marginal gain diminishes — preventing permanent dominance by early stakers.
 
+### PoS vs PoW Block Reward
+
+```
+PoS block reward = BASE_REWARD / difficulty × 1.0 (flat, no vein yield)
+PoW block reward = BASE_REWARD / difficulty × vein_yield (1.0x to ~10x)
+```
+
+This is intentional economic design — validators earn steady predictable income like gold vaults, miners earn variable income based on luck like gold miners. PoS blocks pass `hash_int = 0` to `compute_vein_yield()`, which returns the 1.0x floor by design.
+
 ### Block Producer Selection
 
 Weighted random sampling from active validators. The seed is derived from the first 8 bytes of the previous block hash (`Blake3(prev_block_hash)[0..8]` as `u64`), making selection deterministic and verifiable. Any node can recompute the expected producer and reject blocks from the wrong validator.

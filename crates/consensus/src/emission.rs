@@ -80,6 +80,10 @@ pub fn compute_base_reward(difficulty: u64) -> FlakeAmount {
 /// The result is clamped to a minimum of 1000 (1.0x) — every valid block
 /// earns at least the base reward.
 pub fn compute_vein_yield(difficulty: u64, hash_int: u64) -> u64 {
+    // hash_int == 0 means PoS block — returns flat 1.0x yield by design
+    // PoS validators earn predictable steady income (BASE_REWARD / difficulty)
+    // PoW miners earn variable income based on hash luck (1x to ~10x)
+    // This distinction is intentional: vaults earn fees, miners earn ore
     if difficulty == 0 || hash_int == 0 {
         return 1000;
     }
