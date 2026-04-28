@@ -296,17 +296,46 @@ pub struct Transaction {
     pub public_key: Vec<u8>,
 }
 
+/// Cryptographic proof from the genesis ceremony anchoring $OPL to gold.
+///
+/// Present on the genesis block (height 0) only. `None` on all subsequent blocks.
+/// Any node can independently verify the ceremony by recomputing the Blake3 master
+/// hash and checking the operator ed25519 signature.
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+pub struct GenesisCeremonyData {
+    /// Unix seconds when the ceremony was conducted.
+    pub ceremony_timestamp: u64,
+    /// Blake3-256 of the full genesis_attestation.json (master_hash="" and operator_signature="" excluded).
+    pub ceremony_master_hash: [u8; 32],
+    /// Operator's ed25519 verifying key (32 bytes).
+    pub operator_public_key: [u8; 32],
+    /// Operator's ed25519 signature over ceremony_master_hash bytes (64 bytes).
+    pub operator_signature: [u8; 64],
+    /// Ceremony-derived block reward in Flakes.
+    pub base_reward_flakes: u64,
+    /// Annual gold production in tonnes × 1000 (scaled integer, avoids floating point on-chain).
+    pub production_tonnes_milli: u64,
+    /// Gold spot price in USD cents at ceremony time.
+    pub price_usd_cents: u64,
+    /// Blocks per year used in the BASE_REWARD derivation (374,016 for 84.375 s blocks).
+    pub blocks_per_year: u64,
+}
+
 /// A complete block: header + ordered list of transactions.
 ///
 /// Blocks are the atomic unit of the chain. The first transaction in a block
 /// is always a coinbase (reward) transaction crediting the block producer
-/// with `BASE_REWARD` Flakes plus any burned fees.
+/// with the chain's base reward Flakes plus any burned fees.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize, Serialize, Deserialize)]
 pub struct Block {
     /// The header containing consensus-critical metadata.
     pub header: BlockHeader,
     /// The ordered list of transactions in this block.
     pub transactions: Vec<Transaction>,
+    /// Ceremony attestation — present on the genesis block only, `None` everywhere else.
+    /// Skipped in JSON serialization; stored on-chain via Borsh (RocksDB).
+    #[serde(skip)]
+    pub genesis_ceremony: Option<GenesisCeremonyData>,
 }
 
 /// Converts whole OPL to Flakes (the smallest on-chain unit).

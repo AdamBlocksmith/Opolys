@@ -80,6 +80,7 @@ impl PowContext {
         Some(Block {
             header,
             transactions: vec![],
+            genesis_ceremony: None,
         })
     }
 
@@ -110,6 +111,7 @@ impl PowContext {
         Some(Block {
             header,
             transactions: vec![],
+            genesis_ceremony: None,
         })
     }
 }

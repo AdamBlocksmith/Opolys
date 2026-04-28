@@ -48,6 +48,9 @@ pub struct PersistedChainState {
     /// Suggested fee for the next block (Flakes), computed via EMA.
     /// Starts at MIN_FEE (1 Flake) and adjusts based on network demand.
     pub suggested_fee: u64,
+    /// Ceremony-derived block reward in Flakes. Zero on pre-ceremony builds
+    /// (migration: node falls back to the BASE_REWARD constant on load).
+    pub base_reward: u64,
 }
 
 /// Persistent storage backed by RocksDB.
@@ -380,6 +383,7 @@ mod tests {
             state_root: [0u8; 32],
             phase: 0,
             suggested_fee: 1,
+            base_reward: 312_000_000,
         };
 
         store.save_chain_state(&state).unwrap();
