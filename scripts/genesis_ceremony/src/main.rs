@@ -91,7 +91,7 @@ struct Cli {
     manual: bool,
 
     /// Name of the ceremony operator (recorded in attestation).
-    #[arg(long, default_value = "unknown")]
+    #[arg(long, default_value = "The Blocksmith")]
     operator: String,
 
     /// Which calendar year's production data is being recorded.
