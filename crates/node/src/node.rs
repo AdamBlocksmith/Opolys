@@ -201,10 +201,9 @@ pub struct ChainState {
     /// Suggested fee for the next block, computed via EMA of previous block's fees.
     /// Starts at MIN_FEE (1 Flake) and adjusts based on network demand.
     pub suggested_fee: FlakeAmount,
-    /// Double-sign detection: tracks which block hash each validator signed at
-    /// each height. Key is (height, producer ObjectId hex) → block hash.
-    /// If a validator signs a different block at the same height, they are slashed.
-    pub producer_signatures: HashMap<(u64, String), Hash>,
+    /// Double-sign detection: tracks (block_hash, validator_signature) per (height, producer).
+    /// When a second different hash is seen for the same key, evidence is queued.
+    pub producer_signatures: HashMap<(u64, String), (Hash, Vec<u8>)>,
     /// The ceremony-derived block reward for this chain in Flakes.
     /// Mainnet: read from the genesis ceremony attestation.
     /// Testnet/dev: the BASE_REWARD constant (312 OPL).
@@ -250,7 +249,9 @@ pub fn from_persisted(p: &opolys_storage::PersistedChainState) -> Self {
             state_root: Hash::from_bytes(p.state_root),
             phase,
             suggested_fee: p.suggested_fee,
-            producer_signatures: HashMap::new(),
+            producer_signatures: p.producer_signatures.iter().map(|(h, prod, hash, sig)| {
+                ((*h, prod.clone()), (hash.clone(), sig.clone()))
+            }).collect(),
             // Migration: nodes upgraded from pre-ceremony builds get the constant default
             base_reward: if p.base_reward > 0 { p.base_reward } else { BASE_REWARD },
         }
@@ -272,6 +273,9 @@ pub fn from_persisted(p: &opolys_storage::PersistedChainState) -> Self {
             },
             suggested_fee: self.suggested_fee,
             base_reward: self.base_reward,
+            producer_signatures: self.producer_signatures.iter().map(|((h, prod), (hash, sig))| {
+                (*h, prod.clone(), hash.clone(), sig.clone())
+            }).collect(),
         }
     }
 
@@ -322,6 +326,9 @@ pub struct OpolysNode {
     /// The ed25519 signing key for block production. Set when --key-file is provided.
     /// Used by produce_pos_block() to sign PoS blocks.
     pub signing_key: Option<ed25519_dalek::SigningKey>,
+    /// Double-sign evidence detected locally, pending inclusion in the next mined block.
+    /// Drained into `Block.slash_evidence` by mine_block() and produce_pos_block().
+    pub pending_slash_evidence: Arc<RwLock<Vec<DoubleSignEvidence>>>,
 }
 
 impl OpolysNode {
@@ -438,6 +445,7 @@ impl OpolysNode {
             pow_context: Arc::new(RwLock::new(PowContext::new())),
             miner_id: miner_id.clone(),
             signing_key,
+            pending_slash_evidence: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -493,13 +501,21 @@ impl OpolysNode {
             validator_signature: None,
         };
 
+        // Drain pending double-sign evidence before mining starts
+        let pending_evidence: Vec<DoubleSignEvidence> = {
+            let mut pending = self.pending_slash_evidence.write().await;
+            std::mem::take(&mut *pending)
+        };
+
         drop(chain);
         drop(accounts);
         drop(validators);
         drop(mempool);
 
         let mut ctx = self.pow_context.write().await;
-        ctx.mine_parallel(header, difficulty, max_attempts, 0)
+        let mut block = ctx.mine_parallel(header, difficulty, max_attempts, 0)?;
+        block.slash_evidence = pending_evidence;
+        Some(block)
     }
 
     /// Produce a PoS block as a validator.
@@ -584,6 +600,12 @@ impl OpolysNode {
             validator_signature: None,
         };
 
+        // Drain pending double-sign evidence into this block
+        let pending_evidence: Vec<DoubleSignEvidence> = {
+            let mut pending = self.pending_slash_evidence.write().await;
+            std::mem::take(&mut *pending)
+        };
+
         // Compute the block hash and sign it with the validator's ed25519 key
         let block_hash = compute_block_hash(&header);
         let signature: ed25519_dalek::Signature = signing_key.sign(block_hash.0.as_ref());
@@ -595,6 +617,7 @@ impl OpolysNode {
                 ..header
             },
             transactions,
+            slash_evidence: pending_evidence,
             genesis_ceremony: None,
         };
 
@@ -605,6 +628,29 @@ impl OpolysNode {
         );
 
         Some(block)
+    }
+
+    /// Verify that a `DoubleSignEvidence` item is cryptographically valid.
+    ///
+    /// Checks: hashes differ, pubkey length is 32, pubkey Blake3-hashes to `producer`,
+    /// and both ed25519 signatures are valid over their respective hashes.
+    fn verify_slash_evidence(evidence: &DoubleSignEvidence) -> bool {
+        if evidence.hash_a == evidence.hash_b {
+            return false;
+        }
+        if evidence.producer_pubkey.len() != 32 {
+            return false;
+        }
+        let pk_arr: [u8; 32] = match evidence.producer_pubkey.as_slice().try_into() {
+            Ok(a) => a,
+            Err(_) => return false,
+        };
+        let expected_id = opolys_crypto::ed25519_public_key_to_object_id(&pk_arr);
+        if expected_id != evidence.producer {
+            return false;
+        }
+        opolys_crypto::verify_ed25519(&evidence.producer_pubkey, evidence.hash_a.0.as_ref(), &evidence.signature_a)
+            && opolys_crypto::verify_ed25519(&evidence.producer_pubkey, evidence.hash_b.0.as_ref(), &evidence.signature_b)
     }
 
     /// Apply a mined or received block to the chain state.
@@ -715,30 +761,67 @@ impl OpolysNode {
             }
         }
 
-        // Detect double-signing: if a validator signed a different block at
-        // the same height, slash them. This is the only slashing condition.
+        // Process double-sign evidence embedded in this block.
+        // Each item is verified independently; duplicates within the block are skipped.
+        let mut processed_evidence_keys: std::collections::HashSet<(String, u64)> = std::collections::HashSet::new();
+        for evidence in &block.slash_evidence {
+            let dedup_key = (evidence.producer.to_hex(), evidence.height);
+            if processed_evidence_keys.contains(&dedup_key) {
+                continue;
+            }
+            if Self::verify_slash_evidence(evidence) {
+                processed_evidence_keys.insert(dedup_key);
+                match validators.graduated_slash(&evidence.producer, block.header.height) {
+                    Ok(burned) if burned > 0 => {
+                        chain.total_burned = chain.total_burned.saturating_add(burned);
+                        tracing::info!(
+                            producer = %evidence.producer.to_hex(),
+                            burned,
+                            offense = ?validators.get_validator(&evidence.producer).map(|v| v.slash_offense_count),
+                            "Graduated slash applied from block evidence"
+                        );
+                    }
+                    Ok(_) => {} // already permanently slashed, no-op
+                    Err(e) => tracing::warn!(error = %e, "Evidence processing failed"),
+                }
+            } else {
+                tracing::warn!(
+                    producer = %evidence.producer.to_hex(),
+                    height = evidence.height,
+                    "Invalid slash evidence in block — rejected"
+                );
+            }
+        }
+
+        // Detect double-signing locally: if a validator signed a different block at
+        // the same height, build evidence for inclusion in the next mined block.
+        let mut new_evidence: Vec<DoubleSignEvidence> = Vec::new();
         if block.header.validator_signature.is_some() && !block.header.producer.0.is_zero() {
             let block_hash = compute_block_hash(&block.header);
+            let sig_bytes = block.header.validator_signature.as_ref().unwrap().clone();
             let key = (block.header.height, block.header.producer.to_hex());
-            if let Some(previous_hash) = chain.producer_signatures.get(&key) {
-                if *previous_hash != block_hash {
-                    // Double-sign detected! Slash the validator.
+            if let Some((prev_hash, prev_sig)) = chain.producer_signatures.get(&key) {
+                if *prev_hash != block_hash {
                     tracing::warn!(
                         producer = %block.header.producer.to_hex(),
                         height = block.header.height,
-                        "Double-sign detected! Slashing validator"
+                        "Double-sign detected locally — queuing evidence for next block"
                     );
-                    if let Ok(slashed_amount) = validators.slash(&block.header.producer) {
-                        chain.total_burned = chain.total_burned.saturating_add(slashed_amount);
-                        tracing::info!(
-                            producer = %block.header.producer.to_hex(),
-                            amount = slashed_amount,
-                            "Validator slashed for double-signing"
-                        );
-                    }
+                    let pubkey = accounts.get_account(&block.header.producer)
+                        .and_then(|a| a.public_key.clone())
+                        .unwrap_or_default();
+                    new_evidence.push(DoubleSignEvidence {
+                        producer: block.header.producer.clone(),
+                        producer_pubkey: pubkey,
+                        height: block.header.height,
+                        hash_a: prev_hash.clone(),
+                        signature_a: prev_sig.clone(),
+                        hash_b: block_hash,
+                        signature_b: sig_bytes,
+                    });
                 }
             } else {
-                chain.producer_signatures.insert(key, block_hash);
+                chain.producer_signatures.insert(key, (block_hash, sig_bytes));
             }
         }
 
@@ -895,6 +978,17 @@ impl OpolysNode {
             if let Err(e) = Self::persist_state(store, &chain, &accounts, &validators, block) {
                 tracing::error!("Failed to persist state: {}", e);
             }
+        }
+
+        // Release all write locks before accessing pending_slash_evidence
+        drop(mempool);
+        drop(validators);
+        drop(accounts);
+        drop(chain);
+
+        // Queue newly detected evidence for inclusion in the next mined block
+        if !new_evidence.is_empty() {
+            self.pending_slash_evidence.write().await.extend(new_evidence);
         }
 
         Ok(block_hash)

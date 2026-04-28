@@ -159,6 +159,7 @@ pub fn build_genesis_block(config: &GenesisConfig) -> Block {
             validator_signature: None,
         },
         transactions: vec![],
+        slash_evidence: vec![],
         genesis_ceremony: config.ceremony_data.clone(),
     }
 }

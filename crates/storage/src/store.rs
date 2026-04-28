@@ -51,6 +51,9 @@ pub struct PersistedChainState {
     /// Ceremony-derived block reward in Flakes. Zero on pre-ceremony builds
     /// (migration: node falls back to the BASE_REWARD constant on load).
     pub base_reward: u64,
+    /// Persisted double-sign detection map: (height, producer_hex, block_hash, signature).
+    /// Survives node restarts so evidence can still be built after a reboot.
+    pub producer_signatures: Vec<(u64, String, Hash, Vec<u8>)>,
 }
 
 /// Persistent storage backed by RocksDB.
@@ -384,6 +387,7 @@ mod tests {
             phase: 0,
             suggested_fee: 1,
             base_reward: 312_000_000,
+            producer_signatures: vec![],
         };
 
         store.save_chain_state(&state).unwrap();

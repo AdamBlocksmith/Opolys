@@ -296,6 +296,28 @@ pub struct Transaction {
     pub public_key: Vec<u8>,
 }
 
+/// Evidence that a validator signed two different blocks at the same height.
+///
+/// Embedded in a future block's body so every full node can independently verify
+/// the proof and apply graduated slashing — no single node's memory is trusted.
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize, Serialize, Deserialize)]
+pub struct DoubleSignEvidence {
+    /// The validator who double-signed.
+    pub producer: ObjectId,
+    /// Validator's ed25519 public key (32 bytes). Must Blake3-hash to `producer`.
+    pub producer_pubkey: Vec<u8>,
+    /// Block height at which the double-sign occurred.
+    pub height: BlockHeight,
+    /// First block hash the validator signed at this height.
+    pub hash_a: Hash,
+    /// Validator's ed25519 signature over `hash_a` (64 bytes).
+    pub signature_a: Vec<u8>,
+    /// Second, conflicting block hash the validator signed at this height.
+    pub hash_b: Hash,
+    /// Validator's ed25519 signature over `hash_b` (64 bytes).
+    pub signature_b: Vec<u8>,
+}
+
 /// Cryptographic proof from the genesis ceremony anchoring $OPL to gold.
 ///
 /// Present on the genesis block (height 0) only. `None` on all subsequent blocks.
@@ -332,6 +354,10 @@ pub struct Block {
     pub header: BlockHeader,
     /// The ordered list of transactions in this block.
     pub transactions: Vec<Transaction>,
+    /// Double-sign evidence to be processed at this block's height.
+    /// Each item is independently verified (ed25519 + pubkey→ObjectId check) before
+    /// graduated slashing is applied. Empty for most blocks.
+    pub slash_evidence: Vec<DoubleSignEvidence>,
     /// Ceremony attestation — present on the genesis block only, `None` everywhere else.
     /// Skipped in JSON serialization; stored on-chain via Borsh (RocksDB).
     #[serde(skip)]

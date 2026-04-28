@@ -102,8 +102,9 @@ impl BondEntry {
 /// and seniority clock. The total weight is the sum of per-entry weights,
 /// giving a logarithmic seniority bonus that diminishes over time.
 ///
-/// Only double-signing triggers slashing (all entries burned). Slashed stake
-/// is removed from circulation, not transferred to any treasury.
+/// Double-signing triggers graduated slashing: 10% burn on first offense,
+/// 33% burn + suspension on second, 100% burn + permanent Slashed on third+.
+/// Slashed stake is removed from circulation, not transferred to any treasury.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct ValidatorInfo {
     /// The validator's on-chain identity (Blake3 hash of public key).
@@ -116,6 +117,12 @@ pub struct ValidatorInfo {
     /// Height of the most recent block this validator signed, updated on
     /// each signature to track liveness.
     pub last_signed_height: u64,
+    /// Number of double-sign offenses committed. Resets to zero if the
+    /// validator goes 10,240 blocks clean after the last slash.
+    pub slash_offense_count: u32,
+    /// Block height at which the most recent slash was applied.
+    /// Used to determine whether the offense counter should reset.
+    pub last_slash_height: u64,
 }
 
 impl ValidatorInfo {
@@ -130,6 +137,8 @@ impl ValidatorInfo {
             }],
             status: ValidatorStatus::Bonding,
             last_signed_height: 0,
+            slash_offense_count: 0,
+            last_slash_height: 0,
         }
     }
 
@@ -248,6 +257,9 @@ impl ValidatorSet {
         }
 
         if let Some(validator) = self.validators.get_mut(&object_id) {
+            if validator.status == ValidatorStatus::Slashed {
+                return Err("Slashed validators cannot re-bond".to_string());
+            }
             // Top-up or auto-merge
             validator.add_entry(stake, height, timestamp);
         } else {
@@ -358,22 +370,66 @@ impl ValidatorSet {
         Ok(())
     }
 
-    /// Slash a validator for double-signing. All entries' stakes are
-    /// **burned** (set to zero), not transferred to any other party. Their
-    /// status is set to `Slashed` and they are no longer eligible for block
-    /// production.
+    /// Apply graduated slashing for double-signing.
     ///
-    /// This is the **only** slashing condition in Opolys — there is no
-    /// governance, no liveness slashing, and no other penalties.
-    pub fn slash(&mut self, object_id: &ObjectId) -> Result<FlakeAmount, String> {
+    /// - **1st offense**: burn 10% of total stake, stay Active
+    /// - **2nd offense**: burn 33% of total stake, suspended to Bonding for one epoch
+    /// - **3rd+ offense**: burn 100% of total stake, permanent `Slashed` status
+    ///
+    /// The offense counter resets to zero if more than 10,240 blocks pass without
+    /// another slash — a clean record eventually restores full trust. The burn is
+    /// proportionally distributed across all bond entries.
+    ///
+    /// Returns the Flake amount burned. Returns `Ok(0)` if the validator is already
+    /// permanently `Slashed` (idempotent for already-punished validators).
+    pub fn graduated_slash(&mut self, object_id: &ObjectId, current_height: u64) -> Result<FlakeAmount, String> {
         let validator = self.validators.get_mut(object_id)
             .ok_or_else(|| "Validator not found".to_string())?;
-        let total_slashed = validator.total_stake();
-        validator.status = ValidatorStatus::Slashed;
-        for entry in &mut validator.entries {
-            entry.stake = 0;
+
+        // Already permanently slashed — nothing more to take
+        if validator.status == ValidatorStatus::Slashed {
+            return Ok(0);
         }
-        Ok(total_slashed)
+
+        // Reset offense counter if clean for more than 10,240 blocks
+        if validator.last_slash_height > 0
+            && current_height.saturating_sub(validator.last_slash_height) > 10_240
+        {
+            validator.slash_offense_count = 0;
+        }
+
+        validator.slash_offense_count = validator.slash_offense_count.saturating_add(1);
+        validator.last_slash_height = current_height;
+
+        let total_stake = validator.total_stake();
+        let offense = validator.slash_offense_count;
+
+        match offense {
+            1 => {
+                // 10% burn; validator stays Active
+                let burn = total_stake / 10;
+                let keep = total_stake - burn;
+                scale_entries(&mut validator.entries, keep, total_stake);
+                Ok(burn)
+            }
+            2 => {
+                // 33% burn; suspend for one epoch (reset to Bonding)
+                let burn = total_stake / 3;
+                let keep = total_stake - burn;
+                scale_entries(&mut validator.entries, keep, total_stake);
+                validator.status = ValidatorStatus::Bonding;
+                Ok(burn)
+            }
+            _ => {
+                // 100% burn; permanent Slashed
+                let burn = total_stake;
+                validator.status = ValidatorStatus::Slashed;
+                for entry in &mut validator.entries {
+                    entry.stake = 0;
+                }
+                Ok(burn)
+            }
+        }
     }
 
     /// Look up a validator by their ObjectId.
@@ -498,6 +554,28 @@ impl ValidatorSet {
 
         // Fallback: if no validator was selected due to rounding, pick the last active one.
         active.last().copied()
+    }
+}
+
+/// Proportionally scale all bond entries so their total equals `remaining`.
+///
+/// Integer rounding dust (always < entry count flakes) is added to the last entry.
+/// No-ops when `total` is zero (prevents division-by-zero).
+fn scale_entries(entries: &mut Vec<BondEntry>, remaining: FlakeAmount, total: FlakeAmount) {
+    if total == 0 || entries.is_empty() {
+        return;
+    }
+    let mut distributed: u64 = 0;
+    for entry in entries.iter_mut() {
+        let share = (entry.stake as u128 * remaining as u128 / total as u128) as u64;
+        entry.stake = share;
+        distributed += share;
+    }
+    // Add rounding dust to the last entry to keep total exact
+    if distributed < remaining {
+        if let Some(last) = entries.last_mut() {
+            last.stake += remaining - distributed;
+        }
     }
 }
 
@@ -668,21 +746,101 @@ mod tests {
     }
 
     #[test]
-    fn slash_validator_burns_all_entries() {
+    fn graduated_slash_first_offense_burns_ten_percent() {
+        let mut vs = ValidatorSet::new();
+        let id = test_id(b"validator1");
+        vs.bond(id.clone(), MIN_BOND_STAKE * 10, 0, 0).unwrap(); // 10 OPL
+        vs.activate(&id, 1).unwrap();
+
+        let burned = vs.graduated_slash(&id, 100).unwrap();
+        assert_eq!(burned, MIN_BOND_STAKE); // 10% of 10 OPL = 1 OPL
+        let v = vs.get_validator(&id).unwrap();
+        assert_eq!(v.total_stake(), MIN_BOND_STAKE * 9); // 9 OPL remains
+        assert_eq!(v.status, ValidatorStatus::Active); // stays Active
+        assert_eq!(v.slash_offense_count, 1);
+    }
+
+    #[test]
+    fn graduated_slash_second_offense_burns_thirty_three_percent_and_suspends() {
+        let mut vs = ValidatorSet::new();
+        let id = test_id(b"validator1");
+        vs.bond(id.clone(), MIN_BOND_STAKE * 10, 0, 0).unwrap(); // 10 OPL
+        vs.activate(&id, 1).unwrap();
+
+        vs.graduated_slash(&id, 100).unwrap(); // 1st: burn 1 OPL, keep 9 OPL
+        let burned = vs.graduated_slash(&id, 200).unwrap(); // 2nd: burn 33% of 9 OPL
+        assert_eq!(burned, MIN_BOND_STAKE * 3); // floor(9,000,000 / 3) = 3 OPL
+        let v = vs.get_validator(&id).unwrap();
+        assert_eq!(v.total_stake(), MIN_BOND_STAKE * 6); // 6 OPL remains
+        assert_eq!(v.status, ValidatorStatus::Bonding); // suspended
+        assert_eq!(v.slash_offense_count, 2);
+    }
+
+    #[test]
+    fn graduated_slash_third_offense_burns_all_and_permanently_slashes() {
         let mut vs = ValidatorSet::new();
         let id = test_id(b"validator1");
         vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0).unwrap();
-        vs.bond(id.clone(), MIN_BOND_STAKE * 2, 100, 1000).unwrap();
+        vs.bond(id.clone(), MIN_BOND_STAKE * 2, 100, 1000).unwrap(); // total: 3 OPL
+        vs.activate(&id, 1).unwrap();
 
-        let slashed = vs.slash(&id).unwrap();
-        assert_eq!(slashed, MIN_BOND_STAKE * 3);
+        vs.graduated_slash(&id, 100).unwrap(); // 1st
+        vs.graduated_slash(&id, 200).unwrap(); // 2nd
+        let burned = vs.graduated_slash(&id, 300).unwrap(); // 3rd: 100% burn
 
         let v = vs.get_validator(&id).unwrap();
         assert_eq!(v.total_stake(), 0);
         assert_eq!(v.status, ValidatorStatus::Slashed);
+        assert!(burned > 0);
         for entry in &v.entries {
             assert_eq!(entry.stake, 0);
         }
+    }
+
+    #[test]
+    fn graduated_slash_already_slashed_returns_zero() {
+        let mut vs = ValidatorSet::new();
+        let id = test_id(b"validator1");
+        vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0).unwrap();
+        vs.activate(&id, 1).unwrap();
+
+        vs.graduated_slash(&id, 100).unwrap();
+        vs.graduated_slash(&id, 200).unwrap();
+        vs.graduated_slash(&id, 300).unwrap(); // permanently slashed
+
+        let burned = vs.graduated_slash(&id, 400).unwrap(); // idempotent
+        assert_eq!(burned, 0);
+    }
+
+    #[test]
+    fn graduated_slash_counter_resets_after_clean_period() {
+        let mut vs = ValidatorSet::new();
+        let id = test_id(b"validator1");
+        vs.bond(id.clone(), MIN_BOND_STAKE * 10, 0, 0).unwrap();
+        vs.activate(&id, 1).unwrap();
+
+        vs.graduated_slash(&id, 100).unwrap(); // 1st offense at height 100
+        assert_eq!(vs.get_validator(&id).unwrap().slash_offense_count, 1);
+
+        // Clean for > 10,240 blocks → counter resets
+        vs.graduated_slash(&id, 100 + 10_241).unwrap(); // treated as 1st offense again
+        assert_eq!(vs.get_validator(&id).unwrap().slash_offense_count, 1);
+        assert_eq!(vs.get_validator(&id).unwrap().status, ValidatorStatus::Active);
+    }
+
+    #[test]
+    fn rebond_after_permanent_slash_rejected() {
+        let mut vs = ValidatorSet::new();
+        let id = test_id(b"validator1");
+        vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0).unwrap();
+        vs.activate(&id, 1).unwrap();
+
+        vs.graduated_slash(&id, 100).unwrap();
+        vs.graduated_slash(&id, 200).unwrap();
+        vs.graduated_slash(&id, 300).unwrap(); // permanently slashed
+
+        let result = vs.bond(id.clone(), MIN_BOND_STAKE, 400, 400);
+        assert!(result.is_err(), "Slashed validators must not be able to re-bond");
     }
 
     #[test]
@@ -831,18 +989,33 @@ mod tests {
         assert_eq!(matured[0].1, MIN_BOND_STAKE * 3);
         assert!(vs.unbonding_queue.is_empty());
 
-        // Phase 7: Charlie double-signs — SLASH!
+        // Phase 7: Charlie triple-offends — graduated slashing to permanent Slashed.
         assert_eq!(vs.get_validator(&charlie).unwrap().status, ValidatorStatus::Active);
-        let slashed = vs.slash(&charlie).unwrap();
-        assert_eq!(slashed, MIN_BOND_STAKE * 5);
+
+        // 1st offense: 10% burn of 5 OPL = 0.5 OPL, stays Active
+        let burn1 = vs.graduated_slash(&charlie, 2100).unwrap();
+        assert_eq!(burn1, MIN_BOND_STAKE / 2);
+        assert_eq!(vs.get_validator(&charlie).unwrap().status, ValidatorStatus::Active);
+
+        // 2nd offense: 33% burn of 4.5 OPL = 1.5 OPL, suspended to Bonding
+        let burn2 = vs.graduated_slash(&charlie, 2200).unwrap();
+        assert_eq!(burn2, MIN_BOND_STAKE + MIN_BOND_STAKE / 2);
+        assert_eq!(vs.get_validator(&charlie).unwrap().status, ValidatorStatus::Bonding);
+
+        // 3rd offense: 100% burn of remaining 3 OPL, permanent Slashed
+        let burn3 = vs.graduated_slash(&charlie, 2300).unwrap();
+        assert_eq!(burn3, MIN_BOND_STAKE * 3);
         assert_eq!(vs.get_validator(&charlie).unwrap().status, ValidatorStatus::Slashed);
         assert_eq!(vs.get_validator(&charlie).unwrap().total_stake(), 0);
 
-        // Slashed validator is excluded from selection
+        // Total burned across 3 offenses = 0.5 + 1.5 + 3 = 5 OPL (original stake)
+        assert_eq!(burn1 + burn2 + burn3, MIN_BOND_STAKE * 5);
+
+        // Slashed validator excluded from Active set
         let active_count = vs.active_validators().len();
         assert_eq!(active_count, 2); // Only Alice and Bob remain active
 
-        // Total bonded stake excludes slashed validators
+        // Total bonded stake excludes permanently slashed validators
         let bonded = vs.total_bonded_stake();
         assert_eq!(bonded, MIN_BOND_STAKE * 7 + MIN_BOND_STAKE * 20); // Alice 7 + Bob 20
     }
