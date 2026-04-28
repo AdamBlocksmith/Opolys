@@ -84,8 +84,8 @@ impl Default for GenesisConfig {
                 usgs_response_hash: [0u8; 32],
                 wgc_response_hash: [0u8; 32],
                 // Derivation: floor(annual_production * troy_oz_per_tonne / blocks_per_year)
-                // blocks_per_year = 365.25 * 1024 = 374,256
-                derivation_formula: "floor(annual_production_tonnes * 32150.7 / 374256)".to_string(),
+                // blocks_per_year = 365.25 * 1024 = 374,016
+                derivation_formula: "floor(annual_production_tonnes * 32150.7 / 374016)".to_string(),
             },
             genesis_accounts: vec![],
         }
