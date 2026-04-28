@@ -162,6 +162,14 @@ There is **no hard cap**. Issuance shrinks as difficulty rises (like gold gettin
 
 ## 7. Difficulty & Retargeting
 
+### Genesis Difficulty
+
+Genesis difficulty: 7 (mainnet), 4 (testnet)
+- At difficulty 7, single Ryzen 7 7700 parallel produces ~91s blocks
+- First retarget at block 1,024 (~26 hours) self-corrects to target
+- Difficulty 1 at genesis would allow 319,000 OPL to be mined in
+  23 minutes by a single miner — unacceptable supply distortion
+
 ### Retarget Algorithm
 
 Every `EPOCH` (1,024) blocks:

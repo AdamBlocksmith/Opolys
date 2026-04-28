@@ -11,7 +11,7 @@
 //! constants and attestation fields, ensuring that every node derives the
 //! exact same chain state from the same config.
 
-use opolys_core::{Block, BlockHeader, Hash, ObjectId, FlakeAmount, MIN_DIFFICULTY, BASE_REWARD, NETWORK_PROTOCOL_VERSION, BLOCK_TARGET_TIME_MS, MIN_BOND_STAKE, FLAKES_PER_OPL, EPOCH, POS_FINALITY_BLOCKS, BLOCK_VERSION, MIN_FEE, CURRENCY_NAME, CURRENCY_TICKER, CURRENCY_SMALLEST_UNIT};
+use opolys_core::{Block, BlockHeader, Hash, ObjectId, FlakeAmount, MIN_DIFFICULTY, GENESIS_DIFFICULTY, BASE_REWARD, NETWORK_PROTOCOL_VERSION, BLOCK_TARGET_TIME_MS, MIN_BOND_STAKE, FLAKES_PER_OPL, EPOCH, POS_FINALITY_BLOCKS, BLOCK_VERSION, MIN_FEE, CURRENCY_NAME, CURRENCY_TICKER, CURRENCY_SMALLEST_UNIT};
 use borsh::{BorshSerialize, BorshDeserialize};
 use opolys_crypto::Blake3Hasher;
 use crate::account::AccountStore;
@@ -71,7 +71,7 @@ pub struct GenesisConfig {
 impl Default for GenesisConfig {
     fn default() -> Self {
         GenesisConfig {
-            initial_difficulty: MIN_DIFFICULTY,
+            initial_difficulty: GENESIS_DIFFICULTY,
             protocol_version: NETWORK_PROTOCOL_VERSION.to_string(),
             attestation: GenesisAttestation {
                 ceremony_timestamp: 0,

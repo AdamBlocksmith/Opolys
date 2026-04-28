@@ -131,6 +131,7 @@ pub validate: bool,
 fn testnet_genesis_config() -> opolys_consensus::GenesisConfig {
     use opolys_core::FLAKES_PER_OPL;
     let mut config = opolys_consensus::GenesisConfig::default();
+    config.initial_difficulty = 4; // testnet: faster blocks for testing
     // 10,000 OPL per testnet account
     let testnet_funding = 10_000 * FLAKES_PER_OPL;
     config.genesis_accounts = vec![

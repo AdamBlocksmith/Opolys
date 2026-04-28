@@ -68,6 +68,13 @@ pub const BASE_REWARD: u64 = 312 * FLAKES_PER_OPL;
 /// difficulty 0.
 pub const MIN_DIFFICULTY: u64 = 1;
 
+/// Starting difficulty for the genesis block.
+/// At 1.48 H/s (Ryzen 7 7700 parallel) this gives ~91 second blocks,
+/// close to the 84 second target. The first retarget at block 1,024
+/// (~26 hours) will correct any deviation automatically.
+/// Must be >= MIN_DIFFICULTY and calibrated to typical launch hardware.
+pub const GENESIS_DIFFICULTY: u64 = 7;
+
 /// Unified epoch length for both EVO-OMAP dataset regeneration and
 /// difficulty retargeting. Every 1,024 blocks:
 /// - EVO-OMAP generates a new dataset from a fresh epoch seed
