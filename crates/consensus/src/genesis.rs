@@ -11,7 +11,7 @@
 //! constants and attestation fields, ensuring that every node derives the
 //! exact same chain state from the same config.
 
-use opolys_core::{Block, BlockHeader, Hash, ObjectId, FlakeAmount, MIN_DIFFICULTY, GENESIS_DIFFICULTY, BASE_REWARD, NETWORK_PROTOCOL_VERSION, BLOCK_TARGET_TIME_MS, MIN_BOND_STAKE, FLAKES_PER_OPL, EPOCH, POS_FINALITY_BLOCKS, BLOCK_VERSION, MIN_FEE, CURRENCY_NAME, CURRENCY_TICKER, CURRENCY_SMALLEST_UNIT};
+use opolys_core::{Block, BlockHeader, Hash, ObjectId, FlakeAmount, GenesisCeremonyData, MIN_DIFFICULTY, GENESIS_DIFFICULTY, BASE_REWARD, NETWORK_PROTOCOL_VERSION, BLOCK_TARGET_TIME_MS, MIN_BOND_STAKE, FLAKES_PER_OPL, EPOCH, POS_FINALITY_BLOCKS, BLOCK_VERSION, MIN_FEE, CURRENCY_NAME, CURRENCY_TICKER, CURRENCY_SMALLEST_UNIT};
 use borsh::{BorshSerialize, BorshDeserialize};
 use opolys_crypto::Blake3Hasher;
 use crate::account::AccountStore;
@@ -66,6 +66,12 @@ pub struct GenesisConfig {
     /// (ed25519 verifying key). Required so accounts can sign transactions immediately
     /// without an empty-key bypass.
     pub genesis_accounts: Vec<(ObjectId, FlakeAmount, Vec<u8>)>,
+    /// Block reward in Flakes for this chain. Mainnet: derived by the genesis ceremony.
+    /// Testnet/dev: defaults to the `BASE_REWARD` constant.
+    pub base_reward: FlakeAmount,
+    /// Optional ceremony attestation to embed in the genesis block.
+    /// Set by the genesis ceremony binary; `None` for testnet and dev chains.
+    pub ceremony_data: Option<GenesisCeremonyData>,
 }
 
 impl Default for GenesisConfig {
@@ -88,6 +94,8 @@ impl Default for GenesisConfig {
                 derivation_formula: "floor(annual_production_tonnes * 32150.7 / 374016)".to_string(),
             },
             genesis_accounts: vec![],
+            base_reward: BASE_REWARD,
+            ceremony_data: None,
         }
     }
 }
@@ -112,7 +120,7 @@ pub fn build_genesis_block(config: &GenesisConfig) -> Block {
     state_hasher.update(CURRENCY_TICKER.as_bytes());
     state_hasher.update(CURRENCY_SMALLEST_UNIT.as_bytes());
     state_hasher.update(&FLAKES_PER_OPL.to_be_bytes());
-    state_hasher.update(&BASE_REWARD.to_be_bytes());
+    state_hasher.update(&config.base_reward.to_be_bytes());
     state_hasher.update(&BLOCK_TARGET_TIME_MS.to_be_bytes());
     state_hasher.update(&MIN_DIFFICULTY.to_be_bytes());
     state_hasher.update(&EPOCH.to_be_bytes());
@@ -151,6 +159,7 @@ pub fn build_genesis_block(config: &GenesisConfig) -> Block {
             validator_signature: None,
         },
         transactions: vec![],
+        genesis_ceremony: config.ceremony_data.clone(),
     }
 }
 

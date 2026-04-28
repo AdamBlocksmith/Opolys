@@ -21,7 +21,8 @@
 //! There is no governance body and no parameter votes. Fee markets and chain
 //! state drive everything.
 
-use opolys_core::{BASE_REWARD, FlakeAmount, MIN_DIFFICULTY};
+use opolys_core::{FlakeAmount, MIN_DIFFICULTY};
+
 
 /// Compute the target value for EVO-OMAP difficulty in u64 space.
 ///
@@ -50,9 +51,9 @@ pub fn difficulty_to_target(difficulty: u64) -> u64 {
 /// The target is derived from EVO-OMAP difficulty (leading zero bits):
 /// `target = 2^(64-D) - 1`, so at difficulty 1 the target is u64::MAX
 /// and at difficulty 20 the target is ~2^44.
-pub fn compute_block_reward(difficulty: u64, pow_hash_value: u64) -> FlakeAmount {
+pub fn compute_block_reward(base_reward: FlakeAmount, difficulty: u64, pow_hash_value: u64) -> FlakeAmount {
     let effective_difficulty = difficulty.max(MIN_DIFFICULTY);
-    let base = BASE_REWARD / effective_difficulty;
+    let base = base_reward / effective_difficulty;
     let yield_milli = compute_vein_yield(difficulty, pow_hash_value);
     // yield_milli is in thousandths (milli), so divide by 1000
     // Use u128 intermediate to avoid overflow
@@ -64,9 +65,9 @@ pub fn compute_block_reward(difficulty: u64, pow_hash_value: u64) -> FlakeAmount
 /// This is the baseline reward every block earns, divided by difficulty.
 /// It shrinks as the network's effective difficulty grows, following the
 /// same economic logic as real gold: harder extraction → smaller yield.
-pub fn compute_base_reward(difficulty: u64) -> FlakeAmount {
+pub fn compute_base_reward(base_reward: FlakeAmount, difficulty: u64) -> FlakeAmount {
     let effective_difficulty = difficulty.max(MIN_DIFFICULTY);
-    BASE_REWARD / effective_difficulty
+    base_reward / effective_difficulty
 }
 
 /// Compute vein yield in milli (× 1000). Returns an integer where
@@ -210,6 +211,7 @@ pub fn compute_suggested_fee(previous_block_fees: FlakeAmount, previous_suggeste
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opolys_core::BASE_REWARD;
 
     // ─── difficulty_to_target tests ───
 
@@ -308,22 +310,22 @@ mod tests {
     #[test]
     fn block_reward_with_vein_yield() {
         // At difficulty 1 with a very good hash, reward should exceed base
-        let base = compute_base_reward(1);
-        let with_yield = compute_block_reward(1, 1);
+        let base = compute_base_reward(BASE_REWARD, 1);
+        let with_yield = compute_block_reward(BASE_REWARD, 1, 1);
         assert!(with_yield >= base);
     }
 
     #[test]
     fn base_reward_at_min_difficulty() {
-        let reward = compute_base_reward(1);
+        let reward = compute_base_reward(BASE_REWARD, 1);
         assert_eq!(reward, BASE_REWARD);
     }
 
     #[test]
     fn reward_decreases_with_difficulty() {
-        let r1 = compute_base_reward(1);
-        let r10 = compute_base_reward(10);
-        let r100 = compute_base_reward(100);
+        let r1 = compute_base_reward(BASE_REWARD, 1);
+        let r10 = compute_base_reward(BASE_REWARD, 10);
+        let r100 = compute_base_reward(BASE_REWARD, 100);
         assert!(r1 > r10);
         assert!(r10 > r100);
     }

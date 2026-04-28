@@ -205,6 +205,10 @@ pub struct ChainState {
     /// each height. Key is (height, producer ObjectId hex) → block hash.
     /// If a validator signs a different block at the same height, they are slashed.
     pub producer_signatures: HashMap<(u64, String), Hash>,
+    /// The ceremony-derived block reward for this chain in Flakes.
+    /// Mainnet: read from the genesis ceremony attestation.
+    /// Testnet/dev: the BASE_REWARD constant (312 OPL).
+    pub base_reward: FlakeAmount,
 }
 
 impl ChainState {
@@ -225,6 +229,7 @@ impl ChainState {
             phase: ConsensusPhase::ProofOfWork,
             suggested_fee: MIN_FEE,
             producer_signatures: HashMap::new(),
+            base_reward: genesis_config.base_reward,
         }
     }
 
@@ -246,6 +251,8 @@ pub fn from_persisted(p: &opolys_storage::PersistedChainState) -> Self {
             phase,
             suggested_fee: p.suggested_fee,
             producer_signatures: HashMap::new(),
+            // Migration: nodes upgraded from pre-ceremony builds get the constant default
+            base_reward: if p.base_reward > 0 { p.base_reward } else { BASE_REWARD },
         }
     }
 
@@ -264,6 +271,7 @@ pub fn from_persisted(p: &opolys_storage::PersistedChainState) -> Self {
                 ConsensusPhase::ProofOfStake => 1,
             },
             suggested_fee: self.suggested_fee,
+            base_reward: self.base_reward,
         }
     }
 
@@ -587,6 +595,7 @@ impl OpolysNode {
                 ..header
             },
             transactions,
+            genesis_ceremony: None,
         };
 
         tracing::info!(
@@ -751,7 +760,7 @@ impl OpolysNode {
                 // This is intentional — not a missing feature
                 0u64
             };
-            emission::compute_block_reward(block.header.difficulty, pow_hash_value)
+            emission::compute_block_reward(chain.base_reward, block.header.difficulty, pow_hash_value)
         };
 
         // Split the block reward between miners and validators based on stake coverage.
