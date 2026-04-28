@@ -13,8 +13,8 @@
 //! | Total above-ground gold | 219,891 tonnes | WGC, end-2025 |
 //! | Annual gold production | 3,630 tonnes | USGS/WGC 2024-2025 avg |
 //! | Annual production in troy oz | ~116,707,041 | 3,630 × 32,150.7 |
-//! | Blocks per year | 374,267 | 365.25 × 86,400 ÷ 84.375 |
-//! | **BASE_REWARD** | **312 OPL** | floor(116,707,041 ÷ 374,256) |
+//! | Blocks per year | 374,016 | 365.25 × 1,024 blocks/epoch |
+//! | **BASE_REWARD** | **312 OPL** | floor(116,707,041 ÷ 374,016) |
 //!
 //! # Currency Units (6 decimal places)
 //!
@@ -52,8 +52,8 @@ pub const DECIMAL_PLACES: u32 = 6;
 /// Derived from real-world gold production data:
 /// ```text
 /// annual_oz = 3,630 tonnes × 32,150.7 oz/tonne ≈ 116,707,041 oz
-/// blocks_per_year = 365.25 epochs × 1,024 blocks = 374,256
-/// reward = floor(116,707,041 ÷ 374,256) = 312 OPL per block
+/// blocks_per_year = 365.25 epochs × 1,024 blocks = 374,016
+/// reward = floor(116,707,041 ÷ 374,016) = 312 OPL per block
 /// ```
 /// With 84,375-second blocks (exactly 1,024 blocks per 24 hours),
 /// each block earns a base of 312 OPL. Vein yield and difficulty adjust
@@ -108,9 +108,9 @@ pub const POS_FINALITY_BLOCKS: u64 = 3;
 /// Chosen so that exactly 1,024 blocks (one epoch) takes 24 hours:
 /// 1,024 × 84,375 ms = 86,400,000 ms = 86,400 seconds = 24 hours.
 ///
-/// This yields ~374,267 blocks per year, aligning block issuance with
-/// real-world gold mining rates. BASE_REWARD (312 OPL) per block produces
-/// an annual emission of ~312 × 374,256 ≈ 116.7 million OPL, closely
+/// This yields 374,016 blocks per year (365.25 × 1,024), aligning block
+/// issuance with real-world gold mining rates. BASE_REWARD (312 OPL) per
+/// block produces an annual emission of ~312 × 374,016 ≈ 116.7 million OPL, closely
 /// tracks the ~3,630 tonnes of annual gold production.
 pub const BLOCK_TARGET_TIME_MS: u64 = 84_375;
 
