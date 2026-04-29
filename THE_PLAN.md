@@ -258,8 +258,8 @@ Unbonded stake enters the **unbonding queue** — a list of `PendingUnbond` entr
 
 Newly bonded validators start in `Bonding` status. They activate to `Active` status once their earliest bond entry has been confirmed for at least one full epoch (1,024 blocks) **and** the active set has a free slot. This is checked every block via `activate_matured_validators()` in `apply_block`. Only `Active` validators are eligible for block producer selection.
 
-**Maximum active validators: 1,000 (launch cap)**
-- `MAX_ACTIVE_VALIDATORS = 1_000` in `constants.rs`
+**Maximum active validators: 5,000 (launch cap)**
+- `MAX_ACTIVE_VALIDATORS = 5_000` in `constants.rs`
 - New validators bond successfully and wait in `Bonding` status
 - They are activated when a slot opens (unbond or slash creates an opening)
 - No `ValidatorBond` transaction is ever rejected — all are queued fairly

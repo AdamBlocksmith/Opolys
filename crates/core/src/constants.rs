@@ -134,7 +134,7 @@ pub const MIN_BOND_STAKE: u64 = FLAKES_PER_OPL;
 ///
 /// Can be raised via protocol upgrade after testnet validates scaling.
 /// Future upgrade path: soft-cap by weight (top-N by stake × seniority).
-pub const MAX_ACTIVE_VALIDATORS: usize = 1_000;
+pub const MAX_ACTIVE_VALIDATORS: usize = 5_000;
 
 /// Block header version number. Incremented for protocol upgrades.
 /// Version 1 is the initial protocol version with EVO-OMAP PoW and

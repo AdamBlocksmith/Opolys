@@ -776,7 +776,7 @@ mod tests {
         // validators all at height 0 and check that exactly MAX_ACTIVE_VALIDATORS
         // become Active at the epoch boundary, with the remainder still Bonding.
         //
-        // Testing with the real cap (1,000) is expensive, so we verify the logic
+        // Testing with the real cap (5,000) is expensive, so we verify the logic
         // with a smaller set and trust that MAX_ACTIVE_VALIDATORS is just a constant.
 
         let mut vs = ValidatorSet::new();
