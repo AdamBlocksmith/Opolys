@@ -618,13 +618,21 @@ async fn handle_network_event(
 ) {
     match event {
         opolys_networking::OpolysNetworkEvent::GossipBlock { data, source } => {
+            // Validator peers get 2x rate limits and 50% reduced strike penalties
+            let is_validator = node.is_validator_peer(&source).await;
+            let block_limit = if is_validator {
+                MAX_BLOCKS_PER_PEER_PER_SECOND * 2
+            } else {
+                MAX_BLOCKS_PER_PEER_PER_SECOND
+            };
+
             // FIX 1: Per-peer gossip rate limiting
             {
                 let rl = peer_rate_limits.entry(source).or_insert_with(PeerRateLimit::new);
                 rl.maybe_reset();
                 rl.block_count += 1;
-                if rl.block_count > MAX_BLOCKS_PER_PEER_PER_SECOND {
-                    tracing::warn!(peer = %source, count = rl.block_count, "Rate limiting block gossip from peer");
+                if rl.block_count > block_limit {
+                    tracing::warn!(peer = %source, count = rl.block_count, is_validator, "Rate limiting block gossip from peer");
                     return;
                 }
             }
@@ -674,12 +682,15 @@ async fn handle_network_event(
                                         hash_val,
                                         target,
                                         difficulty = block.header.difficulty,
+                                        is_validator,
                                         "Dropped block: PoW hash does not meet difficulty target"
                                     );
+                                    let raw_penalty = VEIN_YIELD_PENALTY;
+                                    let penalty = if is_validator { (raw_penalty * 0.5) as u32 } else { raw_penalty as u32 };
                                     let strikes = peer_strikes.entry(source).or_insert(0);
-                                    *strikes += VEIN_YIELD_PENALTY as u32;
+                                    *strikes += penalty;
                                     if *strikes >= 3 {
-                                        tracing::warn!(peer = %source, "Disconnecting peer after vein yield penalty");
+                                        tracing::warn!(peer = %source, is_validator, "Disconnecting peer after vein yield penalty");
                                         if let Err(e) = net.disconnect_peer(source).await {
                                             tracing::debug!(peer = %source, error = %e, "Failed to disconnect peer");
                                         }
@@ -715,10 +726,11 @@ async fn handle_network_event(
                             }
                         }
                         Err(e) => {
-                            tracing::warn!(peer = %source, error = %e, "Failed to apply P2P block");
-                            // FIX 4: Strike the peer; disconnect after 3 strikes
+                            tracing::warn!(peer = %source, error = %e, is_validator, "Failed to apply P2P block");
+                            // FIX 4 + validator discount: validators get 50% reduced penalties
+                            let penalty = if is_validator { (1.0_f64 * 0.5) as u32 } else { 1 };
                             let strikes = peer_strikes.entry(source).or_insert(0);
-                            *strikes += 1;
+                            *strikes += penalty;
                             if *strikes >= 3 {
                                 tracing::warn!(peer = %source, "Disconnecting peer after 3 invalid blocks");
                                 if let Err(e) = net.disconnect_peer(source).await {
@@ -736,13 +748,20 @@ async fn handle_network_event(
             }
         }
         opolys_networking::OpolysNetworkEvent::GossipTransaction { data, source } => {
+            let is_validator = node.is_validator_peer(&source).await;
+            let tx_limit = if is_validator {
+                MAX_TXS_PER_PEER_PER_SECOND * 2
+            } else {
+                MAX_TXS_PER_PEER_PER_SECOND
+            };
+
             // FIX 1: Per-peer gossip rate limiting
             {
                 let rl = peer_rate_limits.entry(source).or_insert_with(PeerRateLimit::new);
                 rl.maybe_reset();
                 rl.tx_count += 1;
-                if rl.tx_count > MAX_TXS_PER_PEER_PER_SECOND {
-                    tracing::warn!(peer = %source, count = rl.tx_count, "Rate limiting tx gossip from peer");
+                if rl.tx_count > tx_limit {
+                    tracing::warn!(peer = %source, count = rl.tx_count, is_validator, "Rate limiting tx gossip from peer");
                     return;
                 }
             }
@@ -827,10 +846,42 @@ async fn handle_network_event(
                 tracing::debug!(peer = %peer_id, error = %e, "Failed to request sync blocks from peer");
             }
         }
+        opolys_networking::OpolysNetworkEvent::PeerIdentified { peer_id, agent_version } => {
+            // Check if the peer's agent string contains a validator announcement.
+            // Format: "opolys-node/1.0 validator:<hex_object_id>"
+            if let Some(rest) = agent_version.split("validator:").nth(1) {
+                let hex = rest.split_whitespace().next().unwrap_or(rest).trim();
+                match hex::decode(hex) {
+                    Ok(bytes) if bytes.len() == 32 => {
+                        let mut arr = [0u8; 32];
+                        arr.copy_from_slice(&bytes);
+                        let object_id = opolys_core::ObjectId(opolys_core::Hash::from_bytes(arr));
+                        let validators = node.validators.read().await;
+                        if let Some(v) = validators.get_validator(&object_id) {
+                            if v.status == opolys_core::ValidatorStatus::Active {
+                                drop(validators);
+                                let mut vp = node.validator_peers.write().await;
+                                vp.insert(peer_id, object_id.clone());
+                                tracing::info!(
+                                    peer = %peer_id,
+                                    validator = %object_id.to_hex(),
+                                    "Peer identified as active validator"
+                                );
+                            }
+                        }
+                    }
+                    _ => {
+                        tracing::debug!(peer = %peer_id, %agent_version, "Peer agent contains validator: prefix but hex is invalid");
+                    }
+                }
+            }
+        }
         opolys_networking::OpolysNetworkEvent::PeerDisconnected { peer_id } => {
             tracing::info!(peer = %peer_id, "Peer disconnected");
             peer_strikes.remove(&peer_id);
             peer_rate_limits.remove(&peer_id);
+            // Step 6: clean up validator peer tracking on disconnect
+            node.validator_peers.write().await.remove(&peer_id);
         }
         opolys_networking::OpolysNetworkEvent::SyncRequestReceived { peer_id, request_id, request } => {
             tracing::info!(

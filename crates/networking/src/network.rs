@@ -566,6 +566,13 @@ impl SwarmTask {
                         for addr in info.listen_addrs {
                             self.swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
                         }
+                        // Forward the agent version so main.rs can detect validator announcements
+                        let _ = self.event_tx.try_send(
+                            crate::behaviour::OpolysNetworkEvent::PeerIdentified {
+                                peer_id,
+                                agent_version: info.agent_version,
+                            },
+                        );
                     }
                     libp2p::identify::Event::Sent { peer_id, .. } => {
                         tracing::trace!(peer = %peer_id, "Identify sent");

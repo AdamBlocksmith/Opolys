@@ -78,6 +78,14 @@ pub enum OpolysNetworkEvent {
         addr: Option<libp2p::Multiaddr>,
     },
 
+    /// Identify info received from a peer (agent string, protocol version, etc.).
+    PeerIdentified {
+        peer_id: libp2p::PeerId,
+        /// The peer's self-reported agent version string.
+        /// Validators embed their ObjectId here as "validator:<hex_object_id>".
+        agent_version: String,
+    },
+
     /// A peer disconnected from us.
     PeerDisconnected {
         peer_id: libp2p::PeerId,

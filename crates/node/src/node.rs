@@ -33,6 +33,7 @@ use opolys_consensus::emission::compute_suggested_fee;
 use opolys_consensus::pow;
 use opolys_execution::TransactionDispatcher;
 use opolys_storage::BlockchainStore;
+use opolys_networking::PeerId;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -363,6 +364,9 @@ pub struct OpolysNode {
     /// Double-sign evidence detected locally, pending inclusion in the next mined block.
     /// Drained into `Block.slash_evidence` by mine_block() and produce_pos_block().
     pub pending_slash_evidence: Arc<RwLock<Vec<DoubleSignEvidence>>>,
+    /// Peers that have announced an active validator identity via the identify protocol.
+    /// Keyed by libp2p PeerId; value is their on-chain ObjectId (used for look-ups).
+    pub validator_peers: Arc<RwLock<HashMap<PeerId, ObjectId>>>,
 }
 
 impl OpolysNode {
@@ -480,7 +484,20 @@ impl OpolysNode {
             miner_id: miner_id.clone(),
             signing_key,
             pending_slash_evidence: Arc::new(RwLock::new(Vec::new())),
+            validator_peers: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Return true if the given peer has announced itself as an active on-chain validator.
+    pub async fn is_validator_peer(&self, peer_id: &PeerId) -> bool {
+        let validator_peers = self.validator_peers.read().await;
+        if let Some(object_id) = validator_peers.get(peer_id) {
+            let validators = self.validators.read().await;
+            if let Some(v) = validators.get_validator(object_id) {
+                return v.status == ValidatorStatus::Active;
+            }
+        }
+        false
     }
 
     /// Attempt to mine a new block using EVO-OMAP.
