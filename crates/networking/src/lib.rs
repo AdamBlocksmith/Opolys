@@ -22,4 +22,5 @@ pub use behaviour::*;
 pub use network::*;
 pub use sync::{SyncRequest, SyncResponse, SyncConfig, MAX_SYNC_BLOCKS, MAX_SYNC_HEADERS};
 pub use discovery::{DiscoveryConfig, resolve_dns_seeds, TESTNET_DNS_SEEDS, MAINNET_DNS_SEEDS};
+pub use libp2p::Multiaddr;
 pub use libp2p::request_response::InboundRequestId;

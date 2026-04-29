@@ -24,7 +24,39 @@ use opolys_rpc::RpcState;
 use opolys_rpc::server::{ChainInfo, BlockSubmission, BlockSubmissionResult};
 use opolys_networking::{OpolysNetwork, NetworkConfig, SyncResponse, SyncRequest, MAX_SYNC_BLOCKS,
     resolve_dns_seeds, TESTNET_DNS_SEEDS, MAINNET_DNS_SEEDS};
-use opolys_core::{TESTNET_BOOTSTRAP_PEERS, MAINNET_BOOTSTRAP_PEERS};
+
+/// Path to the peer address cache file within the node's data directory.
+const KNOWN_PEERS_FILE: &str = "known_peers.txt";
+
+/// Load cached peer addresses from a previous session.
+/// Returns an empty Vec if the file does not exist or cannot be read.
+fn load_known_peers(data_dir: &str) -> Vec<String> {
+    let path = std::path::Path::new(data_dir).join(KNOWN_PEERS_FILE);
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => contents
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(String::from)
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Append a successfully-dialed peer address to the cache file.
+/// Creates the file if it does not exist. Errors are logged and ignored.
+fn save_peer_to_cache(data_dir: &str, addr: &str) {
+    let path = std::path::Path::new(data_dir).join(KNOWN_PEERS_FILE);
+    use std::io::Write;
+    match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        Ok(mut file) => {
+            if let Err(e) = writeln!(file, "{}", addr) {
+                tracing::debug!(error = %e, "Failed to write peer to cache");
+            }
+        }
+        Err(e) => tracing::debug!(error = %e, "Failed to open peer cache for writing"),
+    }
+}
 
 /// Convert live `ChainState` into an RPC-friendly `ChainInfo` snapshot.
 fn chain_state_to_info(chain: &ChainState) -> ChainInfo {
@@ -81,39 +113,35 @@ async fn main() {
         "Starting Opolys node"
     );
 
-    // Build the bootstrap peer list:
-    // 1. Hardcoded defaults for this network (skipped if --no-bootstrap)
+    // Build the bootstrap peer list in priority order:
+    // 1. Peer cache from previous session (skipped if --no-bootstrap)
     // 2. DNS-resolved seeds (skipped if --no-bootstrap)
     // 3. User-provided --bootstrap addresses (always included)
     let all_bootstrap_peers = {
         let mut peers: Vec<String> = Vec::new();
 
         if !config.no_bootstrap {
-            // 1. Hardcoded bootstrap peers for this network
-            let hardcoded = if config.testnet {
-                TESTNET_BOOTSTRAP_PEERS
-            } else {
-                MAINNET_BOOTSTRAP_PEERS
-            };
-            for addr in hardcoded {
-                peers.push(addr.to_string());
+            // 1. Peer cache — peers we successfully connected to in a previous session
+            let cached = load_known_peers(&config.data_dir);
+            if !cached.is_empty() {
+                tracing::info!(count = cached.len(), "Loaded peers from cache");
+                peers.extend(cached);
             }
-            tracing::info!(count = hardcoded.len(), testnet = config.testnet, "Using hardcoded bootstrap peers");
 
-            // 2. DNS-resolved seeds (best-effort; failures are silently skipped)
+            // 2. DNS seeds — best-effort, failures are silently skipped
             let dns_seeds = if config.testnet { TESTNET_DNS_SEEDS } else { MAINNET_DNS_SEEDS };
             let resolved = resolve_dns_seeds(dns_seeds).await;
             if !resolved.is_empty() {
                 tracing::info!(count = resolved.len(), "DNS seed resolution succeeded");
                 peers.extend(resolved);
             } else {
-                tracing::debug!("DNS seed resolution returned no addresses (expected at launch)");
+                tracing::debug!("DNS seed resolution returned no addresses");
             }
         } else {
-            tracing::info!("--no-bootstrap: skipping hardcoded and DNS peers");
+            tracing::info!("--no-bootstrap: skipping peer cache and DNS seeds");
         }
 
-        // 3. User-provided --bootstrap addresses always added
+        // 3. User-provided --bootstrap addresses — always added regardless of --no-bootstrap
         if !config.bootstrap_peers.is_empty() {
             tracing::info!(count = config.bootstrap_peers.len(), "Adding user-provided bootstrap peers");
             peers.extend(config.bootstrap_peers.clone());
@@ -409,16 +437,47 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
     let network_handle: Option<tokio::task::JoinHandle<()>> = if let Some(mut net) = network {
         let net_node = node.clone();
         let net_chain_info = chain_info.clone();
+        let net_data_dir = config.data_dir.clone();
+
+        // A Notify fired when the first peer connects. A background task uses this to
+        // print a helpful error message if no peers connect within 30 seconds.
+        let first_peer_notify = std::sync::Arc::new(tokio::sync::Notify::new());
+        let checker_notify = first_peer_notify.clone();
+        if !config.no_bootstrap || !config.bootstrap_peers.is_empty() {
+            tokio::spawn(async move {
+                let connected = tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    checker_notify.notified(),
+                ).await;
+                if connected.is_err() {
+                    tracing::warn!(
+                        "Could not connect to any peers. \
+                         Try --bootstrap <address> or check your internet connection."
+                    );
+                }
+            });
+        }
+
         Some(tokio::spawn(async move {
             tracing::info!("P2P network event loop started");
+            let mut first_peer_seen = false;
             loop {
                 // Use tokio::select! to handle both P2P events and local broadcast requests
                 tokio::select! {
                     event = net.next_event() => {
                         match event {
-                            Some(event) => handle_network_event(
-                                event, &net_node, &net_chain_info, &net
-                            ).await,
+                            Some(event) => {
+                                // Signal the no-peers checker on the first connection.
+                                if !first_peer_seen {
+                                    if let opolys_networking::OpolysNetworkEvent::PeerConnected { .. } = &event {
+                                        first_peer_notify.notify_one();
+                                        first_peer_seen = true;
+                                    }
+                                }
+                                handle_network_event(
+                                    event, &net_node, &net_chain_info, &net, &net_data_dir
+                                ).await;
+                            }
                             None => {
                                 tracing::info!("P2P network event stream ended");
                                 break;
@@ -475,12 +534,13 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
 /// - **GossipTransaction**: Deserialize and add to the mempool
 /// - **SyncRequestReceived**: Serve blocks from storage if available
 /// - **SyncResponseReceived**: Apply received blocks to catch up to chain tip
-/// - **PeerConnected/Disconnected**: Log for visibility
+/// - **PeerConnected/Disconnected**: Log for visibility, save address to peer cache
 async fn handle_network_event(
     event: opolys_networking::OpolysNetworkEvent,
     node: &std::sync::Arc<OpolysNode>,
     chain_info: &std::sync::Arc<tokio::sync::RwLock<ChainInfo>>,
     net: &OpolysNetwork,
+    data_dir: &str,
 ) {
     match event {
         opolys_networking::OpolysNetworkEvent::GossipBlock { data, source } => {
@@ -577,10 +637,15 @@ async fn handle_network_event(
                 }
             }
         }
-        opolys_networking::OpolysNetworkEvent::PeerConnected { peer_id } => {
+        opolys_networking::OpolysNetworkEvent::PeerConnected { peer_id, addr } => {
             tracing::info!(peer = %peer_id, "Peer connected");
-            // When a new peer connects, request blocks they may have that we don't.
-            // We request from our current_height + 1 onwards.
+
+            // Cache the dialable address so future startups can reconnect without bootstrap.
+            if let Some(multiaddr) = addr {
+                save_peer_to_cache(data_dir, &multiaddr.to_string());
+            }
+
+            // Request blocks this peer has that we don't.
             let current_height = node.chain.read().await.current_height;
             let request = SyncRequest {
                 start_height: current_height + 1,

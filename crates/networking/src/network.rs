@@ -412,10 +412,15 @@ impl SwarmTask {
             SwarmEvent::Behaviour(composed_event) => {
                 self.handle_composed_event(composed_event);
             }
-            SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+            SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
                 tracing::info!("Peer connected: {}", peer_id);
+                // Only outbound connections have a reliable dialable address to cache.
+                let addr = match &endpoint {
+                    libp2p::core::ConnectedPoint::Dialer { address, .. } => Some(address.clone()),
+                    libp2p::core::ConnectedPoint::Listener { .. } => None,
+                };
                 let _ = self.event_tx.try_send(
-                    crate::behaviour::OpolysNetworkEvent::PeerConnected { peer_id },
+                    crate::behaviour::OpolysNetworkEvent::PeerConnected { peer_id, addr },
                 );
             }
             SwarmEvent::ConnectionClosed { peer_id, .. } => {

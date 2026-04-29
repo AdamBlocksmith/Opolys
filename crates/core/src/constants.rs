@@ -245,22 +245,17 @@ pub const MAINNET_CHAIN_ID: u64 = 1;
 /// Chain ID for the Opolys testnet.
 pub const TESTNET_CHAIN_ID: u64 = 2;
 
-// ─── Bootstrap Peers ─────────────────────────────────────────────────────────
-// Hardcoded bootstrap peers for initial network discovery.
+// ─── Bootstrap Peers (local devnet only) ─────────────────────────────────────
+// Hardcoded IP addresses for isolated local devnet testing ONLY.
+// NOT used for testnet or mainnet — those use DNS seeds exclusively.
 // Format: /ip4/<IP>/udp/<PORT>/quic-v1/p2p/<PEER_ID>
-// Replace PLACEHOLDER_PEER_ID_* with real peer IDs before launch.
 
-/// Testnet bootstrap nodes.
-/// Replace placeholder addresses with real bootstrap node Multiaddrs before testnet launch.
-pub const TESTNET_BOOTSTRAP_PEERS: &[&str] = &[
+/// Local devnet bootstrap nodes for isolated testing.
+/// Pass these via --bootstrap for two-node local devnets.
+/// Testnet and mainnet bootstrap via DNS seeds, never hardcoded IPs.
+pub const DEVNET_BOOTSTRAP_PEERS: &[&str] = &[
     "/ip4/127.0.0.1/udp/4170/quic-v1/p2p/PLACEHOLDER_PEER_ID_1",
     "/ip4/127.0.0.1/udp/4171/quic-v1/p2p/PLACEHOLDER_PEER_ID_2",
-];
-
-/// Mainnet bootstrap nodes.
-/// Replace placeholder addresses with real bootstrap node Multiaddrs before mainnet launch.
-pub const MAINNET_BOOTSTRAP_PEERS: &[&str] = &[
-    "/ip4/127.0.0.1/udp/4170/quic-v1/p2p/PLACEHOLDER_PEER_ID_1",
 ];
 
 #[cfg(test)]

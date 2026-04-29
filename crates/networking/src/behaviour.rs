@@ -73,6 +73,9 @@ pub enum OpolysNetworkEvent {
     /// A peer connected to us.
     PeerConnected {
         peer_id: libp2p::PeerId,
+        /// For outbound connections: the Multiaddr we dialed (suitable for peer cache).
+        /// For inbound connections: None (source port is not a reliable listen address).
+        addr: Option<libp2p::Multiaddr>,
     },
 
     /// A peer disconnected from us.
