@@ -31,6 +31,9 @@ const MAX_BLOCKS_PER_PEER_PER_SECOND: u32 = 10;
 const MAX_TXS_PER_PEER_PER_SECOND: u32 = 50;
 /// Maximum future block height accepted via gossip (relative to current tip).
 const MAX_HEIGHT_LOOKAHEAD: u64 = 10;
+/// Strike penalty applied when a peer sends a block whose PoW hash fails the
+/// difficulty target. Deliberate forgery — large enough to trigger immediate ban.
+const VEIN_YIELD_PENALTY: f64 = 50.0;
 
 /// Path to the peer address cache file within the node's data directory.
 const KNOWN_PEERS_FILE: &str = "known_peers.txt";
@@ -628,6 +631,45 @@ async fn handle_network_event(
                             "Gossip block too far ahead, skipping"
                         );
                         return;
+                    }
+
+                    // Vein yield pre-check: verify the PoW hash meets the difficulty
+                    // target before acquiring the expensive apply_block() write lock.
+                    // PoS blocks (no pow_proof) skip this entirely.
+                    if block.header.pow_proof.is_some() {
+                        let target = opolys_consensus::difficulty_to_target(block.header.difficulty);
+                        // target == 0 means difficulty >= 64, which is astronomically hard;
+                        // skip the pre-check and let apply_block() / validate_block() handle it.
+                        if target > 0 {
+                            match opolys_consensus::compute_pow_hash_value(&block.header) {
+                                Some(hash_val) if hash_val > target => {
+                                    tracing::warn!(
+                                        peer = %source,
+                                        hash_val,
+                                        target,
+                                        difficulty = block.header.difficulty,
+                                        "Dropped block: PoW hash does not meet difficulty target"
+                                    );
+                                    let strikes = peer_strikes.entry(source).or_insert(0);
+                                    *strikes += VEIN_YIELD_PENALTY as u32;
+                                    if *strikes >= 3 {
+                                        tracing::warn!(peer = %source, "Disconnecting peer after vein yield penalty");
+                                        if let Err(e) = net.disconnect_peer(source).await {
+                                            tracing::debug!(peer = %source, error = %e, "Failed to disconnect peer");
+                                        }
+                                        peer_strikes.remove(&source);
+                                        peer_rate_limits.remove(&source);
+                                    }
+                                    return;
+                                }
+                                None => {
+                                    // pow_proof too short to extract nonce — malformed block
+                                    tracing::warn!(peer = %source, "Dropped block: malformed PoW proof");
+                                    return;
+                                }
+                                Some(_) => {} // Hash meets target — proceed to apply_block
+                            }
+                        }
                     }
 
                     match node.apply_block(&block).await {
