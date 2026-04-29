@@ -22,7 +22,9 @@ use clap::Parser;
 use opolys_node::{Args, NodeConfig, OpolysNode, ChainState};
 use opolys_rpc::RpcState;
 use opolys_rpc::server::{ChainInfo, BlockSubmission, BlockSubmissionResult};
-use opolys_networking::{OpolysNetwork, NetworkConfig, SyncResponse, SyncRequest, MAX_SYNC_BLOCKS};
+use opolys_networking::{OpolysNetwork, NetworkConfig, SyncResponse, SyncRequest, MAX_SYNC_BLOCKS,
+    resolve_dns_seeds, TESTNET_DNS_SEEDS, MAINNET_DNS_SEEDS};
+use opolys_core::{TESTNET_BOOTSTRAP_PEERS, MAINNET_BOOTSTRAP_PEERS};
 
 /// Convert live `ChainState` into an RPC-friendly `ChainInfo` snapshot.
 fn chain_state_to_info(chain: &ChainState) -> ChainInfo {
@@ -58,7 +60,8 @@ async fn main() {
         listen_port: args.port,
         rpc_port: args.rpc_port.unwrap_or(args.port + 1),
         data_dir: args.data_dir.unwrap_or_else(|| "./data".to_string()),
-        bootstrap_peers: args.bootstrap.map(|s| vec![s]).unwrap_or_default(),
+        bootstrap_peers: args.bootstrap,
+        no_bootstrap: args.no_bootstrap,
         log_level: args.log_level,
         mine: args.mine,
         no_rpc: args.no_rpc,
@@ -78,10 +81,51 @@ async fn main() {
         "Starting Opolys node"
     );
 
+    // Build the bootstrap peer list:
+    // 1. Hardcoded defaults for this network (skipped if --no-bootstrap)
+    // 2. DNS-resolved seeds (skipped if --no-bootstrap)
+    // 3. User-provided --bootstrap addresses (always included)
+    let all_bootstrap_peers = {
+        let mut peers: Vec<String> = Vec::new();
+
+        if !config.no_bootstrap {
+            // 1. Hardcoded bootstrap peers for this network
+            let hardcoded = if config.testnet {
+                TESTNET_BOOTSTRAP_PEERS
+            } else {
+                MAINNET_BOOTSTRAP_PEERS
+            };
+            for addr in hardcoded {
+                peers.push(addr.to_string());
+            }
+            tracing::info!(count = hardcoded.len(), testnet = config.testnet, "Using hardcoded bootstrap peers");
+
+            // 2. DNS-resolved seeds (best-effort; failures are silently skipped)
+            let dns_seeds = if config.testnet { TESTNET_DNS_SEEDS } else { MAINNET_DNS_SEEDS };
+            let resolved = resolve_dns_seeds(dns_seeds).await;
+            if !resolved.is_empty() {
+                tracing::info!(count = resolved.len(), "DNS seed resolution succeeded");
+                peers.extend(resolved);
+            } else {
+                tracing::debug!("DNS seed resolution returned no addresses (expected at launch)");
+            }
+        } else {
+            tracing::info!("--no-bootstrap: skipping hardcoded and DNS peers");
+        }
+
+        // 3. User-provided --bootstrap addresses always added
+        if !config.bootstrap_peers.is_empty() {
+            tracing::info!(count = config.bootstrap_peers.len(), "Adding user-provided bootstrap peers");
+            peers.extend(config.bootstrap_peers.clone());
+        }
+
+        peers
+    };
+
     // Start P2P networking
     let net_config = NetworkConfig {
         listen_port: config.listen_port,
-        bootstrap_peers: config.bootstrap_peers.clone(),
+        bootstrap_peers: all_bootstrap_peers,
         ..Default::default()
     };
 

@@ -22,3 +22,42 @@ impl Default for DiscoveryConfig {
         }
     }
 }
+
+/// DNS seeds for testnet — resolved at startup, not hardcoded IPs.
+/// Update these DNS records to rotate bootstrap infrastructure without releasing a new binary.
+pub const TESTNET_DNS_SEEDS: &[&str] = &[
+    "testnet-seed.opolys.io",
+    "testnet-seed2.opolys.io",
+];
+
+/// DNS seeds for mainnet — resolved at startup, not hardcoded IPs.
+/// Update these DNS records to rotate bootstrap infrastructure without releasing a new binary.
+pub const MAINNET_DNS_SEEDS: &[&str] = &[
+    "seed.opolys.io",
+    "seed2.opolys.io",
+    "seed3.opolys.io",
+];
+
+/// Resolve DNS seed hostnames to QUIC Multiaddr strings.
+///
+/// Each hostname is queried on port 4170 (the default Opolys P2P port).
+/// A/AAAA records are returned as `/ip4/<IP>/udp/4170/quic-v1` addresses.
+/// Failures are silently skipped — DNS seeds are best-effort.
+pub async fn resolve_dns_seeds(seeds: &[&str]) -> Vec<String> {
+    let mut addrs = Vec::new();
+    for seed in seeds {
+        match tokio::net::lookup_host(format!("{}:4170", seed)).await {
+            Ok(resolved) => {
+                for addr in resolved {
+                    if addr.ip().is_ipv4() {
+                        addrs.push(format!("/ip4/{}/udp/4170/quic-v1", addr.ip()));
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::debug!(seed, error = %e, "DNS seed resolution failed (skipping)");
+            }
+        }
+    }
+    addrs
+}

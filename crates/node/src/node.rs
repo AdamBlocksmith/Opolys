@@ -55,9 +55,17 @@ pub struct Args {
     #[arg(long)]
     pub data_dir: Option<String>,
 
-    /// Bootstrap peer address for initial network discovery.
+    /// Bootstrap peer addresses for initial network discovery.
+    /// Accepts multiple addresses separated by commas, or repeated --bootstrap flags.
+    /// These are added on top of the hardcoded default peers for the selected network.
+    #[arg(long, value_delimiter = ',')]
+    pub bootstrap: Vec<String>,
+
+    /// Skip all hardcoded and DNS-resolved bootstrap peers.
+    /// User-provided --bootstrap addresses are still dialed.
+    /// Useful for isolated local testnets where you control all peers manually.
     #[arg(long)]
-    pub bootstrap: Option<String>,
+    pub no_bootstrap: bool,
 
     /// Log level: trace, debug, info, warn, error (default: info).
     #[arg(long, default_value = "info")]
@@ -112,10 +120,12 @@ pub struct NodeConfig {
     pub rpc_port: u16,
     pub data_dir: String,
     pub bootstrap_peers: Vec<String>,
+    /// Skip hardcoded and DNS bootstrap peers; only dial user-provided peers.
+    pub no_bootstrap: bool,
     pub log_level: String,
     pub mine: bool,
     pub no_rpc: bool,
-pub validate: bool,
+    pub validate: bool,
     /// Path to the miner/validator key file (32-byte ed25519 seed).
     /// When provided, the node can sign PoS blocks and receive block rewards.
     pub key_file: Option<String>,
@@ -164,6 +174,7 @@ impl Default for NodeConfig {
             rpc_port: DEFAULT_LISTEN_PORT + 1,
             data_dir: "./data".to_string(),
             bootstrap_peers: vec![],
+            no_bootstrap: false,
             log_level: "info".to_string(),
             mine: false,
             no_rpc: false,
@@ -1028,6 +1039,7 @@ mod tests {
             rpc_port: 0,
             data_dir: dir.path().to_string_lossy().to_string(),
             bootstrap_peers: vec![],
+            no_bootstrap: true,
             log_level: "warn".to_string(),
             mine: true,
             no_rpc: true,
