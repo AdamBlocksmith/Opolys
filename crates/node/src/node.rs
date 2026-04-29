@@ -111,6 +111,22 @@ pub struct Args {
     /// testnet keys. Do NOT use testnet mode for production.
     #[arg(long)]
     pub testnet: bool,
+
+    /// RPC server listen address (default: 127.0.0.1 — localhost only).
+    ///
+    /// By default the RPC server only accepts local connections.
+    /// To expose the RPC to external clients pass --rpc-listen-addr 0.0.0.0.
+    /// WARNING: exposing the RPC publicly without --rpc-api-key is a security risk.
+    #[arg(long, default_value = "127.0.0.1")]
+    pub rpc_listen_addr: String,
+
+    /// Optional API key for write and mining RPC methods.
+    ///
+    /// If set, opl_sendTransaction, opl_getMiningJob, and opl_submitSolution
+    /// require Authorization: Bearer <key> or X-Api-Key: <key> header.
+    /// All read methods (balance, blocks, chain info, etc.) remain public.
+    #[arg(long)]
+    pub rpc_api_key: Option<String>,
 }
 
 /// Configuration for an Opolys node, derived from CLI arguments or defaults.
@@ -132,6 +148,11 @@ pub struct NodeConfig {
     /// Run in testnet mode with pre-funded genesis accounts.
     /// Creates 3 accounts each with 10,000 OPL. Do NOT use in production.
     pub testnet: bool,
+    /// IP address the RPC server listens on. Default: "127.0.0.1".
+    /// Set to "0.0.0.0" to expose publicly (use with --rpc-api-key).
+    pub rpc_listen_addr: String,
+    /// Optional API key for write and mining RPC endpoints.
+    pub rpc_api_key: Option<String>,
 }
 
 /// Build the testnet genesis config with pre-funded accounts.
@@ -181,6 +202,8 @@ impl Default for NodeConfig {
             validate: false,
             key_file: None,
             testnet: false,
+            rpc_listen_addr: "127.0.0.1".to_string(),
+            rpc_api_key: None,
         }
     }
 }
@@ -1046,6 +1069,8 @@ mod tests {
             validate: false,
             key_file: None,
             testnet: false,
+            rpc_listen_addr: "127.0.0.1".to_string(),
+            rpc_api_key: None,
         };
         (config, dir)
     }

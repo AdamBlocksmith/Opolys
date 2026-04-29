@@ -32,14 +32,15 @@
 //! - `GET /health` — returns `"ok"` if the node is running
 
 use axum::{
-    extract::State,
-    http::StatusCode,
+    extract::{ConnectInfo, State},
+    http::{HeaderMap, StatusCode},
     routing::{get, post},
     Json,
     Router,
 };
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
 use tower_http::cors::{Any, CorsLayer};
 
@@ -51,7 +52,7 @@ use opolys_consensus::difficulty::compute_next_difficulty;
 use opolys_consensus::block::compute_block_hash;
 use opolys_storage::BlockchainStore;
 
-use crate::jsonrpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
+use crate::jsonrpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse, RateLimiter};
 
 /// Simplified chain info snapshot for RPC responses.
 ///
@@ -113,6 +114,13 @@ pub struct RpcState {
     /// The miner's on-chain identity (Blake3 hash of their public key).
     /// Set to ObjectId::zero() if no key file is provided.
     pub miner_id: ObjectId,
+    /// Per-IP rate limiter shared across all handlers.
+    /// Three tiers keyed as "<ip>:read" (120/min), "<ip>:write" (10/min), "<ip>:mining" (30/min).
+    pub rate_limiter: Arc<Mutex<RateLimiter>>,
+    /// Optional API key for write and mining endpoints.
+    /// If Some, opl_sendTransaction/getMiningJob/submitSolution require
+    /// Authorization: Bearer <key> or X-Api-Key: <key>. Read methods always public.
+    pub api_key: Option<String>,
 }
 
 /// A block submitted by an external miner, along with a oneshot channel
@@ -143,20 +151,85 @@ impl RpcState {
         store: Arc<BlockchainStore>,
         block_sender: tokio::sync::mpsc::Sender<BlockSubmission>,
         miner_id: ObjectId,
+        api_key: Option<String>,
     ) -> Self {
-        RpcState { chain, accounts, validators, mempool, store, block_sender, miner_id }
+        RpcState {
+            chain, accounts, validators, mempool, store, block_sender, miner_id,
+            rate_limiter: Arc::new(Mutex::new(RateLimiter::new(120))),
+            api_key,
+        }
     }
 }
 
 // ─── JSON-RPC HTTP handler ─────────────────────────────────────────
 
+/// Classify a method name into its rate-limit tier and auth requirement.
+///
+/// Returns `(rate_key, max_per_minute, requires_api_key)`.
+fn classify_method(method: &str) -> (&'static str, usize, bool) {
+    match method {
+        "opl_sendTransaction" => ("write", 10, true),
+        "opl_getMiningJob" | "opl_submitSolution" => ("mining", 30, true),
+        _ => ("read", 120, false),
+    }
+}
+
+/// Verify `Authorization: Bearer <key>` or `X-Api-Key: <key>` header.
+fn check_api_key(headers: &HeaderMap, required_key: &str) -> bool {
+    if let Some(val) = headers.get("authorization").and_then(|v| v.to_str().ok()) {
+        if val.starts_with("Bearer ") && &val["Bearer ".len()..] == required_key {
+            return true;
+        }
+    }
+    if let Some(val) = headers.get("x-api-key").and_then(|v| v.to_str().ok()) {
+        if val == required_key {
+            return true;
+        }
+    }
+    false
+}
+
 /// POST /rpc — JSON-RPC 2.0 endpoint.
 ///
 /// Routes incoming JSON-RPC requests to the appropriate handler method.
+/// Applies per-IP rate limiting and optional API key authentication before routing.
 pub async fn handle_jsonrpc(
     State(state): State<RpcState>,
+    ConnectInfo(client_addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(req): Json<JsonRpcRequest>,
 ) -> (StatusCode, Json<JsonRpcResponse>) {
+    let ip = client_addr.ip().to_string();
+    let (tier, max_per_min, needs_auth) = classify_method(&req.method);
+
+    // Layer 2: per-IP rate limiting
+    {
+        let mut limiter = state.rate_limiter.lock().unwrap();
+        let rate_key = format!("{}:{}", ip, tier);
+        if !limiter.check_limit(&rate_key, max_per_min) {
+            return (StatusCode::TOO_MANY_REQUESTS, Json(JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                result: None,
+                error: Some(JsonRpcError::rate_limited()),
+                id: req.id,
+            }));
+        }
+    }
+
+    // Layer 3: API key check for write and mining methods
+    if needs_auth {
+        if let Some(ref required_key) = state.api_key {
+            if !check_api_key(&headers, required_key) {
+                return (StatusCode::UNAUTHORIZED, Json(JsonRpcResponse {
+                    jsonrpc: "2.0".to_string(),
+                    result: None,
+                    error: Some(JsonRpcError::unauthorized()),
+                    id: req.id,
+                }));
+            }
+        }
+    }
+
     let result = match req.method.as_str() {
         // ── Read endpoints ──
         "opl_getBlockHeight" => handle_get_block_height(&state).await,
@@ -839,15 +912,21 @@ pub fn build_router(state: RpcState) -> Router {
         .layer(cors)
 }
 
-/// Start the RPC server on the given port.
-pub async fn start_server(state: RpcState, port: u16) -> Result<(), anyhow::Error> {
-    let app = build_router(state);
-    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
+/// Start the RPC server on the given port and listen address.
+///
+/// Defaults to `127.0.0.1` (localhost-only). Pass `0.0.0.0` via
+/// `--rpc-listen-addr` to expose publicly. Uses `into_make_service_with_connect_info`
+/// so handlers can extract the client IP for per-IP rate limiting.
+pub async fn start_server(state: RpcState, port: u16, listen_addr: &str) -> Result<(), anyhow::Error> {
+    let ip: std::net::IpAddr = listen_addr.parse()
+        .map_err(|e| anyhow::anyhow!("Invalid --rpc-listen-addr '{}': {}", listen_addr, e))?;
+    let addr = SocketAddr::from((ip, port));
 
     tracing::info!("RPC server listening on {}", addr);
 
+    let app = build_router(state);
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
 
     Ok(())
 }

@@ -100,6 +100,8 @@ async fn main() {
         validate: args.validate,
         key_file: args.key_file,
         testnet: args.testnet,
+        rpc_listen_addr: args.rpc_listen_addr,
+        rpc_api_key: args.rpc_api_key,
     };
 
     tracing::info!(
@@ -233,15 +235,22 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
             node.store.as_ref().unwrap().clone(),
             block_sender,
             node.miner_id.clone(),
+            config.rpc_api_key.clone(),
         );
 
         let rpc_port = config.rpc_port;
+        let rpc_listen_addr = config.rpc_listen_addr.clone();
         rpc_handle = Some(tokio::spawn(async move {
-            if let Err(e) = opolys_rpc::start_server(rpc_state, rpc_port).await {
+            if let Err(e) = opolys_rpc::start_server(rpc_state, rpc_port, &rpc_listen_addr).await {
                 tracing::error!("RPC server error: {}", e);
             }
         }));
-        tracing::info!(port = config.rpc_port, "RPC server starting");
+        tracing::info!(
+            port = config.rpc_port,
+            listen = %config.rpc_listen_addr,
+            auth = config.rpc_api_key.is_some(),
+            "RPC server starting"
+        );
     } else if config.no_rpc {
         tracing::info!("RPC: disabled (run without --no-rpc to enable)");
     } else {

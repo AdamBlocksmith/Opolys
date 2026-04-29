@@ -80,6 +80,23 @@ impl JsonRpcError {
     pub fn not_found(msg: &str) -> Self {
         JsonRpcError { code: -32001, message: msg.to_string() }
     }
+
+    /// `-32004` — authentication required (application-specific).
+    pub fn unauthorized() -> Self {
+        JsonRpcError {
+            code: -32004,
+            message: "This method requires an API key. \
+                      Start node with --rpc-api-key <secret>".to_string(),
+        }
+    }
+
+    /// `-32005` — rate limit exceeded (application-specific).
+    pub fn rate_limited() -> Self {
+        JsonRpcError {
+            code: -32005,
+            message: "Rate limit exceeded. Too many requests.".to_string(),
+        }
+    }
 }
 
 /// Rate limiter for RPC request throttling.
@@ -115,10 +132,18 @@ impl RateLimiter {
     /// history, then checks if the count is still within `max_per_minute`.
     /// Returns `true` if allowed, `false` if the rate limit has been exceeded.
     pub fn check(&mut self, key: &str) -> bool {
+        self.check_limit(key, self.max_per_minute)
+    }
+
+    /// Check whether a request from the given key is allowed with a specific limit.
+    ///
+    /// Like `check` but overrides `max_per_minute` with `max`. Used to apply
+    /// different rate limits to different method tiers from a single limiter instance.
+    pub fn check_limit(&mut self, key: &str, max: usize) -> bool {
         let now = Instant::now();
         let entries = self.requests.entry(key.to_string()).or_insert_with(Vec::new);
         entries.retain(|t| now.duration_since(*t).as_secs() < 60);
-        if entries.len() >= self.max_per_minute {
+        if entries.len() >= max {
             return false;
         }
         entries.push(now);
