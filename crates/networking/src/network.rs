@@ -67,6 +67,11 @@ pub enum NetworkCommand {
     GetConnectedPeers {
         response_channel: oneshot::Sender<Vec<PeerId>>,
     },
+
+    /// Disconnect from a specific peer (e.g., after peer scoring bans them).
+    DisconnectPeer {
+        peer_id: PeerId,
+    },
 }
 
 /// Errors that can occur during network operations.
@@ -289,6 +294,14 @@ impl OpolysNetwork {
             .map_err(|_| NetworkError::ChannelClosed)?;
         rx.await.map_err(|_| NetworkError::ChannelClosed)
     }
+
+    /// Disconnect from a specific peer.
+    pub async fn disconnect_peer(&self, peer_id: PeerId) -> Result<(), NetworkError> {
+        self.command_tx
+            .send(NetworkCommand::DisconnectPeer { peer_id })
+            .await
+            .map_err(|_| NetworkError::ChannelClosed)
+    }
 }
 
 /// Background task that runs the libp2p swarm event loop.
@@ -398,6 +411,9 @@ impl SwarmTask {
             NetworkCommand::GetConnectedPeers { response_channel } => {
                 let peers: Vec<PeerId> = self.swarm.connected_peers().cloned().collect();
                 let _ = response_channel.send(peers);
+            }
+            NetworkCommand::DisconnectPeer { peer_id } => {
+                let _ = self.swarm.disconnect_peer_id(peer_id);
             }
         }
     }

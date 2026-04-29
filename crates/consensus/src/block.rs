@@ -10,6 +10,10 @@
 //! keeping the fee market pure and deflationary.
 
 use opolys_core::{Hash, Block, BlockHeader, FLAKES_PER_OPL, BLOCK_VERSION, MAX_TRANSACTIONS_PER_BLOCK, MAX_BLOCK_SIZE_BYTES, MAX_TX_DATA_SIZE_BYTES, MAX_FUTURE_BLOCK_TIME_SECS, OpolysError};
+
+/// Maximum slash evidence entries allowed per block.
+/// Prevents DoS via unbounded ed25519 verification under the write lock.
+const MAX_SLASH_EVIDENCE_PER_BLOCK: usize = 10;
 use borsh::{BorshSerialize, BorshDeserialize};
 use serde::{Deserialize, Serialize};
 use opolys_crypto::Blake3Hasher;
@@ -200,6 +204,14 @@ pub fn validate_block(
         return Err(OpolysError::BlockValidationFailed(format!(
             "Too many transactions: {} > {}",
             block.transactions.len(), MAX_TRANSACTIONS_PER_BLOCK
+        )));
+    }
+
+    // 6b. Slash evidence count check — cap before entering ed25519 verification
+    if block.slash_evidence.len() > MAX_SLASH_EVIDENCE_PER_BLOCK {
+        return Err(OpolysError::BlockValidationFailed(format!(
+            "Too many slash evidence entries: {} > {}",
+            block.slash_evidence.len(), MAX_SLASH_EVIDENCE_PER_BLOCK
         )));
     }
 

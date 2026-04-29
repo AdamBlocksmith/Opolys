@@ -23,7 +23,14 @@ use opolys_node::{Args, NodeConfig, OpolysNode, ChainState};
 use opolys_rpc::RpcState;
 use opolys_rpc::server::{ChainInfo, BlockSubmission, BlockSubmissionResult};
 use opolys_networking::{OpolysNetwork, NetworkConfig, SyncResponse, SyncRequest, MAX_SYNC_BLOCKS,
-    resolve_dns_seeds, TESTNET_DNS_SEEDS, MAINNET_DNS_SEEDS};
+    resolve_dns_seeds, TESTNET_DNS_SEEDS, MAINNET_DNS_SEEDS, PeerId};
+
+/// Maximum gossip blocks accepted from a single peer per second.
+const MAX_BLOCKS_PER_PEER_PER_SECOND: u32 = 10;
+/// Maximum gossip transactions accepted from a single peer per second.
+const MAX_TXS_PER_PEER_PER_SECOND: u32 = 50;
+/// Maximum future block height accepted via gossip (relative to current tip).
+const MAX_HEIGHT_LOOKAHEAD: u64 = 10;
 
 /// Path to the peer address cache file within the node's data directory.
 const KNOWN_PEERS_FILE: &str = "known_peers.txt";
@@ -470,6 +477,10 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
         Some(tokio::spawn(async move {
             tracing::info!("P2P network event loop started");
             let mut first_peer_seen = false;
+            // FIX 4: per-peer strike counts (ban after 3 invalid blocks)
+            let mut peer_strikes: std::collections::HashMap<PeerId, u32> = std::collections::HashMap::new();
+            // FIX 1: per-peer gossip rate limit state
+            let mut peer_rate_limits: std::collections::HashMap<PeerId, PeerRateLimit> = std::collections::HashMap::new();
             loop {
                 // Use tokio::select! to handle both P2P events and local broadcast requests
                 tokio::select! {
@@ -484,7 +495,8 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
                                     }
                                 }
                                 handle_network_event(
-                                    event, &net_node, &net_chain_info, &net, &net_data_dir
+                                    event, &net_node, &net_chain_info, &net, &net_data_dir,
+                                    &mut peer_strikes, &mut peer_rate_limits,
                                 ).await;
                             }
                             None => {
@@ -537,6 +549,28 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
     tracing::info!("Node shutdown complete");
 }
 
+/// Per-peer gossip rate limit state for a rolling 1-second window.
+struct PeerRateLimit {
+    block_count: u32,
+    tx_count: u32,
+    window_start: std::time::Instant,
+}
+
+impl PeerRateLimit {
+    fn new() -> Self {
+        PeerRateLimit { block_count: 0, tx_count: 0, window_start: std::time::Instant::now() }
+    }
+
+    /// Reset counters if the 1-second window has elapsed.
+    fn maybe_reset(&mut self) {
+        if self.window_start.elapsed() >= std::time::Duration::from_secs(1) {
+            self.block_count = 0;
+            self.tx_count = 0;
+            self.window_start = std::time::Instant::now();
+        }
+    }
+}
+
 /// Handle an incoming P2P network event.
 ///
 /// - **GossipBlock**: Deserialize and apply the block if it extends our chain
@@ -550,9 +584,22 @@ async fn handle_network_event(
     chain_info: &std::sync::Arc<tokio::sync::RwLock<ChainInfo>>,
     net: &OpolysNetwork,
     data_dir: &str,
+    peer_strikes: &mut std::collections::HashMap<PeerId, u32>,
+    peer_rate_limits: &mut std::collections::HashMap<PeerId, PeerRateLimit>,
 ) {
     match event {
         opolys_networking::OpolysNetworkEvent::GossipBlock { data, source } => {
+            // FIX 1: Per-peer gossip rate limiting
+            {
+                let rl = peer_rate_limits.entry(source).or_insert_with(PeerRateLimit::new);
+                rl.maybe_reset();
+                rl.block_count += 1;
+                if rl.block_count > MAX_BLOCKS_PER_PEER_PER_SECOND {
+                    tracing::warn!(peer = %source, count = rl.block_count, "Rate limiting block gossip from peer");
+                    return;
+                }
+            }
+
             tracing::info!(peer = %source, size = data.len(), "Received block via gossip");
 
             // Reject oversized block data (max 10 MiB)
@@ -563,13 +610,22 @@ async fn handle_network_event(
 
             match borsh::from_slice::<opolys_core::Block>(&data) {
                 Ok(block) => {
-                    // Skip blocks we've already applied (height <= current)
                     let current_height = node.chain.read().await.current_height;
+                    // Skip blocks we've already applied (height <= current)
                     if block.header.height <= current_height {
                         tracing::debug!(
                             height = block.header.height,
                             current_height,
                             "Skipping already-applied block"
+                        );
+                        return;
+                    }
+                    // FIX 2: Drop blocks too far ahead to prevent future-block DoS
+                    if block.header.height > current_height + MAX_HEIGHT_LOOKAHEAD {
+                        tracing::debug!(
+                            height = block.header.height,
+                            current_height,
+                            "Gossip block too far ahead, skipping"
                         );
                         return;
                     }
@@ -591,16 +647,38 @@ async fn handle_network_event(
                             }
                         }
                         Err(e) => {
-                            tracing::warn!(error = %e, "Failed to apply P2P block");
+                            tracing::warn!(peer = %source, error = %e, "Failed to apply P2P block");
+                            // FIX 4: Strike the peer; disconnect after 3 strikes
+                            let strikes = peer_strikes.entry(source).or_insert(0);
+                            *strikes += 1;
+                            if *strikes >= 3 {
+                                tracing::warn!(peer = %source, "Disconnecting peer after 3 invalid blocks");
+                                if let Err(e) = net.disconnect_peer(source).await {
+                                    tracing::debug!(peer = %source, error = %e, "Failed to disconnect peer");
+                                }
+                                peer_strikes.remove(&source);
+                                peer_rate_limits.remove(&source);
+                            }
                         }
                     }
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, "Failed to deserialize P2P block");
+                    tracing::warn!(peer = %source, error = %e, "Failed to deserialize P2P block");
                 }
             }
         }
         opolys_networking::OpolysNetworkEvent::GossipTransaction { data, source } => {
+            // FIX 1: Per-peer gossip rate limiting
+            {
+                let rl = peer_rate_limits.entry(source).or_insert_with(PeerRateLimit::new);
+                rl.maybe_reset();
+                rl.tx_count += 1;
+                if rl.tx_count > MAX_TXS_PER_PEER_PER_SECOND {
+                    tracing::warn!(peer = %source, count = rl.tx_count, "Rate limiting tx gossip from peer");
+                    return;
+                }
+            }
+
             tracing::debug!(peer = %source, size = data.len(), "Received transaction via gossip");
 
             // Reject oversized transaction data (max 100 KiB)
@@ -666,6 +744,8 @@ async fn handle_network_event(
         }
         opolys_networking::OpolysNetworkEvent::PeerDisconnected { peer_id } => {
             tracing::info!(peer = %peer_id, "Peer disconnected");
+            peer_strikes.remove(&peer_id);
+            peer_rate_limits.remove(&peer_id);
         }
         opolys_networking::OpolysNetworkEvent::SyncRequestReceived { peer_id, request_id, request } => {
             tracing::info!(
@@ -708,8 +788,30 @@ async fn handle_network_event(
             );
             // Apply received blocks to catch up to the chain tip
             for block_bytes in &response.blocks {
+                // FIX 3: Pre-filter — reject oversized raw data before deserializing
+                if block_bytes.len() > opolys_core::MAX_BLOCK_SIZE_BYTES {
+                    tracing::warn!(
+                        peer = %peer_id,
+                        size = block_bytes.len(),
+                        "Sync block too large, stopping sync"
+                    );
+                    break;
+                }
+
                 match borsh::from_slice::<opolys_core::Block>(block_bytes) {
                     Ok(block) => {
+                        // FIX 3: Height order check — sync must be strictly sequential
+                        let current_height = node.chain.read().await.current_height;
+                        if block.header.height != current_height + 1 {
+                            tracing::debug!(
+                                peer = %peer_id,
+                                height = block.header.height,
+                                expected = current_height + 1,
+                                "Sync block out of order, stopping sync"
+                            );
+                            break;
+                        }
+
                         match node.apply_block(&block).await {
                             Ok(hash) => {
                                 tracing::info!(
@@ -732,7 +834,8 @@ async fn handle_network_event(
                         }
                     }
                     Err(e) => {
-                        tracing::warn!(error = %e, "Failed to deserialize sync block");
+                        tracing::warn!(peer = %peer_id, error = %e, "Failed to deserialize sync block, stopping sync");
+                        break;
                     }
                 }
             }
