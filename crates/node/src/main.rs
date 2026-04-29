@@ -34,6 +34,11 @@ const MAX_HEIGHT_LOOKAHEAD: u64 = 10;
 /// Strike penalty applied when a peer sends a block whose PoW hash fails the
 /// difficulty target. Deliberate forgery — large enough to trigger immediate ban.
 const VEIN_YIELD_PENALTY: f64 = 50.0;
+/// Fee multiplier for immediate network-wide relay (high-priority tier).
+const FEE_MULTIPLIER_HIGH: u64 = 10;
+/// Delay in milliseconds before relaying a transaction whose fee is below
+/// the current suggested_fee. All valid txs still enter the local mempool immediately.
+const DELAY_LOW_FEE_MS: u64 = 5_000;
 
 /// Path to the peer address cache file within the node's data directory.
 const KNOWN_PEERS_FILE: &str = "known_peers.txt";
@@ -484,8 +489,12 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
             let mut peer_strikes: std::collections::HashMap<PeerId, u32> = std::collections::HashMap::new();
             // FIX 1: per-peer gossip rate limit state
             let mut peer_rate_limits: std::collections::HashMap<PeerId, PeerRateLimit> = std::collections::HashMap::new();
+            // Low-fee tx queue: (raw bytes, time enqueued). Drained after DELAY_LOW_FEE_MS.
+            let mut pending_low_fee_txs: Vec<(Vec<u8>, std::time::Instant)> = Vec::new();
+            let mut low_fee_drain_interval =
+                tokio::time::interval(std::time::Duration::from_millis(1_000));
             loop {
-                // Use tokio::select! to handle both P2P events and local broadcast requests
+                // Use tokio::select! to handle P2P events, local broadcasts, and delayed relays
                 tokio::select! {
                     event = net.next_event() => {
                         match event {
@@ -500,6 +509,7 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
                                 handle_network_event(
                                     event, &net_node, &net_chain_info, &net, &net_data_dir,
                                     &mut peer_strikes, &mut peer_rate_limits,
+                                    &mut pending_low_fee_txs,
                                 ).await;
                             }
                             None => {
@@ -519,6 +529,21 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
                                 // All broadcast senders dropped — mining/RPC stopped
                             }
                         }
+                    }
+                    _ = low_fee_drain_interval.tick() => {
+                        // Drain low-fee txs whose delay has elapsed and relay them
+                        let threshold = std::time::Duration::from_millis(DELAY_LOW_FEE_MS);
+                        let mut remaining = Vec::new();
+                        for (data, queued_at) in pending_low_fee_txs.drain(..) {
+                            if queued_at.elapsed() >= threshold {
+                                if let Err(e) = net.broadcast_transaction(data).await {
+                                    tracing::debug!("Failed to relay delayed low-fee tx: {}", e);
+                                }
+                            } else {
+                                remaining.push((data, queued_at));
+                            }
+                        }
+                        pending_low_fee_txs = remaining;
                     }
                 }
             }
@@ -589,6 +614,7 @@ async fn handle_network_event(
     data_dir: &str,
     peer_strikes: &mut std::collections::HashMap<PeerId, u32>,
     peer_rate_limits: &mut std::collections::HashMap<PeerId, PeerRateLimit>,
+    pending_low_fee_txs: &mut Vec<(Vec<u8>, std::time::Instant)>,
 ) {
     match event {
         opolys_networking::OpolysNetworkEvent::GossipBlock { data, source } => {
@@ -739,12 +765,14 @@ async fn handle_network_event(
                     }
 
                     let tx_data_for_rebroadcast = data.clone();
-                    let priority = tx.fee as f64;
+                    let tx_fee = tx.fee;
+                    let priority = tx_fee as f64;
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_secs();
                     {
+                        // All valid txs enter the mempool immediately regardless of fee tier.
                         let mut mempool = node.mempool.write().await;
                         match mempool.add_transaction(tx, priority, now) {
                             Ok(()) => {
@@ -756,9 +784,24 @@ async fn handle_network_event(
                             }
                         }
                     }
-                    // Re-broadcast the transaction to other peers (outside mempool lock)
-                    if let Err(e) = net.broadcast_transaction(tx_data_for_rebroadcast).await {
-                        tracing::debug!("Failed to re-broadcast transaction: {}", e);
+
+                    // Fee-weighted P2P relay: high/normal fees relay immediately,
+                    // low fees are queued and relayed after DELAY_LOW_FEE_MS.
+                    let suggested_fee = node.chain.read().await.suggested_fee;
+                    let high_threshold = suggested_fee.saturating_mul(FEE_MULTIPLIER_HIGH);
+                    if tx_fee >= high_threshold {
+                        tracing::debug!(tx_fee, suggested_fee, "High-fee tx: relaying immediately");
+                        if let Err(e) = net.broadcast_transaction(tx_data_for_rebroadcast).await {
+                            tracing::debug!("Failed to relay high-fee tx: {}", e);
+                        }
+                    } else if tx_fee >= suggested_fee {
+                        tracing::debug!(tx_fee, suggested_fee, "Normal-fee tx: relaying immediately");
+                        if let Err(e) = net.broadcast_transaction(tx_data_for_rebroadcast).await {
+                            tracing::debug!("Failed to relay normal-fee tx: {}", e);
+                        }
+                    } else {
+                        tracing::debug!(tx_fee, suggested_fee, "Low-fee tx: queued for delayed relay");
+                        pending_low_fee_txs.push((tx_data_for_rebroadcast, std::time::Instant::now()));
                     }
                 }
                 Err(e) => {
