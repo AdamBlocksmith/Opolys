@@ -125,6 +125,17 @@ pub const BLOCK_TARGET_TIME_SECS: u64 = 84;
 /// Only brand-new bond entries enforce this 1 OPL floor.
 pub const MIN_BOND_STAKE: u64 = FLAKES_PER_OPL;
 
+/// Maximum number of simultaneously active validators.
+///
+/// Prevents unbounded O(n) per-block computation and disk writes.
+/// Validators that bond when the cap is full wait in `Bonding` status
+/// until a slot opens (via unbond or slash). No `ValidatorBond` transaction
+/// is ever rejected — all validators are queued fairly.
+///
+/// Can be raised via protocol upgrade after testnet validates scaling.
+/// Future upgrade path: soft-cap by weight (top-N by stake × seniority).
+pub const MAX_ACTIVE_VALIDATORS: usize = 1_000;
+
 /// Block header version number. Incremented for protocol upgrades.
 /// Version 1 is the initial protocol version with EVO-OMAP PoW and
 /// ed25519 signatures.

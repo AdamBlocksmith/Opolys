@@ -256,15 +256,25 @@ Unbonded stake enters the **unbonding queue** — a list of `PendingUnbond` entr
 
 ### Validator Activation
 
-Newly bonded validators start in `Bonding` status. They activate to `Active` status once their earliest bond entry has been confirmed for at least one full epoch (1,024 blocks). This is checked every block via `activate_matured_validators()` in `apply_block`. Only `Active` validators are eligible for block producer selection.
+Newly bonded validators start in `Bonding` status. They activate to `Active` status once their earliest bond entry has been confirmed for at least one full epoch (1,024 blocks) **and** the active set has a free slot. This is checked every block via `activate_matured_validators()` in `apply_block`. Only `Active` validators are eligible for block producer selection.
+
+**Maximum active validators: 1,000 (launch cap)**
+- `MAX_ACTIVE_VALIDATORS = 1_000` in `constants.rs`
+- New validators bond successfully and wait in `Bonding` status
+- They are activated when a slot opens (unbond or slash creates an opening)
+- No `ValidatorBond` transaction is ever rejected — all are queued fairly
+- Future upgrade path: soft-cap by weight (top-N by stake × seniority)
+- Can be raised via protocol upgrade after testnet validates scaling
 
 ### Double-Sign Slashing
 
-If a validator signs two different blocks at the same height, they are slashed:
-- All their bond entries are burned (stake set to 0)
-- Status changes to `Slashed`
-- Slashed stake is removed from circulation, not transferred to any treasury
-- Detection happens in `apply_block` via a `(height, producer) → block_hash` mapping
+If a validator signs two different blocks at the same height, they are **gradually slashed**:
+- **1st offense**: 10% stake burned, validator stays Active
+- **2nd offense**: 33% stake burned, validator suspended (Bonding for 1 epoch)
+- **3rd+ offense**: 100% stake burned, permanent `Slashed` status
+- Offense counter resets if validator goes 10,240 blocks clean after the last slash
+- Evidence is embedded in the next mined block (`Block.slash_evidence`) so every node can independently verify and apply the slash — no single node's memory is trusted
+- Detection happens in `apply_block`; slashing fires only when evidence appears on-chain
 - This is the **only** slashing condition — no liveness slashing, no governance
 
 ---

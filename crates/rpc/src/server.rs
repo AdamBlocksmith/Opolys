@@ -43,7 +43,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_http::cors::{Any, CorsLayer};
 
-use opolys_core::{FlakeAmount, Block, Transaction, ObjectId, Hash, FLAKES_PER_OPL, EPOCH};
+use opolys_core::{FlakeAmount, Block, Transaction, ObjectId, Hash, FLAKES_PER_OPL, EPOCH, MAX_ACTIVE_VALIDATORS};
 use opolys_consensus::account::AccountStore;
 use opolys_consensus::mempool::Mempool;
 use opolys_consensus::pos::ValidatorSet;
@@ -224,6 +224,9 @@ async fn handle_get_chain_info(state: &RpcState) -> Result<serde_json::Value, Js
         suggested_fee: chain.suggested_fee,
         suggested_fee_opl: format_flake(chain.suggested_fee),
         validator_count: validators.validator_count(),
+        active_validators: validators.total_active_validators(),
+        bonding_validators: validators.total_bonding_validators(),
+        max_active_validators: MAX_ACTIVE_VALIDATORS,
         bonded_stake: validators.total_bonded_stake(),
         phase: chain.phase.clone(),
         protocol_version: opolys_core::NETWORK_PROTOCOL_VERSION.to_string(),
@@ -653,7 +656,15 @@ pub struct ChainInfoResponse {
     pub circulating_supply_opl: String,
     pub suggested_fee: u64,
     pub suggested_fee_opl: String,
+    /// Total validators regardless of status (Active + Bonding + Slashed).
     pub validator_count: usize,
+    /// Validators currently in Active status (producing blocks, earning rewards).
+    pub active_validators: usize,
+    /// Validators in Bonding status — either waiting for epoch maturity or for
+    /// an Active slot to open (if active_validators == max_active_validators).
+    pub bonding_validators: usize,
+    /// Protocol cap on simultaneously Active validators (1,000 at launch).
+    pub max_active_validators: usize,
     pub bonded_stake: u64,
     pub phase: String,
     pub protocol_version: String,
