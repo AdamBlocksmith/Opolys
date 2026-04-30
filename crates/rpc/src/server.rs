@@ -499,9 +499,16 @@ async fn handle_send_transaction(state: &RpcState, params: &serde_json::Value) -
         .unwrap_or_default()
         .as_secs();
 
+    let sender = tx.sender.clone();
+    let account_nonce = state.accounts.read().await
+        .get_account(&sender)
+        .map(|a| a.nonce)
+        .unwrap_or(0);
+    let suggested_fee = state.chain.read().await.suggested_fee;
+
     {
         let mut mempool = state.mempool.write().await;
-        mempool.add_transaction(tx, priority, timestamp)
+        mempool.add_transaction(tx, priority, timestamp, account_nonce, suggested_fee)
             .map_err(|e| JsonRpcError::invalid_params(&format!("Mempool rejected: {:?}", e)))?;
     }
 

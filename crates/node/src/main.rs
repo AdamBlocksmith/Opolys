@@ -497,6 +497,9 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
             // Check for timed-out challenges every 5 seconds
             let mut challenge_check_interval =
                 tokio::time::interval(std::time::Duration::from_secs(5));
+            // Evict expired mempool transactions every 10 minutes
+            let mut mempool_evict_interval =
+                tokio::time::interval(std::time::Duration::from_secs(600));
             loop {
                 // Use tokio::select! to handle P2P events, local broadcasts, and delayed relays
                 tokio::select! {
@@ -568,6 +571,16 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
                             if let Err(e) = net.disconnect_peer(peer_id).await {
                                 tracing::debug!(peer = %peer_id, error = %e, "Failed to disconnect after challenge timeout");
                             }
+                        }
+                    }
+                    _ = mempool_evict_interval.tick() => {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        let evicted = net_node.mempool.write().await.evict_expired(now);
+                        if evicted > 0 {
+                            tracing::info!(evicted, "Evicted expired mempool transactions");
                         }
                     }
                 }
@@ -841,10 +854,16 @@ async fn handle_network_event(
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_secs();
+                    // Look up confirmed account nonce and suggested fee before taking the mempool lock.
+                    let account_nonce = node.accounts.read().await
+                        .get_account(&tx.sender)
+                        .map(|a| a.nonce)
+                        .unwrap_or(0);
+                    let suggested_fee = node.chain.read().await.suggested_fee;
                     {
                         // All valid txs enter the mempool immediately regardless of fee tier.
                         let mut mempool = node.mempool.write().await;
-                        match mempool.add_transaction(tx, priority, now) {
+                        match mempool.add_transaction(tx, priority, now, account_nonce, suggested_fee) {
                             Ok(()) => {
                                 tracing::debug!("Added gossiped transaction to mempool");
                             }
@@ -857,7 +876,7 @@ async fn handle_network_event(
 
                     // Fee-weighted P2P relay: high/normal fees relay immediately,
                     // low fees are queued and relayed after DELAY_LOW_FEE_MS.
-                    let suggested_fee = node.chain.read().await.suggested_fee;
+                    // (suggested_fee already fetched above)
                     let high_threshold = suggested_fee.saturating_mul(FEE_MULTIPLIER_HIGH);
                     if tx_fee >= high_threshold {
                         tracing::debug!(tx_fee, suggested_fee, "High-fee tx: relaying immediately");

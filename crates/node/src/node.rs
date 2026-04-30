@@ -1071,6 +1071,18 @@ impl OpolysNode {
             mempool.remove_transaction(&tx.tx_id);
         }
 
+        // FIX 3: evict expired mempool transactions at epoch boundaries
+        if block.header.height > 0 && block.header.height % opolys_core::EPOCH == 0 {
+            let evicted = mempool.evict_expired(now_secs);
+            if evicted > 0 {
+                tracing::info!(
+                    evicted,
+                    height = block.header.height,
+                    "Evicted expired mempool transactions at epoch boundary"
+                );
+            }
+        }
+
         chain.total_burned = chain.total_burned.saturating_add(total_fees_burned);
 
         // Process matured unbonding entries — return stake to accounts

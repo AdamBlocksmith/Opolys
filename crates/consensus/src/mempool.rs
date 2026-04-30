@@ -13,7 +13,12 @@
 use opolys_core::{
     Transaction, ObjectId, OpolysError,
     TX_MAX_SIZE_BYTES, MEMPOOL_MAX_SIZE_BYTES, MEMPOOL_MAX_TXS_PER_ACCOUNT,
+    MEMPOOL_TX_EXPIRY_SECS, MIN_FEE,
 };
+
+/// Maximum gap between an incoming transaction's nonce and the sender's
+/// current confirmed nonce. Prevents high-nonce slot squatting attacks.
+const MAX_NONCE_GAP: u64 = 10;
 use std::collections::HashMap;
 
 /// A single transaction entry in the mempool, annotated with its priority
@@ -59,19 +64,71 @@ impl Mempool {
         }
     }
 
+    /// Compute the effective minimum fee based on current pool congestion.
+    ///
+    /// Returns `MIN_FEE` under normal load, `2 × suggested_fee` above 80%,
+    /// and `10 × suggested_fee` above 95% to price out low-value spam.
+    pub fn effective_min_fee(&self, suggested_fee: u64) -> u64 {
+        let usage = self.total_size as f64 / MEMPOOL_MAX_SIZE_BYTES as f64;
+        if usage > 0.95 {
+            suggested_fee.saturating_mul(10)
+        } else if usage > 0.80 {
+            suggested_fee.saturating_mul(2)
+        } else {
+            MIN_FEE
+        }
+    }
+
+    /// Evict all transactions older than `MEMPOOL_TX_EXPIRY_SECS`.
+    /// Returns the number of entries removed.
+    pub fn evict_expired(&mut self, current_time: u64) -> usize {
+        let expired: Vec<ObjectId> = self.entries
+            .iter()
+            .filter(|(_, e)| {
+                current_time.saturating_sub(e.submitted_at) > MEMPOOL_TX_EXPIRY_SECS
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        let count = expired.len();
+        for id in expired {
+            self.remove_transaction(&id);
+        }
+        count
+    }
+
     /// Attempt to add a transaction to the mempool.
     ///
     /// Fails if:
+    /// - Fee is below `MIN_FEE` or the congestion-adjusted minimum.
     /// - The transaction exceeds `TX_MAX_SIZE_BYTES`.
     /// - The sender already has `MEMPOOL_MAX_TXS_PER_ACCOUNT` pending transactions.
+    /// - The nonce gap from the confirmed account nonce exceeds `MAX_NONCE_GAP`.
     /// - A transaction with the same ID already exists (duplicate).
+    /// - A same-nonce replacement is attempted with < 10% fee increase.
     /// - The pool cannot free enough space by eviction.
     pub fn add_transaction(
         &mut self,
         tx: Transaction,
         priority_score: f64,
         submitted_at: u64,
+        account_nonce: u64,
+        suggested_fee: u64,
     ) -> Result<(), OpolysError> {
+        // FIX 1: enforce minimum fee
+        if tx.fee < MIN_FEE {
+            return Err(OpolysError::InvalidTransaction(format!(
+                "Fee {} is below minimum fee {}", tx.fee, MIN_FEE
+            )));
+        }
+
+        // FIX 4: congestion pricing
+        let eff_min = self.effective_min_fee(suggested_fee);
+        if tx.fee < eff_min {
+            return Err(OpolysError::InvalidTransaction(format!(
+                "Fee {} below congestion minimum {}", tx.fee, eff_min
+            )));
+        }
+
         let tx_size = borsh::to_vec(&tx).map(|v| v.len()).unwrap_or(0);
         if tx_size > TX_MAX_SIZE_BYTES {
             return Err(OpolysError::InvalidTransaction(format!(
@@ -87,9 +144,33 @@ impl Mempool {
             )));
         }
 
-        // Reject duplicate transactions by ID.
+        // FIX 2: nonce gap protection — prevents high-nonce slot squatting
+        if tx.nonce > account_nonce + MAX_NONCE_GAP {
+            return Err(OpolysError::InvalidTransaction(format!(
+                "Nonce gap too large: tx nonce {} vs account nonce {}",
+                tx.nonce, account_nonce
+            )));
+        }
+
+        // Reject exact duplicate transactions by ID before the replacement check.
         if self.entries.contains_key(&tx.tx_id) {
             return Err(OpolysError::InvalidTransaction("Duplicate transaction".to_string()));
+        }
+
+        // FIX 5: same-nonce replacement — require a 10% fee bump to replace
+        let replacement = self.entries.values()
+            .find(|e| e.transaction.sender == tx.sender && e.transaction.nonce == tx.nonce)
+            .map(|e| (e.transaction.tx_id.clone(), e.priority_score as u64));
+
+        if let Some((old_id, old_priority)) = replacement {
+            let min_replacement_fee = old_priority.saturating_mul(11) / 10;
+            if tx.fee < min_replacement_fee {
+                return Err(OpolysError::InvalidTransaction(format!(
+                    "Replacement fee {} must be at least 10% higher than existing fee {}",
+                    tx.fee, old_priority
+                )));
+            }
+            self.remove_transaction(&old_id);
         }
 
         // If the pool is over capacity, try evicting lowest-priority entries.
@@ -202,7 +283,7 @@ mod tests {
 
     fn make_tx(sender_seed: &[u8], nonce: u64, fee: FlakeAmount) -> Transaction {
         Transaction {
-            tx_id: hash_to_object_id(format!("{:?}_{}", sender_seed, nonce).as_bytes()),
+            tx_id: hash_to_object_id(format!("{:?}_{}_{}", sender_seed, nonce, fee).as_bytes()),
             sender: hash_to_object_id(sender_seed),
             action: TransactionAction::Transfer {
                 recipient: hash_to_object_id(b"recipient"),
@@ -224,7 +305,7 @@ mod tests {
         let tx = make_tx(b"alice", 0, 100);
         let tx_id = tx.tx_id.clone();
 
-        mempool.add_transaction(tx, 1.0, 0).unwrap();
+        mempool.add_transaction(tx, 1.0, 0, 0, 1).unwrap();
         assert_eq!(mempool.transaction_count(), 1);
 
         let removed = mempool.remove_transaction(&tx_id);
@@ -239,9 +320,9 @@ mod tests {
         let tx2 = make_tx(b"bob", 0, 100);
         let tx3 = make_tx(b"charlie", 0, 75);
 
-        mempool.add_transaction(tx1, 1.0, 0).unwrap();
-        mempool.add_transaction(tx2, 3.0, 0).unwrap();
-        mempool.add_transaction(tx3, 2.0, 0).unwrap();
+        mempool.add_transaction(tx1, 1.0, 0, 0, 1).unwrap();
+        mempool.add_transaction(tx2, 3.0, 0, 0, 1).unwrap();
+        mempool.add_transaction(tx3, 2.0, 0, 0, 1).unwrap();
 
         let ordered = mempool.get_ordered_transactions();
         assert_eq!(ordered[0].fee, 100);
@@ -255,8 +336,8 @@ mod tests {
         let tx = make_tx(b"alice", 0, 100);
         let tx2 = tx.clone();
 
-        mempool.add_transaction(tx, 1.0, 0).unwrap();
-        assert!(mempool.add_transaction(tx2, 1.0, 0).is_err());
+        mempool.add_transaction(tx, 1.0, 0, 0, 1).unwrap();
+        assert!(mempool.add_transaction(tx2, 1.0, 0, 0, 1).is_err());
     }
 
     #[test]
@@ -265,10 +346,59 @@ mod tests {
         for i in 0..(MEMPOOL_MAX_TXS_PER_ACCOUNT + 1) {
             let tx = make_tx(b"alice", i as u64, 100);
             if i < MEMPOOL_MAX_TXS_PER_ACCOUNT {
-                assert!(mempool.add_transaction(tx, 1.0, 0).is_ok());
+                // account_nonce=0, nonce gap checked: i <= 0+10 for first 11, then gap exceeded
+                // Use i as account_nonce proxy so nonce is always within gap
+                assert!(mempool.add_transaction(tx, 1.0, 0, i.saturating_sub(1) as u64, 1).is_ok());
             } else {
-                assert!(mempool.add_transaction(tx, 1.0, 0).is_err());
+                assert!(mempool.add_transaction(tx, 1.0, 0, i.saturating_sub(1) as u64, 1).is_err());
             }
         }
+    }
+
+    #[test]
+    fn min_fee_enforced() {
+        let mut mempool = Mempool::new();
+        let tx = make_tx(b"alice", 0, 0);
+        assert!(mempool.add_transaction(tx, 0.0, 0, 0, 1).is_err());
+    }
+
+    #[test]
+    fn nonce_gap_rejected() {
+        let mut mempool = Mempool::new();
+        let tx = make_tx(b"alice", MAX_NONCE_GAP + 1, 100);
+        assert!(mempool.add_transaction(tx, 1.0, 0, 0, 1).is_err());
+    }
+
+    #[test]
+    fn nonce_gap_accepted_at_boundary() {
+        let mut mempool = Mempool::new();
+        let tx = make_tx(b"alice", MAX_NONCE_GAP, 100);
+        assert!(mempool.add_transaction(tx, 1.0, 0, 0, 1).is_ok());
+    }
+
+    #[test]
+    fn same_nonce_replacement_requires_fee_bump() {
+        let mut mempool = Mempool::new();
+        let tx1 = make_tx(b"alice", 0, 100);
+        let tx2 = make_tx(b"alice", 0, 109); // 9% bump — not enough
+        let tx3 = make_tx(b"alice", 0, 111); // 11% bump — accepted
+
+        mempool.add_transaction(tx1, 100.0, 0, 0, 1).unwrap();
+        assert!(mempool.add_transaction(tx2, 109.0, 0, 0, 1).is_err());
+        assert!(mempool.add_transaction(tx3, 111.0, 0, 0, 1).is_ok());
+        assert_eq!(mempool.transaction_count(), 1);
+    }
+
+    #[test]
+    fn evict_expired_removes_old_txs() {
+        let mut mempool = Mempool::new();
+        let tx = make_tx(b"alice", 0, 100);
+        mempool.add_transaction(tx, 1.0, 0, 0, 1).unwrap();
+        assert_eq!(mempool.transaction_count(), 1);
+
+        // Time well past expiry
+        let evicted = mempool.evict_expired(MEMPOOL_TX_EXPIRY_SECS + 1);
+        assert_eq!(evicted, 1);
+        assert_eq!(mempool.transaction_count(), 0);
     }
 }
