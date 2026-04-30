@@ -189,6 +189,20 @@ pub fn compute_pow_hash_value(header: &BlockHeader) -> Option<u64> {
     Some(u64::from_be_bytes(hash.0[..8].try_into().unwrap_or([0u8; 8])))
 }
 
+/// Compute a deterministic EVO-OMAP hash for the memory-fingerprinting challenge protocol.
+///
+/// Uses light verification (on-demand node reconstruction) over synthetic input bytes
+/// derived from (height, nonce). Answering correctly requires the 256 MiB dataset.
+pub fn compute_challenge_hash(height: u64, nonce: u64) -> u64 {
+    let epoch_seed = evo_omap::compute_epoch_seed(height);
+    let mut dataset = evo_omap::LightDataset::new(&epoch_seed);
+    let mut input = [0u8; 16];
+    input[..8].copy_from_slice(&height.to_be_bytes());
+    input[8..].copy_from_slice(&nonce.to_be_bytes());
+    let hash = evo_omap::evo_omap_hash_light(&mut dataset, &input, height, nonce);
+    u64::from_be_bytes(hash.0[..8].try_into().unwrap_or([0u8; 8]))
+}
+
 /// Convenience function: mine a block without persistent caching.
 ///
 /// Creates a temporary `PowContext` for one-off mining. For production mining,

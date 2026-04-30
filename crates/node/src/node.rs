@@ -40,6 +40,19 @@ use tokio::sync::RwLock;
 use clap::Parser;
 use ed25519_dalek::{Signer, Verifier};
 
+/// A record of a banned peer, persisted across restarts.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct BanRecord {
+    /// Short description of why the peer was banned.
+    pub reason: String,
+    /// Unix timestamp when the ban was issued.
+    pub banned_at: u64,
+    /// Number of times this peer has been banned (escalates duration).
+    pub ban_count: u32,
+    /// True for severe violations (fake PoW, invalid signature) — never expires.
+    pub permanent: bool,
+}
+
 /// Command-line arguments for the Opolys node.
 #[derive(Parser, Debug)]
 #[command(name = "opolys", about = "Opolys blockchain node")]
@@ -367,6 +380,17 @@ pub struct OpolysNode {
     /// Peers that have announced an active validator identity via the identify protocol.
     /// Keyed by libp2p PeerId; value is their on-chain ObjectId (used for look-ups).
     pub validator_peers: Arc<RwLock<HashMap<PeerId, ObjectId>>>,
+    /// Persistent ban list keyed by PeerId string. Loaded from data_dir/banned_peers.json
+    /// on startup and saved after every new ban.
+    pub banned_peers: Arc<RwLock<HashMap<String, BanRecord>>>,
+}
+
+fn load_ban_list_from_disk(data_dir: &str) -> HashMap<String, BanRecord> {
+    let path = std::path::Path::new(data_dir).join("banned_peers.json");
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
+        Err(_) => HashMap::new(),
+    }
 }
 
 impl OpolysNode {
@@ -473,6 +497,8 @@ impl OpolysNode {
             }
         };
 
+        let banned_peers = load_ban_list_from_disk(&config.data_dir);
+
         OpolysNode {
             chain: Arc::new(RwLock::new(chain_state)),
             accounts: Arc::new(RwLock::new(accounts)),
@@ -485,6 +511,7 @@ impl OpolysNode {
             signing_key,
             pending_slash_evidence: Arc::new(RwLock::new(Vec::new())),
             validator_peers: Arc::new(RwLock::new(HashMap::new())),
+            banned_peers: Arc::new(RwLock::new(banned_peers)),
         }
     }
 
@@ -498,6 +525,71 @@ impl OpolysNode {
             }
         }
         false
+    }
+
+    /// Return true if `peer_id_str` is currently banned (permanent or unexpired temp ban).
+    pub async fn is_peer_banned(&self, peer_id_str: &str) -> bool {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let banned = self.banned_peers.read().await;
+        if let Some(record) = banned.get(peer_id_str) {
+            if record.permanent {
+                return true;
+            }
+            let duration_secs: u64 = match record.ban_count {
+                1 => 3_600,        // 1 hour
+                2 => 86_400,       // 24 hours
+                3 => 604_800,      // 7 days
+                _ => u64::MAX,
+            };
+            return now < record.banned_at.saturating_add(duration_secs);
+        }
+        false
+    }
+
+    /// Ban a peer. Escalates ban duration on repeat offenses; permanent=true never expires.
+    pub async fn ban_peer(&self, peer_id_str: &str, reason: &str, permanent: bool) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let ban_count = {
+            let banned = self.banned_peers.read().await;
+            banned.get(peer_id_str).map(|r| r.ban_count).unwrap_or(0) + 1
+        };
+        let is_permanent = permanent || ban_count >= 4;
+        {
+            let mut banned = self.banned_peers.write().await;
+            banned.insert(peer_id_str.to_string(), BanRecord {
+                reason: reason.to_string(),
+                banned_at: now,
+                ban_count,
+                permanent: is_permanent,
+            });
+        }
+        tracing::warn!(
+            peer = peer_id_str,
+            reason,
+            permanent = is_permanent,
+            ban_count,
+            "Peer banned"
+        );
+        self.save_ban_list().await;
+    }
+
+    async fn save_ban_list(&self) {
+        let path = std::path::Path::new(&self.config.data_dir).join("banned_peers.json");
+        let banned = self.banned_peers.read().await;
+        match serde_json::to_string_pretty(&*banned) {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(&path, &json) {
+                    tracing::warn!(error = %e, "Failed to save ban list");
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "Failed to serialize ban list"),
+        }
     }
 
     /// Attempt to mine a new block using EVO-OMAP.

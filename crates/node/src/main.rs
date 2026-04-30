@@ -31,9 +31,6 @@ const MAX_BLOCKS_PER_PEER_PER_SECOND: u32 = 10;
 const MAX_TXS_PER_PEER_PER_SECOND: u32 = 50;
 /// Maximum future block height accepted via gossip (relative to current tip).
 const MAX_HEIGHT_LOOKAHEAD: u64 = 10;
-/// Strike penalty applied when a peer sends a block whose PoW hash fails the
-/// difficulty target. Deliberate forgery — large enough to trigger immediate ban.
-const VEIN_YIELD_PENALTY: f64 = 50.0;
 /// Fee multiplier for immediate network-wide relay (high-priority tier).
 const FEE_MULTIPLIER_HIGH: u64 = 10;
 /// Delay in milliseconds before relaying a transaction whose fee is below
@@ -485,14 +482,21 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
         Some(tokio::spawn(async move {
             tracing::info!("P2P network event loop started");
             let mut first_peer_seen = false;
-            // FIX 4: per-peer strike counts (ban after 3 invalid blocks)
+            // Per-peer strike counts (accumulated from bad blocks)
             let mut peer_strikes: std::collections::HashMap<PeerId, u32> = std::collections::HashMap::new();
-            // FIX 1: per-peer gossip rate limit state
+            // Per-peer gossip rate limit state (rolling 1-second window)
             let mut peer_rate_limits: std::collections::HashMap<PeerId, PeerRateLimit> = std::collections::HashMap::new();
             // Low-fee tx queue: (raw bytes, time enqueued). Drained after DELAY_LOW_FEE_MS.
             let mut pending_low_fee_txs: Vec<(Vec<u8>, std::time::Instant)> = Vec::new();
+            // FIX 7: peers that have passed the memory-fingerprinting challenge
+            let mut verified_peers: std::collections::HashSet<PeerId> = std::collections::HashSet::new();
+            // FIX 7: (expected_hash, sent_at) for pending outbound challenges
+            let mut pending_challenges: std::collections::HashMap<PeerId, (u64, std::time::Instant)> = std::collections::HashMap::new();
             let mut low_fee_drain_interval =
                 tokio::time::interval(std::time::Duration::from_millis(1_000));
+            // Check for timed-out challenges every 5 seconds
+            let mut challenge_check_interval =
+                tokio::time::interval(std::time::Duration::from_secs(5));
             loop {
                 // Use tokio::select! to handle P2P events, local broadcasts, and delayed relays
                 tokio::select! {
@@ -510,6 +514,8 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
                                     event, &net_node, &net_chain_info, &net, &net_data_dir,
                                     &mut peer_strikes, &mut peer_rate_limits,
                                     &mut pending_low_fee_txs,
+                                    &mut verified_peers,
+                                    &mut pending_challenges,
                                 ).await;
                             }
                             None => {
@@ -544,6 +550,25 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
                             }
                         }
                         pending_low_fee_txs = remaining;
+                    }
+                    _ = challenge_check_interval.tick() => {
+                        // FIX 7: disconnect peers whose challenge timed out
+                        let timeout = std::time::Duration::from_secs(
+                            opolys_networking::CHALLENGE_TIMEOUT_SECS
+                        );
+                        let expired: Vec<PeerId> = pending_challenges
+                            .iter()
+                            .filter(|(_, (_, sent_at))| sent_at.elapsed() >= timeout)
+                            .map(|(peer, _)| *peer)
+                            .collect();
+                        for peer_id in expired {
+                            pending_challenges.remove(&peer_id);
+                            tracing::warn!(peer = %peer_id, "Memory challenge timed out — 1h temp ban");
+                            net_node.ban_peer(&peer_id.to_string(), "challenge_timeout", false).await;
+                            if let Err(e) = net.disconnect_peer(peer_id).await {
+                                tracing::debug!(peer = %peer_id, error = %e, "Failed to disconnect after challenge timeout");
+                            }
+                        }
                     }
                 }
             }
@@ -615,10 +640,18 @@ async fn handle_network_event(
     peer_strikes: &mut std::collections::HashMap<PeerId, u32>,
     peer_rate_limits: &mut std::collections::HashMap<PeerId, PeerRateLimit>,
     pending_low_fee_txs: &mut Vec<(Vec<u8>, std::time::Instant)>,
+    verified_peers: &mut std::collections::HashSet<PeerId>,
+    pending_challenges: &mut std::collections::HashMap<PeerId, (u64, std::time::Instant)>,
 ) {
     match event {
         opolys_networking::OpolysNetworkEvent::GossipBlock { data, source } => {
-            // Validator peers get 2x rate limits and 50% reduced strike penalties
+            // FIX 7: drop gossip from unverified peers
+            if !verified_peers.contains(&source) {
+                tracing::debug!(peer = %source, "Dropping block gossip from unverified peer");
+                return;
+            }
+
+            // Validators get 2x rate limits; all peers get full penalties (FIX 1)
             let is_validator = node.is_validator_peer(&source).await;
             let block_limit = if is_validator {
                 MAX_BLOCKS_PER_PEER_PER_SECOND * 2
@@ -626,7 +659,7 @@ async fn handle_network_event(
                 MAX_BLOCKS_PER_PEER_PER_SECOND
             };
 
-            // FIX 1: Per-peer gossip rate limiting
+            // Per-peer gossip rate limiting
             {
                 let rl = peer_rate_limits.entry(source).or_insert_with(PeerRateLimit::new);
                 rl.maybe_reset();
@@ -672,35 +705,28 @@ async fn handle_network_event(
                     // PoS blocks (no pow_proof) skip this entirely.
                     if block.header.pow_proof.is_some() {
                         let target = opolys_consensus::difficulty_to_target(block.header.difficulty);
-                        // target == 0 means difficulty >= 64, which is astronomically hard;
-                        // skip the pre-check and let apply_block() / validate_block() handle it.
+                        // target == 0 means difficulty >= 64; skip and let apply_block handle it.
                         if target > 0 {
                             match opolys_consensus::compute_pow_hash_value(&block.header) {
                                 Some(hash_val) if hash_val > target => {
+                                    // FIX 3: Fake PoW is unambiguously malicious — immediate permanent ban.
                                     tracing::warn!(
                                         peer = %source,
                                         hash_val,
                                         target,
-                                        difficulty = block.header.difficulty,
-                                        is_validator,
-                                        "Dropped block: PoW hash does not meet difficulty target"
+                                        "Fake PoW block — immediate permanent ban"
                                     );
-                                    let raw_penalty = VEIN_YIELD_PENALTY;
-                                    let penalty = if is_validator { (raw_penalty * 0.5) as u32 } else { raw_penalty as u32 };
-                                    let strikes = peer_strikes.entry(source).or_insert(0);
-                                    *strikes += penalty;
-                                    if *strikes >= 3 {
-                                        tracing::warn!(peer = %source, is_validator, "Disconnecting peer after vein yield penalty");
-                                        if let Err(e) = net.disconnect_peer(source).await {
-                                            tracing::debug!(peer = %source, error = %e, "Failed to disconnect peer");
-                                        }
-                                        peer_strikes.remove(&source);
-                                        peer_rate_limits.remove(&source);
+                                    node.ban_peer(&source.to_string(), "fake_pow", true).await;
+                                    if let Err(e) = net.disconnect_peer(source).await {
+                                        tracing::debug!(peer = %source, error = %e, "Failed to disconnect peer");
                                     }
+                                    peer_strikes.remove(&source);
+                                    peer_rate_limits.remove(&source);
+                                    verified_peers.remove(&source);
+                                    pending_challenges.remove(&source);
                                     return;
                                 }
                                 None => {
-                                    // pow_proof too short to extract nonce — malformed block
                                     tracing::warn!(peer = %source, "Dropped block: malformed PoW proof");
                                     return;
                                 }
@@ -726,18 +752,22 @@ async fn handle_network_event(
                             }
                         }
                         Err(e) => {
-                            tracing::warn!(peer = %source, error = %e, is_validator, "Failed to apply P2P block");
-                            // FIX 4 + validator discount: validators get 50% reduced penalties
-                            let penalty = if is_validator { (1.0_f64 * 0.5) as u32 } else { 1 };
+                            tracing::warn!(peer = %source, error = %e, "Failed to apply P2P block");
+                            // FIX 1: full penalty regardless of validator status
+                            // FIX 2: anonymous peers banned after 2 strikes; validators after 3
+                            let max_strikes = if is_validator { 3u32 } else { 2u32 };
                             let strikes = peer_strikes.entry(source).or_insert(0);
-                            *strikes += penalty;
-                            if *strikes >= 3 {
-                                tracing::warn!(peer = %source, "Disconnecting peer after 3 invalid blocks");
+                            *strikes += 1;
+                            if *strikes >= max_strikes {
+                                tracing::warn!(peer = %source, strikes = *strikes, "Banning peer after repeated invalid blocks");
+                                node.ban_peer(&source.to_string(), "invalid_block", false).await;
                                 if let Err(e) = net.disconnect_peer(source).await {
                                     tracing::debug!(peer = %source, error = %e, "Failed to disconnect peer");
                                 }
                                 peer_strikes.remove(&source);
                                 peer_rate_limits.remove(&source);
+                                verified_peers.remove(&source);
+                                pending_challenges.remove(&source);
                             }
                         }
                     }
@@ -748,6 +778,12 @@ async fn handle_network_event(
             }
         }
         opolys_networking::OpolysNetworkEvent::GossipTransaction { data, source } => {
+            // FIX 7: drop gossip from unverified peers
+            if !verified_peers.contains(&source) {
+                tracing::debug!(peer = %source, "Dropping tx gossip from unverified peer");
+                return;
+            }
+
             let is_validator = node.is_validator_peer(&source).await;
             let tx_limit = if is_validator {
                 MAX_TXS_PER_PEER_PER_SECOND * 2
@@ -776,10 +812,25 @@ async fn handle_network_event(
 
             match borsh::from_slice::<opolys_core::Transaction>(&data) {
                 Ok(tx) => {
-                    // Basic verification: check tx_id, signature type, public_key binding, and chain_id
                     let expected_chain_id = if node.config.testnet { opolys_core::TESTNET_CHAIN_ID } else { opolys_core::MAINNET_CHAIN_ID };
                     if let Err(e) = opolys_execution::verify_transaction(&tx, expected_chain_id) {
-                        tracing::warn!(peer = %source, tx_id = %tx.tx_id.to_hex(), error = %e, "Rejected invalid transaction from peer");
+                        if matches!(e, opolys_core::OpolysError::InvalidSignature) {
+                            // FIX 5: invalid ed25519 signature — immediate permanent ban
+                            tracing::warn!(peer = %source, "Invalid signature: immediate permanent ban");
+                            node.ban_peer(&source.to_string(), "invalid_signature", true).await;
+                            let _ = net.disconnect_peer(source).await;
+                            verified_peers.remove(&source);
+                            pending_challenges.remove(&source);
+                        } else if e.to_string().contains("chain_id") {
+                            // FIX 6: wrong chain_id — 24h ban
+                            tracing::warn!(peer = %source, error = %e, "Wrong chain_id: 24h ban");
+                            node.ban_peer(&source.to_string(), "wrong_chain_id", false).await;
+                            let _ = net.disconnect_peer(source).await;
+                            verified_peers.remove(&source);
+                            pending_challenges.remove(&source);
+                        } else {
+                            tracing::warn!(peer = %source, tx_id = %tx.tx_id.to_hex(), error = %e, "Rejected invalid transaction from peer");
+                        }
                         return;
                     }
 
@@ -831,9 +882,25 @@ async fn handle_network_event(
         opolys_networking::OpolysNetworkEvent::PeerConnected { peer_id, addr } => {
             tracing::info!(peer = %peer_id, "Peer connected");
 
+            // FIX 4: reject banned peers immediately
+            if node.is_peer_banned(&peer_id.to_string()).await {
+                tracing::warn!(peer = %peer_id, "Banned peer connected, disconnecting");
+                let _ = net.disconnect_peer(peer_id).await;
+                return;
+            }
+
             // Cache the dialable address so future startups can reconnect without bootstrap.
             if let Some(multiaddr) = addr {
                 save_peer_to_cache(data_dir, &multiaddr.to_string());
+            }
+
+            // FIX 7: send memory-fingerprinting challenge before accepting gossip
+            let height = node.chain.read().await.current_height;
+            let nonce: u64 = rand::random();
+            let expected_hash = opolys_consensus::compute_challenge_hash(height, nonce);
+            pending_challenges.insert(peer_id, (expected_hash, std::time::Instant::now()));
+            if let Err(e) = net.send_challenge(peer_id, height, nonce).await {
+                tracing::debug!(peer = %peer_id, error = %e, "Failed to send memory challenge");
             }
 
             // Request blocks this peer has that we don't.
@@ -847,6 +914,14 @@ async fn handle_network_event(
             }
         }
         opolys_networking::OpolysNetworkEvent::PeerIdentified { peer_id, agent_version } => {
+            // FIX 7: non-opolys peers (wallets, light clients) don't have the dataset;
+            // skip the challenge and add them to verified immediately.
+            if !agent_version.contains("/opolys/") {
+                verified_peers.insert(peer_id);
+                pending_challenges.remove(&peer_id);
+                tracing::debug!(peer = %peer_id, agent = %agent_version, "Non-opolys peer verified (no challenge required)");
+            }
+
             // Check if the peer's agent string contains a validator announcement.
             // Format: "opolys-node/1.0 validator:<hex_object_id>"
             if let Some(rest) = agent_version.split("validator:").nth(1) {
@@ -880,8 +955,10 @@ async fn handle_network_event(
             tracing::info!(peer = %peer_id, "Peer disconnected");
             peer_strikes.remove(&peer_id);
             peer_rate_limits.remove(&peer_id);
-            // Step 6: clean up validator peer tracking on disconnect
             node.validator_peers.write().await.remove(&peer_id);
+            // FIX 7: clean up challenge state
+            verified_peers.remove(&peer_id);
+            pending_challenges.remove(&peer_id);
         }
         opolys_networking::OpolysNetworkEvent::SyncRequestReceived { peer_id, request_id, request } => {
             tracing::info!(
@@ -913,6 +990,35 @@ async fn handle_network_event(
             let response = SyncResponse { blocks, from_height };
             if let Err(e) = net.respond_sync_request(request_id, response).await {
                 tracing::warn!(peer = %peer_id, error = %e, "Failed to send sync response");
+            }
+        }
+        opolys_networking::OpolysNetworkEvent::ChallengeRequestReceived { peer_id, request_id, height, nonce } => {
+            // FIX 7: compute EVO-OMAP hash and reply to prove we have the dataset
+            let hash_val = opolys_consensus::compute_challenge_hash(height, nonce);
+            if let Err(e) = net.respond_challenge(request_id, hash_val).await {
+                tracing::debug!(peer = %peer_id, error = %e, "Failed to respond to memory challenge");
+            } else {
+                tracing::debug!(peer = %peer_id, "Responded to memory challenge");
+            }
+        }
+        opolys_networking::OpolysNetworkEvent::ChallengeResponseReceived { peer_id, hash_val } => {
+            // FIX 7: verify the peer's response against the expected hash
+            if let Some((expected_hash, _)) = pending_challenges.remove(&peer_id) {
+                if hash_val == expected_hash {
+                    verified_peers.insert(peer_id);
+                    tracing::info!(peer = %peer_id, "Peer passed memory challenge — verified");
+                } else {
+                    tracing::warn!(peer = %peer_id, "Peer failed memory challenge — wrong hash, permanent ban");
+                    node.ban_peer(&peer_id.to_string(), "failed_memory_challenge", true).await;
+                    if let Err(e) = net.disconnect_peer(peer_id).await {
+                        tracing::debug!(peer = %peer_id, error = %e, "Failed to disconnect after challenge failure");
+                    }
+                    peer_strikes.remove(&peer_id);
+                    peer_rate_limits.remove(&peer_id);
+                }
+            } else {
+                // Unsolicited response — peer may have been verified already or timed out
+                tracing::debug!(peer = %peer_id, "Received unexpected challenge response");
             }
         }
         opolys_networking::OpolysNetworkEvent::SyncResponseReceived { peer_id, response } => {

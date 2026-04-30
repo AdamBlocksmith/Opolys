@@ -4,6 +4,7 @@
 //! (peer discovery), identify (protocol handshake), ping (liveness),
 //! and request-response (block sync) into a single `NetworkBehaviour`.
 
+use crate::challenge::{ChallengeRequest, ChallengeResponse};
 use crate::sync::{SyncRequest, SyncResponse};
 use libp2p::kad::store::MemoryStore;
 use libp2p::request_response;
@@ -49,6 +50,9 @@ pub struct OpolysBehaviour {
 
     /// Request-response protocol for block/header sync.
     pub request_response: request_response::cbor::Behaviour<SyncRequest, SyncResponse>,
+
+    /// Request-response protocol for memory-fingerprinting challenge/response.
+    pub challenge_rr: request_response::cbor::Behaviour<ChallengeRequest, ChallengeResponse>,
 }
 
 /// Events emitted by the network behaviour, consumed by the node.
@@ -104,6 +108,21 @@ pub enum OpolysNetworkEvent {
         peer_id: libp2p::PeerId,
         request_id: InboundRequestId,
         request: SyncRequest,
+    },
+
+    /// A memory-fingerprinting challenge request arrived (we must respond).
+    /// Call `network.respond_challenge(request_id, hash_val)` to reply.
+    ChallengeRequestReceived {
+        peer_id: libp2p::PeerId,
+        request_id: InboundRequestId,
+        height: u64,
+        nonce: u64,
+    },
+
+    /// A memory-fingerprinting challenge response arrived (we must verify).
+    ChallengeResponseReceived {
+        peer_id: libp2p::PeerId,
+        hash_val: u64,
     },
 }
 
