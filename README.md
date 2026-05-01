@@ -17,10 +17,10 @@ Opolys encodes these properties directly into consensus:
 | **Gold is lost over time** | All transaction fees are burned | Every fee permanently destroys OPL from circulation. Shipwrecks, lost jewelry, melted coins — Opolys models this as fee burning. The circulating supply can *shrink*. |
 | **Gold mining is a physical process** | EVO-OMAP memory-hard proof-of-work | Mining requires 256 MiB of memory and data-dependent computation. No shortcut, no ASIC cheat. Like digging a shaft — you have to move the rock. |
 | **Gold ore varies in richness** | Vein yield: `1 + ln(target / hash_int)` | A lucky gold strike yields more than a poor one. Vein yield models this: most blocks earn ~2x base reward, exceptional ones earn more. The math is natural, not scheduled. |
-| **Gold production rate is known** | BASE_REWARD = 312 OPL, derived from world gold production | 3,630 tonnes of gold are mined annually (~116.7 million troy ounces). Divided by 374,256 blocks per year = 312 OPL per block at minimum difficulty. |
+| **Gold production rate is known** | BASE_REWARD = 332 OPL (testnet), derived from world gold production | 3,630 tonnes of gold are mined annually (~116.7 million troy ounces). Divided by 350,640 blocks per year = 332 OPL per block at minimum difficulty. Mainnet BASE_REWARD is set from live data at genesis ceremony. |
 | **Gold must be refined before use** | Difficulty must be overcome to earn reward | You can't just claim gold exists — you have to prove you did the work. EVO-OMAP requires a valid proof-of-work with at least D leading zero bits. |
 | **Gold held in vaults earns trust** | Validator staking with seniority | Bonded OPL gives validators block production rights. Senior validators earn slightly more (logarithmic weight), just as trusted vaults command higher fees. But the marginal bonus shrinks over time — no permanent aristocracy. |
-| **Gold can be unvaulted** | FIFO unbonding with 1-block-epoch delay | Unbonding OPL is like withdrawing gold from a vault. It takes time (1,024 blocks ≈ 24 hours). During the delay, you still earn rewards. The oldest deposits are withdrawn first. |
+| **Gold can be unvaulted** | FIFO unbonding with 1-epoch delay | Unbonding OPL is like withdrawing gold from a vault. It takes time (960 blocks = exactly 24 hours). During the delay, you still earn rewards. The oldest deposits are withdrawn first. |
 | **Gold bars are uniform** | Every OPL is identical. One sub-unit (Flake). No tokens, no assets, no governance tokens | There's no "pennyweight" gold or "grain" gold in Opolys. 1 OPL = 1,000,000 Flakes. Period. The chain tracks one asset. |
 | **Gold supply is self-regulating** | Natural equilibrium — no governance needed | When fees are burned faster than rewards are issued, supply shrinks. When mining is too easy, difficulty rises and issuance drops. The protocol never needs a vote. |
 
@@ -30,23 +30,23 @@ Opolys encodes these properties directly into consensus:
 
 ## The Gold Derivation
 
-The base block reward of 312 OPL is not an arbitrary number. It comes directly from real-world gold production data:
+The testnet base block reward of 332 OPL is not an arbitrary number. It comes directly from real-world gold production data:
 
 ```
 Annual gold production           ≈ 3,630 tonnes          (USGS/WGC 2024-2025)
 Convert to troy ounces           ≈ 116,707,041 oz        (3,630 × 32,150.7)
-Blocks per year                  = 374,256                (365.25 × 1,024)
-                                                                      365.25 × 86,400
-Blocks per year (alternate)      = 365.25 × 86,400 / 84.375 = 374,256
-BASE_REWARD                      = floor(116,707,041 / 374,256) = 312 OPL
+Blocks per year                  = 350,640                (365.25 × 86,400 / 90)
+BASE_REWARD (testnet)            = floor(116,707,041 / 350,640) = 332 OPL
 ```
 
-At difficulty 1 (minimum), each block earns 312 OPL. As difficulty rises, the per-block reward naturally shrinks — `block_reward = (BASE_REWARD / difficulty) × vein_yield`. This mirrors real gold: the easy veins are found first, and every subsequent ounce costs more to extract.
+For **mainnet**, `BASE_REWARD` is not hardcoded — it is derived during the genesis ceremony from live LBMA/USGS/WGC data at launch time and embedded in the genesis block attestation. This anchors the supply model to real gold market data on the exact day the network starts.
 
-The block time of 84,375 ms (84.375 seconds) is chosen so that exactly 1,024 blocks complete in 24 hours:
+At difficulty 1 (minimum), each block earns 332 OPL. As difficulty rises, the per-block reward naturally shrinks — `block_reward = (BASE_REWARD / difficulty) × vein_yield`. This mirrors real gold: the easy veins are found first, and every subsequent ounce costs more to extract.
+
+The block time of 90,000 ms (90 seconds) is chosen so that exactly 960 blocks complete in 24 hours:
 
 ```
-1,024 × 84,375 ms = 86,400,000 ms = 86,400 seconds = 24 hours
+960 × 90,000 ms = 86,400,000 ms = 86,400 seconds = 24 hours
 ```
 
 ---
@@ -67,39 +67,49 @@ cd Opolys
 cargo build --release
 ```
 
-### Run a Node
+### Run a Testnet Node
+
+The fastest way to test Opolys locally:
 
 ```bash
-# Start with default settings (port 4170, RPC on 4171)
-cargo run --release
+# One-command testnet (builds node, generates miner key, starts mining)
+./scripts/testnet-bootstrap.sh          # Start with defaults
+./scripts/testnet-bootstrap.sh --reset  # Reset chain data and start fresh
+```
 
-# Custom ports and data directory
-cargo run --release -- --port 5000 --rpc-port 5001 --data-dir /path/to/data
+Three genesis accounts are pre-funded with 10,000 OPL each.
+Testnet keys are at: `testnet-data/testnet-keys.txt`
 
-# Connect to a bootstrap peer
-cargo run --release -- --bootstrap /ip4/1.2.3.4/tcp/4170
-
-# Enable mining (disabled by default)
-cargo run --release -- --mine
-
-# Enable validation (PoS block production)
-cargo run --release -- --validate --key-file /path/to/miner.key
-
-# Testnet mode (3 pre-funded accounts × 10,000 OPL)
+```bash
+# Manual testnet start
 cargo run --release -- --testnet --mine --validate --key-file testnet-data/miner.key
 
-# Adjust log level
-cargo run --release -- --log-level debug
+# Testnet with debug logging and custom ports
+cargo run --release -- --testnet --mine --port 5000 --rpc-port 5001 --log-level debug
+
+# Testnet isolated (no bootstrap peers)
+cargo run --release -- --testnet --mine --no-bootstrap
 ```
 
-### One-Command Testnet
+### Run a Mainnet Node
+
+Mainnet requires a genesis ceremony attestation file:
 
 ```bash
-./scripts/testnet-bootstrap.sh          # Start with defaults
-./scripts/testnet-bootstrap.sh --reset   # Reset chain data and start fresh
-```
+# Run the genesis ceremony to generate attestation
+cargo run --bin genesis-ceremony -- \
+  --gold-price-usd-cents 328700 \
+  --annual-production-tonnes 3630 \
+  --above-ground-tonnes 219891 \
+  --output genesis-params.json
 
-This script builds the node, generates a miner key, and starts a testnet node with mining and validation enabled. Three genesis accounts are pre-funded with 10,000 OPL each.
+# Start mainnet node with ceremony output
+cargo run --release -- \
+  --genesis-params genesis-params.json \
+  --mine \
+  --key-file /path/to/miner.key \
+  --rpc-api-key <secret>
+```
 
 ### CLI Flags
 
@@ -108,13 +118,17 @@ This script builds the node, generates a miner key, and starts a testnet node wi
 | `--port` | 4170 | P2P listen port |
 | `--rpc-port` | 4171 | JSON-RPC server port |
 | `--data-dir` | `./data` | RocksDB storage directory |
-| `--bootstrap` | _(none)_ | Bootstrap peer address |
-| `--log-level` | `info` | Log level (trace, debug, info, warn, error) |
+| `--bootstrap` | _(none)_ | Bootstrap peer address(es), comma-separated |
+| `--no-bootstrap` | disabled | Skip DNS seeds and peer cache; only dial `--bootstrap` peers |
+| `--log-level` | `info` | Log level: trace, debug, info, warn, error |
 | `--mine` | disabled | Enable PoW mining loop |
 | `--validate` | disabled | Enable PoS block production |
 | `--key-file` | _(none)_ | Path to 32-byte ed25519 seed file |
-| `--testnet` | disabled | Pre-funded genesis accounts |
+| `--testnet` | disabled | Pre-funded genesis accounts (DO NOT use in production) |
+| `--genesis-params` | _(none)_ | Path to genesis ceremony JSON (required for mainnet) |
 | `--no-rpc` | disabled | Disable JSON-RPC server |
+| `--rpc-listen-addr` | `127.0.0.1` | RPC listen address (`0.0.0.0` to expose publicly) |
+| `--rpc-api-key` | _(none)_ | API key for write/mining RPC methods |
 
 ### Wallet CLI (`opl`)
 
@@ -310,7 +324,7 @@ valid if: hash_value_u64 ≤ target
 
 ### Difficulty Retargeting
 
-Every `EPOCH` (1,024 blocks ≈ 24 hours):
+Every `EPOCH` (960 blocks = exactly 24 hours):
 
 ```
 new_difficulty = old_difficulty × expected_time_ms / actual_time_ms
@@ -433,11 +447,16 @@ ValidatorUnbond { amount: FlakeAmount }
 
 Oldest entries are consumed first. If the unbond amount exceeds an entry's stake, that entry is fully consumed and the remainder comes from the next entry. Residuals keep their original `bonded_at_timestamp` (preserving seniority). Entries with the same `bonded_at_timestamp` are auto-merged.
 
-After unbonding, stake enters the **unbonding queue** for `UNBONDING_DELAY_BLOCKS` (1,024 blocks ≈ 24 hours). During the delay, the unbonding stake still earns rewards. Once matured, it's automatically credited back to the sender.
+After unbonding, stake enters the **unbonding queue** for `UNBONDING_DELAY_BLOCKS` (960 blocks = exactly 24 hours). During the delay, the unbonding stake still earns rewards. Once matured, it's automatically credited back to the sender.
 
 ### Validator Activation
 
-Newly bonded validators start in `Bonding` status. They activate to `Active` after their earliest bond entry has been confirmed for at least one full epoch (1,024 blocks). Only `Active` validators are eligible for block production.
+Newly bonded validators start in `Bonding` status. They activate to `Active` after their earliest bond entry has been confirmed for at least one full epoch (960 blocks). Only `Active` validators are eligible for block production.
+
+**Validator caps:**
+- **Active set**: 5,000 validators maximum (can be raised via protocol upgrade after testnet)
+- **Total registered**: up to 524,288 validators can be in `Bonding`/`Waiting` status
+- New validators bond successfully and queue fairly — no `ValidatorBond` is ever rejected
 
 ### Block Producer Selection
 
@@ -683,10 +702,10 @@ Every block applied to the chain must pass these checks:
 | `CURRENCY_SMALLEST_UNIT` | `"Flake"` | Name of 1/1,000,000 OPL |
 | `FLAKES_PER_OPL` | 1,000,000 | Fundamental unit ratio |
 | `DECIMAL_PLACES` | 6 | Always 6 decimal places |
-| `BASE_REWARD` | 312,000,000 Flakes (312 OPL) | Gold-derived block reward base |
+| `BASE_REWARD` | 332,000,000 Flakes (332 OPL) testnet; mainnet from genesis ceremony | Gold-derived block reward base |
 | `MIN_DIFFICULTY` | 1 | Mathematical floor (not a cap) |
-| `EPOCH` | 1,024 blocks | Unified epoch for retarget, dataset regen, unbonding |
-| `UNBONDING_DELAY_BLOCKS` | 1,024 | One epoch delay for unbonding |
+| `EPOCH` | 960 blocks | Unified epoch for retarget, dataset regen, unbonding (= exactly 24 hours) |
+| `UNBONDING_DELAY_BLOCKS` | 960 | One epoch delay for unbonding |
 | `MIN_FEE` | 1 Flake | Floor for market-driven fees |
 | `MIN_BOND_STAKE` | 1,000,000 Flakes (1 OPL) | Minimum per new bond entry |
 | `BLOCK_VERSION` | 1 | Current protocol version |
@@ -694,8 +713,9 @@ Every block applied to the chain must pass these checks:
 | `EXTENSION_TYPE_NONE` | 0 | No extension data |
 | `EXTENSION_TYPE_ROLLUP` | 1 | Rollup data (reserved) |
 | `POS_FINALITY_BLOCKS` | 3 | PoS finality depth |
-| `BLOCK_TARGET_TIME_MS` | 84,375 | 84.375 seconds per block |
-| `BLOCK_TARGET_TIME_SECS` | 84 | Rounded for convenience |
+| `BLOCK_TARGET_TIME_MS` | 90,000 | 90 seconds per block |
+| `BLOCK_TARGET_TIME_SECS` | 90 | 90 seconds per block |
+| `MAX_ACTIVE_VALIDATORS` | 5,000 | Active validator set cap |
 | `NETWORK_PROTOCOL_VERSION` | `"1.0.0"` | Protocol identifier |
 | `DEFAULT_LISTEN_PORT` | 4170 | P2P listen port |
 | `MAX_TRANSACTIONS_PER_BLOCK` | 10,000 | Max transactions per block |
@@ -775,6 +795,26 @@ In `--testnet` mode, three deterministic testnet accounts are pre-funded with 10
 
 ---
 
+## Security Features
+
+Opolys implements layered P2P defenses to protect honest nodes from adversarial peers:
+
+| Feature | What It Does |
+|---|---|
+| **Eclipse attack protection** | Mining waits for ≥3 outbound peers before starting. All peers being attacker-controlled cannot force a fake chain on a miner. |
+| **Subnet diversity** | Max 3 peers per /24 IPv4 subnet. Prevents geographic concentration of adversarial peers from a single AS/datacenter. |
+| **Memory-hard challenge** | Every new Opolys peer must pass an EVO-OMAP memory challenge before gossip is accepted. Prevents Sybil flooding with lightweight fake nodes. |
+| **Immediate permanent ban** | Fake PoW blocks and invalid ed25519 signatures trigger permanent bans — zero tolerance for cryptographically invalid data. |
+| **Graduated strike system** | Anonymous peers banned after 2 invalid blocks; known validators after 3. Escalating ban durations (1h → 24h → 7d → permanent). |
+| **Fake PoW pre-check** | Vein yield pre-check filters gossip blocks before expensive `apply_block()` lock acquisition, preventing cheap CPU-waste attacks. |
+| **Wrong chain_id ban** | Transactions from a different chain (replay attacks) result in 24h ban. |
+| **Rate limiting** | Per-peer gossip rate limits: 10 blocks/sec and 50 txs/sec (doubled for known validators). |
+| **Fee-weighted relay** | Low-fee transactions are delayed 5 seconds before P2P relay to reduce low-cost mempool spam. |
+| **Mempool DoS protection** | 100 MiB cap, 50 tx/account limit, 24h expiry, nonce-gap filtering, epoch-boundary eviction. |
+| **Persistent ban list** | Bans survive node restarts (stored in `data/banned_peers.json`). |
+
+---
+
 ## What Opolys Is Not
 
 - **Not a smart contract platform** — no WASM, no VM, no object model. The chain tracks one asset: OPL.
@@ -812,12 +852,12 @@ In `--testnet` mode, three deterministic testnet accounts are pre-funded with 10
 | Storage | **DONE** | RocksDB with all column families, atomic state saves |
 | Execution | **DONE** | Transaction dispatcher (Transfer, Bond, Unbond) with fee burning |
 | Wallet | **DONE** | BIP-39, SLIP-0010, ed25519 signing, CLI (`opl`) |
-| RPC | **DONE** | JSON-RPC 2.0 with mining endpoints, chain queries |
+| RPC | **DONE** | JSON-RPC 2.0 with mining endpoints, chain queries, API key auth |
 | Node | **DONE** | Full node with mining loop, block application, P2P event loop |
 | Networking | **DONE** | libp2p gossip/sync/discovery wired to node |
-| Staking & PoS | **IN PROGRESS** | Validator bonding, block production, `--validate`, `--key-file`, public_key in Account |
-| Security hardening | **IN PROGRESS** | Block validation, tx_id verification, chain sync |
-| Testnet | **PLANNED** | Public testnet deployment |
+| Staking & PoS | **DONE** | Validator bonding, graduated slash, PoS block production, `--validate` |
+| Security hardening | **DONE** | Eclipse protection, subnet diversity, DoS limits, memory challenge |
+| Testnet | **READY** | Code complete; deploy and run public testnet |
 | Mainnet | **PLANNED** | Genesis ceremony and launch |
 
 ---

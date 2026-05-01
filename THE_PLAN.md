@@ -70,10 +70,10 @@ From `crates/core/src/constants.rs`:
 | `CURRENCY_SMALLEST_UNIT` | `"Flake"` | Name of 1/1,000,000 OPL |
 | `FLAKES_PER_OPL` | `1_000_000` | Fundamental unit ratio |
 | `DECIMAL_PLACES` | `6` | Always 6 decimal places |
-| `BASE_REWARD` | `312,000,000` Flakes (312 OPL) | Gold-derived block reward base |
+| `BASE_REWARD` | `332,000,000` Flakes (332 OPL) testnet; mainnet from genesis ceremony | Gold-derived block reward base |
 | `MIN_DIFFICULTY` | `1` | Mathematical floor (not a cap) |
-| `EPOCH` | `1,024` blocks | Unified epoch for retarget, dataset regen, unbonding |
-| `UNBONDING_DELAY_BLOCKS` | `1,024` | One epoch delay for unbonding |
+| `EPOCH` | `960` blocks (= exactly 24 hours at 90 s/block) | Unified epoch for retarget, dataset regen, unbonding |
+| `UNBONDING_DELAY_BLOCKS` | `960` | One epoch delay for unbonding |
 | `MIN_FEE` | `1` Flake | Floor for market-driven fees |
 | `MIN_BOND_STAKE` | `1,000,000` Flakes (1 OPL) | Minimum per new bond entry |
 | `BLOCK_VERSION` | `1` | Current block header version |
@@ -81,7 +81,9 @@ From `crates/core/src/constants.rs`:
 | `EXTENSION_TYPE_NONE` | `0` | No extension data |
 | `EXTENSION_TYPE_ROLLUP` | `1` | Rollup data (reserved) |
 | `POS_FINALITY_BLOCKS` | `3` | PoS finality depth |
-| `BLOCK_TARGET_TIME_SECS` | `84` | One block every ~84 seconds |
+| `BLOCK_TARGET_TIME_MS` | `90,000` | 90 seconds per block |
+| `BLOCK_TARGET_TIME_SECS` | `90` | 90 seconds per block |
+| `MAX_ACTIVE_VALIDATORS` | `5,000` | Active validator set cap |
 | `NETWORK_PROTOCOL_VERSION` | `"1.0.0"` | Protocol version string |
 | `DEFAULT_LISTEN_PORT` | `4170` | P2P listen port |
 
@@ -140,8 +142,9 @@ Opolys uses **hybrid PoW/PoS** with a smooth transition:
 |---|---|---|
 | Annual gold production | 3,630 tonnes | USGS/WGC 2024-2025 avg |
 | Annual production in troy oz | ~116,707,041 | 3,630 × 32,150.7 |
-| Blocks per year | 374,256 | 365.25 × 1,024 |
-| **BASE_REWARD** | **312 OPL** | floor(116,707,041 / 374,256) |
+| Blocks per year | 350,640 | 365.25 × 86,400 / 90 |
+| **BASE_REWARD (testnet)** | **332 OPL** | floor(116,707,041 / 350,640) |
+| **BASE_REWARD (mainnet)** | **from genesis ceremony** | derived from live gold data at launch |
 
 ### Block Reward Formula
 
@@ -165,14 +168,13 @@ There is **no hard cap**. Issuance shrinks as difficulty rises (like gold gettin
 ### Genesis Difficulty
 
 Genesis difficulty: 7 (mainnet), 4 (testnet)
-- At difficulty 7, single Ryzen 7 7700 parallel produces ~91s blocks
-- First retarget at block 1,024 (~26 hours) self-corrects to target
-- Difficulty 1 at genesis would allow 319,000 OPL to be mined in
-  23 minutes by a single miner — unacceptable supply distortion
+- At difficulty 7, single Ryzen 7 7700 parallel produces ~86.5s blocks (vs 90s target)
+- First retarget at block 960 (~24 hours) self-corrects automatically
+- Difficulty 1 at genesis would allow 332 OPL × ~5,000 cheap blocks = unacceptable supply distortion
 
 ### Retarget Algorithm
 
-Every `EPOCH` (1,024) blocks:
+Every `EPOCH` (960 blocks = exactly 24 hours):
 
 ```
 new_difficulty = old_difficulty × (expected_time / actual_time)
@@ -252,14 +254,15 @@ Withdraws `amount` OPL using **FIFO order** — oldest entries consumed first:
 3. Residuals keep their original `bonded_at_timestamp`
 4. Auto-merge entries with the same `bonded_at_timestamp`
 
-Unbonded stake enters the **unbonding queue** — a list of `PendingUnbond` entries with `(account, amount, matures_at)` fields. After `UNBONDING_DELAY_BLOCKS` (1,024 blocks = one epoch), matured entries are automatically credited back to the sender's account by `process_matured_unbonds()` during `apply_block`.
+Unbonded stake enters the **unbonding queue** — a list of `PendingUnbond` entries with `(account, amount, matures_at)` fields. After `UNBONDING_DELAY_BLOCKS` (960 blocks = one epoch = exactly 24 hours), matured entries are automatically credited back to the sender's account by `process_matured_unbonds()` during `apply_block`.
 
 ### Validator Activation
 
-Newly bonded validators start in `Bonding` status. They activate to `Active` status once their earliest bond entry has been confirmed for at least one full epoch (1,024 blocks) **and** the active set has a free slot. This is checked every block via `activate_matured_validators()` in `apply_block`. Only `Active` validators are eligible for block producer selection.
+Newly bonded validators start in `Bonding` status. They activate to `Active` status once their earliest bond entry has been confirmed for at least one full epoch (960 blocks) **and** the active set has a free slot. This is checked every block via `activate_matured_validators()` in `apply_block`. Only `Active` validators are eligible for block producer selection.
 
 **Maximum active validators: 5,000 (launch cap)**
 - `MAX_ACTIVE_VALIDATORS = 5_000` in `constants.rs`
+- Maximum total registered validators (Bonding + Waiting + Active): 524,288 (2^19)
 - New validators bond successfully and wait in `Bonding` status
 - They are activated when a slot opens (unbond or slash creates an opening)
 - No `ValidatorBond` transaction is ever rejected — all are queued fairly
@@ -553,19 +556,19 @@ Opolys/
 | 4: Storage | **DONE** | RocksDB with all column families |
 | 5: Execution | **DONE** | Transaction dispatcher (Transfer, Bond, Unbond) |
 | 6: Wallet | **DONE** | BIP-39, SLIP-0010, ed25519 signing |
-| 7: RPC | **DONE** | JSON-RPC 2.0 with mining endpoints |
+| 7: RPC | **DONE** | JSON-RPC 2.0 with mining endpoints, API key auth |
 | 8: Node | **DONE** | Full node with mining loop and block application |
 | 9: Networking | **DONE** | P2P gossip/sync/discovery wired to node |
-| 10: Staking | **IN PROGRESS** | `--validate` flag, public_key in Account, PoS signing |
-| 11: Security | **IN PROGRESS** | Block validation, tx_id verification, chain sync |
-| 12: Testnet | **PLANNED** | Deploy and test |
+| 10: Staking | **DONE** | `--validate`, graduated slash, PoS block production |
+| 11: Security | **DONE** | Eclipse protection, subnet diversity, DoS limits, memory challenge |
+| 12: Testnet | **READY** | Code complete; deploy and run public testnet |
 | 13: Mainnet | **PLANNED** | Genesis ceremony and launch |
 
 ---
 
 ## 21. Test Count
 
-**162+ tests passing** across all crates (1 mining integration test `#[ignore]`d for requiring real PoW).
+**Full test suite passing** across all crates — including the mining integration test (no longer ignored). Run with `cargo test --manifest-path ~/Desktop/Opolys/Cargo.toml`.
 
 ---
 
