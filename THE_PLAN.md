@@ -29,10 +29,9 @@ This document is the single source of truth for the entire project.
 20. [Build Sequence](#20-build-sequence)
 21. [Test Count](#21-test-count)
 22. [Block & Transaction Validation](#22-block--transaction-validation)
-23. [New Constants](#23-new-constants)
-24. [Key Formulas Reference](#key-formulas-reference)
-25. [Security Audit & Bug Tracker](#25-security-audit--bug-tracker)
-26. [Implementation Plan — Pass 1](#26-implementation-plan--pass-1)
+23. [Key Formulas Reference](#key-formulas-reference)
+24. [Security Audit & Bug Tracker](#24-security-audit--bug-tracker)
+25. [Implementation Plan — Pass 1](#25-implementation-plan--pass-1)
 
 ---
 
@@ -90,7 +89,54 @@ From `crates/core/src/constants.rs`:
 | `BLOCK_TARGET_TIME_SECS` | `90` | 90 seconds per block |
 | `MAX_ACTIVE_REFINERS` | `5,000` | Active refiner set cap |
 | `NETWORK_PROTOCOL_VERSION` | `"1.0.0"` | Protocol version string |
-| `DEFAULT_LISTEN_PORT` | `4170` | P2P listen port |
+| `DEFAULT_LISTEN_PORT` | `4,170` | P2P listen port |
+| `MAINNET_CHAIN_ID` | `1` | Cross-chain replay protection |
+| `MAX_TRANSACTIONS_PER_BLOCK` | `10,000` | Max transactions per block |
+| `MAX_BLOCK_SIZE_BYTES` | `10,485,760` (10 MiB) | Max serialized block size |
+| `MAX_TX_DATA_SIZE_BYTES` | `1,024` (1 KiB) | Max transaction data field |
+| `MAX_FUTURE_BLOCK_TIME_SECS` | `300` (5 min) | Max future block time skew |
+| `MAX_SLASH_EVIDENCE_PER_BLOCK` | `10` | DoS cap on ed25519 verifications per block |
+| `GENESIS_DIFFICULTY` | `7` | Initial difficulty at launch |
+
+### Mempool Constants
+
+| Constant | Value | Description |
+|---|---|---|
+| `MEMPOOL_MAX_SIZE_BYTES` | `100,000,000` (100 MiB) | Max mempool size in bytes |
+| `MEMPOOL_MAX_TXS_PER_ACCOUNT` | `50` | Max pending transactions per sender |
+| `MEMPOOL_TX_EXPIRY_SECS` | `86,400` (24 hours) | Transaction expiry time |
+| `TX_MAX_SIZE_BYTES` | `100,000` (~100 KiB) | Max single transaction size |
+| `MAX_NONCE_GAP` | `10` | Reject transactions more than 10 nonces ahead |
+
+### Mempool Congestion Pricing
+
+When the mempool exceeds capacity, minimum fees increase automatically:
+
+| Mempool Usage | Min Fee Multiplier | Effective Min Fee |
+|---|---|---|
+| 0–80% | 1× | 1 Flake |
+| 80–95% | 2× | 2 Flakes |
+| >95% | 10× | 10 Flakes |
+
+### Mempool Same-Nonce Replacement
+
+A transaction replacing another with the same nonce must pay at least 10% more: `min_replacement_fee = old_priority × 11 / 10`.
+
+### Networking Constants
+
+| Constant | Value | Description |
+|---|---|---|
+| `MAX_INBOUND_CONNECTIONS` | `50` | Max inbound P2P connections |
+| `MAX_OUTBOUND_CONNECTIONS` | `50` | Max outbound P2P connections |
+| `MAX_PEER_COUNT` | `200` | Max total peers |
+| `SYNC_MAX_BLOCKS_PER_REQUEST` | `500` | Max blocks per sync response |
+| `SYNC_MAX_HEADERS_PER_REQUEST` | `2,000` | Max headers per sync response |
+| `SYNC_REQUEST_TIMEOUT_SECS` | `30` | Sync request timeout |
+| `SYNC_PARALLEL_PEER_COUNT` | `3` | Parallel sync peers |
+| `KAD_BUCKET_SIZE` | `20` | Kademlia DHT bucket size |
+| `PING_INTERVAL_SECS` | `30` | Ping interval |
+| `PING_TIMEOUT_SECS` | `20` | Ping timeout |
+| `GOSSIP_MAX_MESSAGE_SIZE_BYTES` | `5,242,880` (5 MiB) | Max gossip message size (see L7) |
 
 ---
 
@@ -252,14 +298,16 @@ entry_weight = entry.stake × (1 + ln(1 + entry.age_years))
 
 Logarithmic seniority means older entries earn more per-coin, but the marginal gain diminishes — preventing permanent dominance by early stakers.
 
-### PoS vs PoW Block Reward
+### Refiner vs Miner Block Reward
 
 ```
-PoS block reward = BASE_REWARD / difficulty × 1.0 (flat, no vein yield)
-PoW block reward = BASE_REWARD / difficulty × vein_yield (1.0x to ~10x)
+refiner_block_reward = BASE_REWARD / difficulty × 1.0 (flat, no vein yield)
+miner_block_reward    = BASE_REWARD / difficulty × vein_yield (1.0x to ~10x)
 ```
 
-Refiners earn steady predictable income (like gold vaults), miners earn variable income based on luck (like gold miners). PoS blocks pass `hash_int = 0` to `compute_vein_yield()`, which returns the 1.0x floor by design.
+Refiners earn steady predictable income (like gold vaults), miners earn variable income based on luck (like gold miners). Refiner blocks pass `hash_int = 0` to `compute_vein_yield()`, which returns the 1.0x floor by design.
+
+Genesis block (height 0) has zero reward: `block_reward = 0`.
 
 ### Block Producer Selection
 
@@ -403,6 +451,14 @@ Block {
 
 `Blake3-256(header_bytes)` where `pow_proof` and `refiner_signature` are set to `None` before hashing. The `version`, `suggested_fee`, `extension_root`, and `producer` fields are included in the hash.
 
+### Transaction Root
+
+`compute_transaction_root` computes a Merkle-like root over all transactions. Each transaction contributes `Blake3(tx_id || fee || nonce)` — the fee and nonce are committed to prevent tampering with fee replacements.
+
+### State Root
+
+`Blake3(account_root || refiner_root || total_issued || total_burned || height)` — the state root commits to the full post-execution state: all accounts, the refiner set, total issued OPL, total burned OPL, and the block height.
+
 ### Mutual Exclusivity
 
 A block must have **exactly one** of `pow_proof` or `refiner_signature`:
@@ -499,7 +555,7 @@ SLIP-0044 coin type 999 for OPL. Single ed25519 key handles both transaction sig
 - **Gossip**: Gossipsub for block/transaction propagation (`opolys/tx/v1`, `opolys/block/v1`)
 - **Sync**: CBOR request-response protocol for block download (`/opolys/sync/1`)
 - **Attestation** (Pass 2): `opolys/attestation/v1` gossipsub topic
-- **Ping**: Liveness checks with 30s interval, 10s timeout
+- **Ping**: Liveness checks with 30s interval, 20s timeout
 - **Challenge**: Memory-fingerprinting challenge before accepting gossip
 
 ---
@@ -593,7 +649,7 @@ Opolys/
 | 9: Networking | **DONE** | P2P gossip/sync/discovery wired to node |
 | 10: Staking | **DONE** | `--refine`, 100% slash on double-sign, timeout-based refiner block production |
 | 11: Security | **DONE** | Eclipse protection, subnet diversity, DoS limits, memory challenge |
-| 12: Pass 1 | **IN PROGRESS** | Phase A DONE (ec0df9b). Phase B–E remaining security & protocol fixes |
+| 12: Pass 1 | **IN PROGRESS** | Phase A DONE (ec0df9b), M19 DONE (2cf09c2). Phase B–E remaining security & protocol fixes |
 | 13: Pass 2 | **PLANNED** | Attestations, reliability score, block confidence |
 | 14: Mainnet | **READY** | Genesis ceremony and launch (after Pass 1+2) |
 
@@ -601,7 +657,13 @@ Opolys/
 
 ## 21. Test Count
 
-**Full test suite passing** across all crates. Run with `cargo test --workspace`.
+**122 tests passing** across 4 crates (as of commit 2cf09c2):
+- `opolys-consensus`: 95 tests
+- `opolys-core`: 13 tests
+- `opolys-crypto`: 8 tests
+- `opolys-storage`: 6 tests
+
+Run with `cargo test --workspace`.
 
 ---
 
@@ -618,7 +680,7 @@ Every block applied to the chain must pass these checks:
 5. **Difficulty**: Must match the expected next difficulty from retargeting
 6. **Transaction count**: Must not exceed `MAX_TRANSACTIONS_PER_BLOCK` (10,000)
 7. **Block size**: Must not exceed `MAX_BLOCK_SIZE_BYTES` (10 MiB)
-8. **Transaction root**: Must match `compute_transaction_root(block.transactions)`
+8. **Transaction root**: Must match `compute_transaction_root(block.transactions)`. Computed as `Blake3(tx_id || fee || nonce)` per transaction, then a Merkle-like root over all entries.
 9. **No duplicate transactions**: Each `tx_id` must be unique within the block
 10. **Transaction data size**: Each `tx.data` must not exceed `MAX_TX_DATA_SIZE_BYTES` (1 KiB)
 11. **Fee minimum**: Each transaction fee must be at least `MIN_FEE` (1 Flake)
@@ -633,20 +695,17 @@ Every block applied to the chain must pass these checks:
 3. **signature_type**: Must be `SIGNATURE_TYPE_ED25519` (0)
 4. **ed25519 signature**: Verified against stored public key. `Blake3(public_key) == sender` must hold.
 
----
+### Mempool Inclusion Rules
 
-## 23. New Constants
-
-| Constant | Value | Description |
-|---|---|---|
-| `MAX_TRANSACTIONS_PER_BLOCK` | 10,000 | Max transactions per block |
-| `MAX_BLOCK_SIZE_BYTES` | 10,485,760 | 10 MiB max block size |
-| `MAX_TX_DATA_SIZE_BYTES` | 1,024 | 1 KiB max transaction data field |
-| `MAX_FUTURE_BLOCK_TIME_SECS` | 300 | 5 min max future block time skew |
+1. **Fee minimum**: Must meet `MIN_FEE` (1 Flake), or `2× MIN_FEE` if mempool >80% full, or `10× MIN_FEE` if >95% full
+2. **Nonce gap**: Must be within `MAX_NONCE_GAP` (10) of the account's current nonce
+3. **Same-nonce replacement**: Must pay at least 10% more than the existing transaction's priority
+4. **Per-account limit**: Max `MEMPOOL_MAX_TXS_PER_ACCOUNT` (50) pending transactions per sender
+5. **Expiry**: Transactions expire after `MEMPOOL_TX_EXPIRY_SECS` (86,400 = 24 hours)
 
 ---
 
-## Key Formulas Reference
+## 23. Key Formulas Reference
 
 ### Block Reward
 ```
@@ -663,18 +722,64 @@ effective_difficulty = max(retarget, consensus_floor, MIN_DIFFICULTY)
 ```
 new_difficulty = old_difficulty × expected_time / actual_time
 ```
-No maximum clamp. Floor is MIN_DIFFICULTY (1).
+No maximum clamp. Floor is MIN_DIFFICULTY (1). Uses truncating integer division (see M18 for bias). If `actual_time == 0` (timestamp collision), difficulty spikes to `old_difficulty × 4` as a safety measure.
 
 ### Consensus Floor
 ```
 consensus_floor = total_issued / bonded_stake
 ```
+Returns 0 when `bonded_stake = 0` (no refiners yet).
+
+### Genesis Block Reward
+```
+block_reward = 0  // for height == 0
+```
+The genesis block produces no OPL. First OPL enters circulation at block 1.
+
+### State Root
+```
+state_root = Blake3(account_root || refiner_root || total_issued || total_burned || height)
+```
+Where `account_root` is the Merkle-like root of all account states, and `refiner_root` is the root of the serialized refiner set.
 
 ### Suggested Fee
 ```
 suggested_fee = EMA(total_fees_burned, previous_suggested_fee)
               = (burned + 9 × old) / 10, floored at MIN_FEE
 ```
+**Note (bug H3):** Currently uses `total_fees` (declared) instead of `total_fees_burned` (actually burned). Should be computed after the transaction execution loop.
+
+### Mempool Congestion Pricing
+
+The mempool enforces dynamic minimum fees based on capacity usage:
+
+| Mempool Usage | Min Fee Multiplier | Effective Min Fee |
+|---|---|---|
+| 0–80% | 1× | 1 Flake |
+| 80–95% | 2× | 2 Flakes |
+| >95% | 10× | 10 Flakes |
+
+### Same-Nonce Replacement
+
+A transaction replacing another with the same sender and nonce must pay at least 10% more:
+```
+min_replacement_fee = old_priority × 11 / 10
+```
+
+### Nonce Gap Limit
+
+Transactions with `nonce > account.nonce + MAX_NONCE_GAP` (10) are rejected to prevent slot squatting.
+
+### Ban Escalation
+
+Misbehaving peers are banned with escalating durations:
+
+| Offense Count | Ban Duration |
+|---|---|
+| 1st | 1 hour |
+| 2nd | 24 hours |
+| 3rd | 7 days |
+| 4th+ | Permanent |
 
 ### Refiner Weight
 ```
@@ -684,10 +789,10 @@ entry_weight = entry.stake × (1 + ln(1 + entry.age_years))
 ### Stake Coverage
 ```
 coverage_milli = (bonded_stake × 1000) / total_issued   // integer, no float
-pow_share_amount = block_reward × (1000 - coverage_milli) / 1000
-pos_share_amount = block_reward - pow_share_amount
+miner_share_amount = block_reward × (1000 - coverage_milli) / 1000
+refiner_share_amount = block_reward - miner_share_amount
 ```
-PoW share goes to the block producer. PoS share is distributed among active refiners proportional to weight.
+Miner share goes to the block producer. Refiner share is distributed among active refiners proportional to weight.
 
 ### EVO-OMAP PoW Verification
 ```
@@ -699,7 +804,7 @@ EVO-OMAP difficulty means **leading zero bits** in the SHA3-256 output, NOT a u6
 
 ---
 
-## 25. Security Audit & Bug Tracker
+## 24. Security Audit & Bug Tracker
 
 Every bug below includes: **What it is**, **Why it matters**, and **How to fix it**.
 
@@ -940,11 +1045,9 @@ Difficulty 1 means "1 leading zero bit", so ~50% of random hashes pass. Correct 
 **What it is:** `old_difficulty * expected_time / actual_time` truncates toward zero, creating systematic downward bias over many epochs.
 **How to fix:** Use rounding division: `((numerator + actual/2) / actual)`.
 
-#### M19: Dead code: compute_pow_share/compute_pos_share use f64
-**Location:** `emission.rs:174-193`
-**Status:** OPEN
-**What it is:** These f64 functions are never called from production code. The actual reward split uses integer `coverage_milli` in `node.rs:958-966`.
-**How to fix:** Delete both functions and their tests.
+#### ~~M19: Dead code: compute_pow_share/compute_pos_share use f64~~ — **FIXED** (2cf09c2)
+**Location:** ~~`emission.rs:174-193`~~
+Deleted. The actual reward split uses integer `coverage_milli` in `node.rs`. The dead f64 functions and their two tests (`pow_pos_transition_continuous`, `reward_split_follows_stake_coverage`) were removed.
 
 #### ~~M20: chain.base_reward always BASE_REWARD~~ — **BY DESIGN**
 
@@ -968,7 +1071,7 @@ Difficulty 1 means "1 leading zero bit", so ~50% of random hashes pass. Correct 
 
 ---
 
-### LOW (9)
+### LOW (10)
 
 #### L1: Debug derives on Bip39Mnemonic and KeyPair
 **Location:** `bip39.rs:39`, `key.rs:60`
@@ -1015,9 +1118,15 @@ Challenge hash doesn't include PeerId, allowing precomputed answers. Fix: `blake
 **Status:** OPEN
 `.expect()` on OsRng can panic. Change return type to `Result<Self, WalletError>`.
 
+#### L10: Stale comments say 1,024 blocks/epoch
+**Location:** `difficulty.rs:5`, `constants.rs:17`
+**Status:** OPEN
+Comments say "every EPOCH blocks (1,024)" and "1,024 blocks/epoch" but `EPOCH = 960`. Code uses the correct value; only the comments are wrong.
+**How to fix:** Update comments to say "960 blocks/epoch".
+
 ---
 
-## 26. Implementation Plan — Pass 1
+## 25. Implementation Plan — Pass 1
 
 ### Phase A: Rename — ✓ DONE (commit ec0df9b)
 
@@ -1071,7 +1180,7 @@ Challenge hash doesn't include PeerId, allowing precomputed answers. Fix: `blake
 36. M22: Propagate `apply_bond` credit errors
 37. M23: Wallet RPC default to `https://`
 38. M14: Acquire write lock before height check (fix TOCTOU)
-39. M19: Delete dead `compute_pow_share`/`compute_pos_share` f64 functions from `emission.rs`
+39. ~~M19: Delete dead `compute_pow_share`/`compute_pos_share` f64 functions~~ — **DONE** (2cf09c2)
 
 ### Phase F: Low / Cleanup
 
@@ -1082,6 +1191,7 @@ Challenge hash doesn't include PeerId, allowing precomputed answers. Fix: `blake
 44. L7: Raise gossip max message to match `MAX_BLOCK_SIZE_BYTES`
 45. L8: Challenge protocol bind to PeerId
 46. L9: `Bip39Mnemonic::generate()` → return `Result`
+47. L10: Update stale comments saying 1,024 blocks/epoch → 960
 
 ### Phase G: Pass 2 (After Pass 1 is tested and working)
 
@@ -1095,7 +1205,7 @@ Challenge hash doesn't include PeerId, allowing precomputed answers. Fix: `blake
 
 ---
 
-## 27. Recent Changes
+## 26. Recent Changes
 
 ### ec0df9b — Refiner Rename & Protocol Simplification (Phase A)
 
@@ -1113,7 +1223,39 @@ Challenge hash doesn't include PeerId, allowing precomputed answers. Fix: `blake
 
 5. **POS_FINALITY_BLOCKS and consecutive_pos_blocks deleted** — No finality tracking until attestations are implemented in Pass 2.
 
-6. **Remaining cleanup** — `produce_pos_block()` in `node.rs:643` and `main.rs:465` should be renamed to `produce_refiner_block()` as a naming artifact from the incomplete sed pass. Not a protocol change.
+6. **Remaining cleanup noted** — `produce_pos_block()` needed renaming to `produce_refiner_block()`. Done in 2cf09c2.
+
+### 2cf09c2 — Cleanup & Terminology (post-Phase A)
+
+**Bug M19 fixed + terminology cleanup.** All 93 consensus tests passing (2 removed — the deleted f64 functions' tests).
+
+**What changed:**
+
+1. **`produce_pos_block` → `produce_refiner_block`** — The last remaining `pos` function name in `node.rs` and `main.rs` has been renamed.
+
+2. **Dead code removed (M19)** — `compute_pow_share()` and `compute_pos_share()` (f64 functions in `emission.rs`) were never called from production code. The actual reward split uses integer `coverage_milli` arithmetic in `node.rs`. Both functions and their tests (`pow_pos_transition_continuous`, `reward_split_follows_stake_coverage`) deleted.
+
+3. **`finalized_height` annotated as placeholder** — Added comments on the `finalized_height` field in `ChainState`, `PersistedChainState`, and `ChainInfoResponse` noting it is always 0 until finality via attestations is implemented (Pass 2).
+
+4. **Terminology sweep** — All remaining "PoS block"/"PoW block" comments updated to "refiner block"/"mined block". Variable names `pow_share`/`pos_share` renamed to `miner_share`/`refiner_share`.
+
+### Full Formula Audit (post-2cf09c2)
+
+A comprehensive audit of all consensus-critical formulas and constants in the codebase against THE_PLAN.md was performed. The following updates were made to THE_PLAN.md:
+
+- **Added to Section 3 (Constants):** `MAINNET_CHAIN_ID`, `MAX_TRANSACTIONS_PER_BLOCK`, `MAX_BLOCK_SIZE_BYTES`, `MAX_TX_DATA_SIZE_BYTES`, `MAX_FUTURE_BLOCK_TIME_SECS`, `MAX_SLASH_EVIDENCE_PER_BLOCK`, `GENESIS_DIFFICULTY`, plus full Mempool Constants subsection (`MEMPOOL_MAX_SIZE_BYTES`, `MEMPOOL_MAX_TXS_PER_ACCOUNT`, `MEMPOOL_TX_EXPIRY_SECS`, `TX_MAX_SIZE_BYTES`, `MAX_NONCE_GAP`), Mempool Congestion Pricing table, Same-Nonce Replacement rule, and Networking Constants subsection (`MAX_INBOUND_CONNECTIONS`, `MAX_OUTBOUND_CONNECTIONS`, `MAX_PEER_COUNT`, `SYNC_MAX_BLOCKS_PER_REQUEST`, `SYNC_MAX_HEADERS_PER_REQUEST`, `SYNC_REQUEST_TIMEOUT_SECS`, `SYNC_PARALLEL_PEER_COUNT`, `KAD_BUCKET_SIZE`, `PING_INTERVAL_SECS`, `PING_TIMEOUT_SECS`, `GOSSIP_MAX_MESSAGE_SIZE_BYTES`).
+
+- **Added to Section 23 (Key Formulas):** Genesis block reward = 0, State root computation formula, Mempool Congestion Pricing tiers, Same-Nonce Replacement formula (10% fee bump), Nonce Gap Limit (`MAX_NONCE_GAP = 10`), Ban Escalation table (1h/24h/7d/permanent), Zero-elapsed-time difficulty spike (4× safety multiplier when `actual_time == 0`).
+
+- **Added to Section 13 (Block Structure):** Transaction Root and State Root subsections describing their computation.
+
+- **Added to Section 22 (Validation):** Mempool Inclusion Rules subsection (fee minimum, nonce gap, same-nonce replacement, per-account limit, expiry).
+
+- **Added L10:** Stale comment bug — `difficulty.rs:5` and `constants.rs:17` say "1,024 blocks/epoch" but `EPOCH = 960`.
+
+- **Fixed:** Section 8 header "PoS vs PoW Block Reward" → "Refiner vs Miner Block Reward". Key Formulas `pow_share_amount`/`pos_share_amount` → `miner_share_amount`/`refiner_share_amount`. PING_TIMEOUT_SECS corrected from 10s to 20s. Section numbering updated after merging old Section 23 (New Constants) into Section 3.
+
+- **Confirmed discrepancies (bugs already tracked):** H3 (suggested fee uses `total_fees` not `total_fees_burned`), M4 (missing mutual exclusivity check), H4 (unbond fee bypass), M6 (zero producer phantom issuance), M18 (integer division bias in retarget), H6 (no sync response size limit).
 
 ---
 
