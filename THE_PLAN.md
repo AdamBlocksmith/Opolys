@@ -75,7 +75,7 @@ From `crates/core/src/constants.rs`:
 | `CURRENCY_SMALLEST_UNIT` | `"Flake"` | Name of 1/1,000,000 OPL |
 | `FLAKES_PER_OPL` | `1_000_000` | Fundamental unit ratio |
 | `DECIMAL_PLACES` | `6` | Always 6 decimal places |
-| `BASE_REWARD` | `332,000,000` Flakes (332 OPL) | Gold-derived block reward base |
+| `BASE_REWARD` | `332,000,000` Flakes (332 OPL) | Default block reward (ceremony sets mainnet value; stored in `ChainState`) |
 | `ANNUAL_ATTRITION_PERMILLE` | `15` (1.5%) | Annual gold attrition rate in permille |
 | `BLOCKS_PER_YEAR` | `350,640` | Approximate blocks per year (365.25 × 86400 / 90) |
 | `MIN_DIFFICULTY` | `1` | Mathematical floor (not a cap) |
@@ -225,12 +225,18 @@ A block must have **exactly one** of: PoW proof or refiner signature.
 
 ### Derivation
 
+The base block reward is determined by the **genesis ceremony** from live gold production data. The ceremony fetches data from 7+ independent sources (USGS, WGC, LBMA, etc.), applies a trimmed median with outlier detection, and produces a cryptographically attested, operator-signed output. The resulting value is stored in `ChainState.base_reward`.
+
+The constant `BASE_REWARD` (332 OPL) in `constants.rs` is a **default fallback** used by testnet and pre-ceremony chains. The actual mainnet value may differ based on the ceremony's gold data.
+
+Default derivation (2024 USGS/WGC data):
+
 | Metric | Value | Source |
 |---|---|---|
 | Annual gold production | 3,630 tonnes | USGS/WGC 2024-2025 avg |
 | Annual production in troy oz | ~116,707,041 | 3,630 × 32,150.7 |
-| Blocks per year | 350,400 | 365.25 × 86,400 / 90 |
-| **BASE_REWARD** | **332 OPL** | floor(116,707,041 ÷ 350,400) |
+| Blocks per year | 350,640 | 365.25 × 86,400 / 90 |
+| **BASE_REWARD** | **332 OPL** | floor(116,707,041 ÷ 350,640) |
 
 ### Block Reward Formula
 
@@ -239,13 +245,28 @@ block_reward = (BASE_REWARD / difficulty) × vein_yield
 ```
 
 Where:
-- `BASE_REWARD` = 332 OPL (332,000,000 flakes) from genesis ceremony
+- `BASE_REWARD` = ceremony-determined value (default fallback: 332 OPL) from `ChainState.base_reward`
 - `difficulty` = effective difficulty (max of retarget, consensus_floor, MIN_DIFFICULTY)
 - `vein_yield` = `1 + ln(target / hash_int)` (see Section 12)
 
 ### Natural Equilibrium
 
 There is **no hard cap**. Issuance shrinks as difficulty rises (like gold getting harder to mine). Fee burning reduces supply. The two forces reach a natural equilibrium where market-driven fees balance new issuance.
+
+### Genesis Ceremony
+
+The genesis ceremony (`scripts/genesis_ceremony/`) determines the mainnet `BASE_REWARD` from live gold production data:
+
+1. **Data collection**: Fetches annual mine production (tonnes) from 7+ sources (USGS, WGC, Kitco, LBMA, Metals Focus, etc.) and live gold spot prices from 6+ sources (CME, LBMA, Kitco, BullionVault, etc.)
+2. **Trimmed median**: Removes highest and lowest values, then takes the median. Sources >15% from median are flagged as outliers.
+3. **Computation**: `BASE_REWARD = floor(median_production_tonnes × 32,150.7 / blocks_per_year)`
+4. **Attestation**: The operator signs a Blake3-256 master hash of all source data with ed25519. The attestation, derivation steps, and verification guide are written to `genesis_attestation.json`, `genesis_params.rs`, and `genesis_verification.txt`.
+5. **5-minute window**: The entire ceremony must complete within 5 minutes. Source fetches timeout at 30 seconds. A warning is emitted if price sources are fetched >60 seconds apart.
+
+The ceremony has three modes:
+- **Default**: Fetch all sources concurrently; fall back to manual prompt for any that fail
+- **`--manual`**: Skip all network fetches; prompt operator for every value
+- **`--dry-run`**: Use hard-coded 2024 USGS/WGC/LBMA actuals; deterministic test signing key
 
 ---
 

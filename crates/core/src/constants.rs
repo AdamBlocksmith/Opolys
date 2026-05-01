@@ -47,18 +47,21 @@ pub const DECIMAL_PLACES: u32 = 6;
 
 // ─── Block Rewards ───────────────────────────────────────────────────────────
 
-/// Base block reward in Flakes used when no ceremony value is provided.
-/// Mainnet value is derived from the genesis ceremony and stored in ChainState.
+/// Default base block reward in Flakes, used by testnet and pre-ceremony chains.
 ///
-/// Derived from real-world gold production data (default value):
+/// The mainnet base reward is determined by the genesis ceremony from live gold
+/// production data (USGS/WGC/LBMA) and stored in `ChainState.base_reward`. This
+/// constant serves as a fallback when no ceremony value is set.
+///
+/// Default derivation (2024 USGS/WGC data):
 /// ```text
 /// annual_oz = 3,630 tonnes × 32,150.7 oz/tonne ≈ 116,707,041 oz
 /// blocks_per_year = 365.25 × 86400 / 90 = 350,640
 /// reward = floor(116,707,041 ÷ 350,640) = 332 OPL per block
 /// ```
-/// With 90-second blocks (exactly 960 blocks per 24 hours = 86,400 s),
-/// each block earns a base of 332 OPL. Vein yield and difficulty adjust
-/// the actual reward upward or downward from this base.
+/// The genesis ceremony computes the actual value using a trimmed median of
+/// production data from 7+ independent sources, signs an attestation, and writes
+/// genesis_params.rs. See `scripts/genesis_ceremony/src/main.rs`.
 pub const BASE_REWARD: u64 = 332 * FLAKES_PER_OPL;
 
 // ─── Consensus Parameters ────────────────────────────────────────────────────
