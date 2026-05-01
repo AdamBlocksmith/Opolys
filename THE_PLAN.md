@@ -76,6 +76,8 @@ From `crates/core/src/constants.rs`:
 | `FLAKES_PER_OPL` | `1_000_000` | Fundamental unit ratio |
 | `DECIMAL_PLACES` | `6` | Always 6 decimal places |
 | `BASE_REWARD` | `332,000,000` Flakes (332 OPL) | Gold-derived block reward base |
+| `ANNUAL_ATTRITION_PERMILLE` | `15` (1.5%) | Annual gold attrition rate in permille |
+| `BLOCKS_PER_YEAR` | `350,640` | Approximate blocks per year (365.25 × 86400 / 90) |
 | `MIN_DIFFICULTY` | `1` | Mathematical floor (not a cap) |
 | `EPOCH` | `960` blocks (= exactly 24 hours at 90 s/block) | Unified epoch for retarget, dataset regen, unbonding |
 | `UNBONDING_DELAY_BLOCKS` | `960` | One epoch delay for unbonding |
@@ -107,16 +109,19 @@ From `crates/core/src/constants.rs`:
 | `MEMPOOL_TX_EXPIRY_SECS` | `86,400` (24 hours) | Transaction expiry time |
 | `TX_MAX_SIZE_BYTES` | `100,000` (~100 KiB) | Max single transaction size |
 | `MAX_NONCE_GAP` | `10` | Reject transactions more than 10 nonces ahead |
+| `CAPACITY_RATIO` | `10` | Mempool capacity in blocks (= MAX_BLOCK_SIZE_BYTES / MEMPOOL_MAX_SIZE_BYTES, rounded) |
+| `CONGESTION_THRESHOLD_PERMILLE` | `100` (10%) | Mempool usage threshold for rush mode (1000 / CAPACITY_RATIO) |
 
 ### Mempool Congestion Pricing
 
-When the mempool exceeds capacity, minimum fees increase automatically:
+Two-state model derived from capacity ratio (`CAPACITY_RATIO = MEMPOOL_MAX_SIZE_BYTES / MAX_BLOCK_SIZE_BYTES ≈ 10`):
 
-| Mempool Usage | Min Fee Multiplier | Effective Min Fee |
+| State | Condition | Effective Min Fee |
 |---|---|---|
-| 0–80% | 1× | 1 Flake |
-| 80–95% | 2× | 2 Flakes |
-| >95% | 10× | 10 Flakes |
+| **Spot** | Usage ≤ 10% (1 block's worth) | `max(MIN_FEE, suggested_fee)` |
+| **Rush** | Usage > 10% | `max(MIN_FEE, suggested_fee × CAPACITY_RATIO)` |
+
+The congestion threshold is `CONGESTION_THRESHOLD_PERMILLE = 1000 / CAPACITY_RATIO = 100` (100 permille = 10%). When the mempool holds more than one block's worth of transactions, fees scale by the capacity ratio (~10×), reflecting that transactions must outcompete ~10 blocks worth of pending data to be included next.
 
 ### Mempool Same-Nonce Replacement
 
@@ -136,7 +141,7 @@ A transaction replacing another with the same nonce must pay at least 10% more: 
 | `KAD_BUCKET_SIZE` | `20` | Kademlia DHT bucket size |
 | `PING_INTERVAL_SECS` | `30` | Ping interval |
 | `PING_TIMEOUT_SECS` | `20` | Ping timeout |
-| `GOSSIP_MAX_MESSAGE_SIZE_BYTES` | `5,242,880` (5 MiB) | Max gossip message size (see L7) |
+| `GOSSIP_MAX_MESSAGE_SIZE_BYTES` | `10,485,760` (10 MiB) | Max gossip message size (= MAX_BLOCK_SIZE_BYTES) |
 
 ---
 
@@ -284,9 +289,21 @@ effective_difficulty = max(retarget, consensus_floor, MIN_DIFFICULTY)
 
 ### Bond Lifecycle
 
-1. `RefinerBond { amount }` — Lock `amount` OPL as stake. Creates a new entry if the refiner already exists (top-up).
-2. `RefinerUnbond { amount }` — Withdraw `amount` OPL using **FIFO order** (see Section 9).
+1. `RefinerBond { amount }` — Lock `amount` OPL as stake, plus a bond assay of `amount × 0.375%` (permanently burned). Creates a new entry if the refiner already exists (top-up).
+2. `RefinerUnbond { amount }` — Withdraw `amount` OPL using **FIFO order** (see Section 9), plus an unbond assay of `unbonded × 0.375%` (permanently burned). The sender must have sufficient balance to pay both the transaction fee and the unbond assay.
 3. **Slashing** — Only for double-signing. **100% of stake burned** on any double-sign offense. No graduated penalties, no offense counter, no reset window. Slashed stake is removed from circulation, not confiscated to any treasury.
+
+### Stake Decay
+
+Bonded stake decays once per epoch (960 blocks) at an annual rate of `ANNUAL_ATTRITION_PERMILLE` (1.5%):
+
+```
+decay_numerator = 1_000_000 - (ANNUAL_ATTRITION_PERMILLE × 1000 / 365)
+               ≈ 999_959
+entry.stake = entry.stake × decay_numerator / 1_000_000
+```
+
+All decayed stake is permanently burned. This mirrors vault storage fees in gold custody.
 
 ### Per-Entry Weight
 
@@ -371,6 +388,22 @@ All transaction fees are **permanently burned** — not collected by refiners or
 
 Invalid transactions (wrong nonce, insufficient balance, invalid unbond amount): no fee burn, no nonce advance.
 
+### Supply Attrition
+
+Opolys mirrors physical gold attrition (~1.5% of above-ground gold lost annually, USGS/WGC). Three channels burn OPL from circulation:
+
+| Channel | Rate | Formula | Gold Analogy |
+|---|---|---|---|
+| **Mine assay** | ~1.5%/year of issuance | `block_reward × ANNUAL_ATTRITION_PERMILLE / 1000` | Processing waste |
+| **Stake decay** | ~1.5%/year of bonded stake | `entry.stake × (ANNUAL_ATTRITION_PERMILLE × 1000 / 365) / 1_000_000` per epoch | Vault storage fees |
+| **Bond assay** | 0.375% of bonded amount | `amount × ANNUAL_ATTRITION_PERMILLE / 4 / 1000` | Assay fee to enter vault |
+| **Unbond assay** | 0.375% of unbonded amount | `amount × ANNUAL_ATTRITION_PERMILLE / 4 / 1000` | Assay fee to exit vault |
+
+- Bond assay and unbond assay are each `ANNUAL_ATTRITION_PERMILLE / 4 / 1000 = 0.00375 = 0.375%`
+- Combined (bond + unbond), this is `0.75%` per round trip
+- Stake decay is applied once per epoch (960 blocks) at a per-epoch rate derived from the annual rate
+- All attrition is permanently burned — no recipient, no treasury
+
 ---
 
 ## 11. EVO-OMAP Proof-of-Work
@@ -405,19 +438,43 @@ EVO-OMAP (EVOlutionary Oriented Memory-hard Algorithm for Proof-of-work) is the 
 
 ## 12. Vein Yield
 
-Vein yield replaces discovery bonus with a mathematically cleaner formula:
+Vein yield uses a `sqrt(ln)` formula that makes rich veins genuinely rare — matching real gold's log-normal grade distribution:
 
 ```
-vein_yield = 1 + ln(target / hash_int)
+yield_milli = 1000 + sqrt(ln(target / hash_int)) × 1000
+vein_yield = yield_milli / 1000.0
 ```
 
 Where:
 - `target = 2^(64-D) - 1` for difficulty D (leading zero bits model)
 - `hash_int` = first 8 bytes of the EVO-OMAP PoW hash, interpreted as big-endian u64
+- `ln()` returns 0 when `hash_int <= 0` or `hash_int >= target`, giving the 1.0× floor
 
-This gives a natural distribution: most blocks earn ~2x BASE_REWARD, exceptionally lucky blocks earn more. The expected value is approximately 2.0.
+The `sqrt(ln)` formula produces a natural distribution with rare bonanzas:
 
-Implementation uses `f64::ln()` with deterministic rounding via `ln_milli()`. IEEE 754 guarantees identical results across all platforms.
+| Yield | Frequency |
+|---|---|
+| 1.0× (floor) | hash fails to beat target |
+| ~1.89× | mean yield for valid PoW |
+| 2.0× | ~1 in 2 blocks |
+| 3.0× | ~1 in 50 blocks (~75 min) |
+| 5.0× | Essentially never (~1 in 10^9) |
+| 10.0× | Impossible (out of range) |
+
+Implementation uses `f64::ln()` and `f64::sqrt()`. IEEE 754 guarantees deterministic results across all platforms.
+
+### Vein Bonus Isolation (Coverage Split)
+
+The coverage-based reward split applies to **base_reward only**. The vein bonus goes 100% to the miner:
+
+```
+miner_share = base_share + vein_bonus
+refiner_share = coverage_milli × base_reward × vein_multiplier / 1000
+```
+
+Where `vein_multiplier = 1.0` for refiners (no vein yield) and `vein_yield` for miners.
+
+Gold analogy: refineries charge per ounce processed, not per ore grade. The miner keeps the ore premium.
 
 ---
 
@@ -649,7 +706,7 @@ Opolys/
 | 9: Networking | **DONE** | P2P gossip/sync/discovery wired to node |
 | 10: Staking | **DONE** | `--refine`, 100% slash on double-sign, timeout-based refiner block production |
 | 11: Security | **DONE** | Eclipse protection, subnet diversity, DoS limits, memory challenge |
-| 12: Pass 1 | **IN PROGRESS** | Phase A DONE (ec0df9b), M19 DONE (2cf09c2). Phase B–E remaining security & protocol fixes |
+| 12: Pass 1 | **IN PROGRESS** | Phase A DONE (ec0df9b), M19 DONE (2cf09c2), H3+H4 FIXED, L7+L10 FIXED, economic model (vein yield, assay, decay, two-state fees) DONE (07da54b). Phase B–E remaining security & protocol fixes |
 | 13: Pass 2 | **PLANNED** | Attestations, reliability score, block confidence |
 | 14: Mainnet | **READY** | Genesis ceremony and launch (after Pass 1+2) |
 
@@ -657,7 +714,7 @@ Opolys/
 
 ## 21. Test Count
 
-**122 tests passing** across 4 crates (as of commit 2cf09c2):
+**171 tests passing** across 10 crates (as of commit 07da54b):
 - `opolys-consensus`: 95 tests
 - `opolys-core`: 13 tests
 - `opolys-crypto`: 8 tests
@@ -709,8 +766,11 @@ Every block applied to the chain must pass these checks:
 
 ### Block Reward
 ```
-vein_yield = 1 + ln(target / hash_int)        // f64, rounded to nearest milli
+yield_milli = 1000 + sqrt(ln(target / hash_int)) × 1000   // integer, rounded to nearest milli
+vein_yield = yield_milli / 1000.0
+mine_assay = block_reward × ANNUAL_ATTRITION_PERMILLE / 1000  // burned at source
 block_reward = (BASE_REWARD / difficulty) × vein_yield
+miner_share = base_share + vein_bonus                   // vein bonus goes 100% to miner
 ```
 
 ### Effective Difficulty
@@ -747,17 +807,31 @@ Where `account_root` is the Merkle-like root of all account states, and `refiner
 suggested_fee = EMA(total_fees_burned, previous_suggested_fee)
               = (burned + 9 × old) / 10, floored at MIN_FEE
 ```
-**Note (bug H3):** Currently uses `total_fees` (declared) instead of `total_fees_burned` (actually burned). Should be computed after the transaction execution loop.
+Computed from `total_fees_burned` (actually burned by successful transactions), not `total_fees` (declared). This prevents failed transactions from inflating the fee signal.
 
 ### Mempool Congestion Pricing
 
-The mempool enforces dynamic minimum fees based on capacity usage:
+Two-state model derived from capacity ratio:
 
-| Mempool Usage | Min Fee Multiplier | Effective Min Fee |
+| State | Condition | Effective Min Fee |
 |---|---|---|
-| 0–80% | 1× | 1 Flake |
-| 80–95% | 2× | 2 Flakes |
-| >95% | 10× | 10 Flakes |
+| **Spot** | Usage ≤ 10% (1 block's worth) | `max(MIN_FEE, suggested_fee)` |
+| **Rush** | Usage > 10% | `max(MIN_FEE, suggested_fee × CAPACITY_RATIO)` |
+
+Where `CAPACITY_RATIO = MEMPOOL_MAX_SIZE_BYTES / MAX_BLOCK_SIZE_BYTES ≈ 10` and `CONGESTION_THRESHOLD_PERMILLE = 1000 / CAPACITY_RATIO = 100` (100 permille = 10%).
+
+### Supply Attrition
+
+Three channels permanently burn OPL, mirroring physical gold attrition (~1.5%/year):
+
+| Channel | Rate | Formula |
+|---|---|---|
+| Mine assay | ~1.5%/yr of issuance | `block_reward × ANNUAL_ATTRITION_PERMILLE / 1000` |
+| Stake decay | ~1.5%/yr of bonded stake | `entry.stake × decay_numerator / 1_000_000` per epoch |
+| Bond assay | 0.375% of bonded amount | `amount × ANNUAL_ATTRITION_PERMILLE / 4 / 1000` |
+| Unbond assay | 0.375% of unbonded amount | `amount × ANNUAL_ATTRITION_PERMILLE / 4 / 1000` |
+
+Where `decay_numerator = 1_000_000 - (ANNUAL_ATTRITION_PERMILLE × 1000 / 365) ≈ 999_959`.
 
 ### Same-Nonce Replacement
 
@@ -858,7 +932,7 @@ Every bug below includes: **What it is**, **Why it matters**, and **How to fix i
 
 ---
 
-### HIGH (9)
+### HIGH (9 — H3 and H4 fixed)
 
 #### H1: No hash domain separation
 **Location:** `crypto/hash.rs`, `wallet/signing.rs:145`, `node.rs:754`, multiple
@@ -882,23 +956,23 @@ Every bug below includes: **What it is**, **Why it matters**, and **How to fix i
 
 ---
 
-#### H3: Suggested fee computed from declared fees, not burned fees
+#### ~~H3: Suggested fee computed from declared fees, not burned fees~~ — **FIXD** (07da54b)
 **Location:** `node.rs:1001-1002`
-**Status:** OPEN
+**Status:** **FIXD**
 
-**What it is:** At line 1001, `total_fees` sums `tx.fee` from all transactions — the *declared* fee. At line 1002, `compute_suggested_fee(total_fees, ...)` uses this to compute the EMA. But failed transactions (insufficient balance, wrong nonce) are included in `total_fees` even though their fees are *not actually burned* (they get rejected at line 1025 with `fee_burned: 0`). This overstates the fee market signal.
+**What it was:** `total_fees` summed `tx.fee` from all transactions, including failed ones whose fees were not actually burned. This overstated the fee market signal.
 
-**How to fix:** Move `compute_suggested_fee()` to after the transaction execution loop, using `total_fees_burned` instead of `total_fees`.
+**How fixed:** `compute_suggested_fee()` now uses `total_fees_burned` (actually burned by successful transactions) instead of `total_fees`.
 
 ---
 
-#### H4: Unbond fee bypass — zero-balance accounts unbond for free
-**Location:** `dispatcher.rs:270-284`
-**Status:** OPEN
+#### ~~H4: Unbond fee bypass — zero-balance accounts unbond for free~~ — **FIXD** (07da54b)
+**Location:** `dispatcher.rs:241-304`
+**Status:** **FIXD**
 
-**What it is:** When processing `RefinerUnbond`, the fee burn at lines 270-276 is conditional: `if account.balance >= fee`. If balance is insufficient, the fee is silently skipped but `ApplyResult::ok(fee)` at line 283 still reports the fee as burned. The nonce still advances (line 280). Accounts with zero balance can unbond without paying fees.
+**What it was:** When processing `RefinerUnbond`, the fee burn was conditional: `if account.balance >= fee`. If balance was insufficient, the fee was silently skipped but `ApplyResult::ok(fee)` still reported the fee as burned. Accounts with zero balance could unbond without paying fees.
 
-**How to fix:** Replace the conditional fee burn with a requirement check: if `account.balance < fee`, return `ApplyResult::err("Insufficient balance for unbond fee")`.
+**How fixed:** (1) Introduced unbond assay (0.375% of unbonded amount) that must be paid from the sender's balance. (2) Pre-check total fees (tx.fee + unbond_assay) before executing the unbond. If insufficient balance, the transaction is rejected entirely with no state change.
 
 ---
 
@@ -1071,7 +1145,7 @@ Deleted. The actual reward split uses integer `coverage_milli` in `node.rs`. The
 
 ---
 
-### LOW (10)
+### LOW (10 — L7 and L10 fixed)
 
 #### L1: Debug derives on Bip39Mnemonic and KeyPair
 **Location:** `bip39.rs:39`, `key.rs:60`
@@ -1103,10 +1177,10 @@ tx_id uses hex-encoded sender; signature uses raw-byte sender. Two different ser
 **Status:** OPEN
 Add official SLIP-0010 ed25519 test vectors as test cases. Verify derived keys match expected public keys.
 
-#### L7: Gossip max message (5 MiB) vs block max (10 MiB)
-**Location:** `gossip.rs:27` vs `constants.rs:207`
-**Status:** OPEN
-A valid block >5 MiB cannot be gossiped. Set `gossip_max_message_size` to match `MAX_BLOCK_SIZE_BYTES` (10 MiB).
+#### ~~L7: Gossip max message (5 MiB) vs block max (10 MiB)~~ — **FIXD** (07da54b)
+**Location:** `constants.rs:210`
+**Status:** **FIXD**
+`GOSSIP_MAX_MESSAGE_SIZE_BYTES` now equals `MAX_BLOCK_SIZE_BYTES` (10 MiB). Any valid block can be gossiped.
 
 #### L8: Challenge protocol doesn't bind to PeerId
 **Location:** `challenge.rs`, `main.rs:996-1022`
@@ -1118,11 +1192,10 @@ Challenge hash doesn't include PeerId, allowing precomputed answers. Fix: `blake
 **Status:** OPEN
 `.expect()` on OsRng can panic. Change return type to `Result<Self, WalletError>`.
 
-#### L10: Stale comments say 1,024 blocks/epoch
-**Location:** `difficulty.rs:5`, `constants.rs:17`
-**Status:** OPEN
-Comments say "every EPOCH blocks (1,024)" and "1,024 blocks/epoch" but `EPOCH = 960`. Code uses the correct value; only the comments are wrong.
-**How to fix:** Update comments to say "960 blocks/epoch".
+#### ~~L10: Stale comments say 1,024 blocks/epoch~~ — **FIXD** (07da54b)
+**Location:** `difficulty.rs`, `refiner.rs`, `pow.rs`, `constants.rs`
+**Status:** **FIXD**
+All comments updated from "1,024 blocks/epoch" to "960 blocks/epoch". Test parameters also updated.
 
 ---
 

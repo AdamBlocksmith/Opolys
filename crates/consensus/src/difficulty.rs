@@ -3,7 +3,7 @@
 //! Opolys has **no hard cap** on supply and no hardcoded difficulty schedules.
 //! Difficulty emerges from two components:
 //!
-//! 1. **Retarget** — an adjustment every `EPOCH` blocks (1,024) that compares
+//! 1. **Retarget** — an adjustment every `EPOCH` blocks (960) that compares
 //!    actual block times against the target interval.
 //! 2. **Consensus floor** — `total_issued / bonded_stake`, a minimum difficulty
 //!    that rises as more $OPL enters circulation relative to staked supply.
@@ -114,7 +114,7 @@ fn compute_retarget(current_difficulty: u64, current_height: BlockHeight, block_
     }
 
     let actual_time = block_timestamps[end_idx].saturating_sub(block_timestamps[start_idx]);
-    // Use milliseconds for precision: 84,375 ms * 1,024 blocks = 86,400,000 ms = 24 hours exactly
+    // Use milliseconds for precision: 90,000 ms * 960 blocks = 86,400,000 ms = 24 hours exactly
     let expected_time_ms = EPOCH * opolys_core::BLOCK_TARGET_TIME_MS;
     // Convert actual time to milliseconds for consistent comparison
     let actual_time_ms = actual_time.saturating_mul(1_000);
@@ -217,9 +217,9 @@ mod tests {
 
     #[test]
     fn retarget_at_epoch_boundary() {
-        // Timestamps spaced at target block time (84,375 ms ≈ 84.375 seconds)
+        // Timestamps spaced at target block time (90,000 ms = 90 seconds)
         let timestamps: Vec<u64> = (0..=2000).map(|i| i * 84).collect();
-        let new_diff = compute_retarget(100, 1024, &timestamps);
+        let new_diff = compute_retarget(100, 960, &timestamps);
         assert!(new_diff >= MIN_DIFFICULTY);
     }
 
@@ -228,17 +228,17 @@ mod tests {
         // If blocks are 10x too slow, difficulty should drop proportionally
         // without an artificial maximum clamp
         let timestamps: Vec<u64> = (0..=2000).map(|i| i * 840).collect();
-        let new_diff = compute_retarget(100, 1024, &timestamps);
-        // 840s per block × 1,024 blocks = 860,160s actual
-        // Expected: 84,375ms × 1,024 = 86,400,000ms ≈ 86,400s
-        // Ratio: 86,400,000 / 860,160,000 ≈ 0.1x, so difficulty drops from 100 to ~10
+        let new_diff = compute_retarget(100, 960, &timestamps);
+        // 840s per block × 960 blocks = 806,400s actual
+        // Expected: 90,000ms × 960 = 86,400,000ms = 86,400s
+        // Ratio: 86,400,000 / 806,400,000 ≈ 0.107x, so difficulty drops from 100 to ~11
         assert!(new_diff < 100, "Difficulty should drop when blocks are too slow: got {}", new_diff);
     }
 
     #[test]
     fn compute_next_difficulty_integrates_consensus_floor() {
         let timestamps: Vec<u64> = (0..=2000).map(|i| i * 84).collect();
-        let result = compute_next_difficulty(100, 1024, &timestamps, 10_000_000, 1_000_000);
+        let result = compute_next_difficulty(100, 960, &timestamps, 10_000_000, 1_000_000);
         assert!(result.effective_difficulty() >= 10);
     }
 

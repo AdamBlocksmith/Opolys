@@ -6,7 +6,7 @@
 //! dataset, forcing specialized hardware to include large SRAM.
 //!
 //! Key properties:
-//! - 256 MiB mutable dataset, regenerated per epoch (1,024 blocks)
+//! - 256 MiB mutable dataset, regenerated per epoch (960 blocks)
 //! - Blake3 inner hashing with SHA3-256 finalization
 //! - 4-way data-dependent branching resists GPU warp efficiency
 //! - 8 superscalar instructions per step with memory-dependent operands

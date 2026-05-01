@@ -13,7 +13,7 @@
 //! | Total above-ground gold | 219,891 tonnes | WGC, end-2025 |
 //! | Annual gold production | 3,630 tonnes | USGS/WGC 2024-2025 avg |
 //! | Annual production in troy oz | ~116,707,041 | 3,630 × 32,150.7 |
-//! | Blocks per year | 374,016 | 365.25 × 1,024 blocks/epoch |
+//! | Blocks per year | 350,640 | 365.25 × 86400 / 90 |
 //! | **BASE_REWARD** | **312 OPL** | floor(116,707,041 ÷ 374,016) |
 //!
 //! # Currency Units (6 decimal places)
@@ -204,9 +204,10 @@ pub const PING_TIMEOUT_SECS: u64 = 20;
 /// Default TCP port for node-to-node communication.
 pub const DEFAULT_LISTEN_PORT: u16 = 4170;
 
-/// Maximum size (in bytes) of a single gossip message (5 MiB).
+/// Maximum size (in bytes) of a single gossip message.
+/// Must equal MAX_BLOCK_SIZE_BYTES — nodes must be able to relay any valid block.
 /// Prevents memory exhaustion from oversized network messages.
-pub const GOSSIP_MAX_MESSAGE_SIZE_BYTES: usize = 5_242_880;
+pub const GOSSIP_MAX_MESSAGE_SIZE_BYTES: usize = MAX_BLOCK_SIZE_BYTES;
 
 // ─── Mempool & Transaction Limits ───────────────────────────────────────────
 
@@ -231,6 +232,20 @@ pub const MAX_TRANSACTIONS_PER_BLOCK: usize = 10_000;
 /// Maximum serialized size (in bytes) of a single block including all transactions.
 /// 10 MiB allows ~100 full-size transactions or many small ones.
 pub const MAX_BLOCK_SIZE_BYTES: usize = 10_485_760;
+
+/// Capacity ratio: how many blocks the mempool can hold.
+/// Derived from MEMPOOL_MAX_SIZE_BYTES / MAX_BLOCK_SIZE_BYTES ≈ 9.54, rounded to 10.
+/// Used by the two-state fee model: when congested, suggested_fee is multiplied
+/// by this ratio, reflecting that your transaction must outcompete ~10 blocks
+/// worth of pending data to be included in the next block.
+pub const CAPACITY_RATIO: u64 = 10;
+
+/// Congestion threshold: fraction of mempool that must be occupied before
+/// entering rush mode. Derived from 1/CAPACITY_RATIO — when there's more than
+/// one block's worth of pending transactions, block producers have surplus
+/// choice and fees should rise.
+/// Stored as permille for integer arithmetic: 1000/CAPACITY_RATIO = 100.
+pub const CONGESTION_THRESHOLD_PERMILLE: u64 = 1000 / CAPACITY_RATIO;
 
 /// Maximum size (in bytes) of the `data` field in a transaction.
 /// 1 KiB is enough for memo/attachment data without enabling block bloat.

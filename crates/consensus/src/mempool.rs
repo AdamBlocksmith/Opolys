@@ -6,6 +6,13 @@
 //! scales with network usage. No governance sets fee minimums — the market
 //! decides.
 //!
+//! The mempool uses a two-state congestion model:
+//! - **Spot**: when the pool is under the congestion threshold (< 1 block worth),
+//!   the minimum fee is `max(MIN_FEE, suggested_fee)`.
+//! - **Rush**: when congested (≥ 1 block worth pending), the minimum fee scales
+//!   to `max(MIN_FEE, suggested_fee × CAPACITY_RATIO)`, reflecting that your
+//!   transaction must outcompete multiple blocks worth of pending data.
+//!
 //! The mempool enforces per-account transaction limits and a global size cap.
 //! When the pool is full, the lowest-priority transactions are evicted to make
 //! room for higher-fee arrivals.
@@ -13,7 +20,7 @@
 use opolys_core::{
     Transaction, ObjectId, OpolysError,
     TX_MAX_SIZE_BYTES, MEMPOOL_MAX_SIZE_BYTES, MEMPOOL_MAX_TXS_PER_ACCOUNT,
-    MEMPOOL_TX_EXPIRY_SECS, MIN_FEE,
+    MEMPOOL_TX_EXPIRY_SECS, MIN_FEE, CAPACITY_RATIO, CONGESTION_THRESHOLD_PERMILLE,
 };
 
 /// Maximum gap between an incoming transaction's nonce and the sender's
@@ -66,16 +73,20 @@ impl Mempool {
 
     /// Compute the effective minimum fee based on current pool congestion.
     ///
-    /// Returns `MIN_FEE` under normal load, `2 × suggested_fee` above 80%,
-    /// and `10 × suggested_fee` above 95% to price out low-value spam.
+    /// Two-state model derived from capacity ratio:
+    /// - **Spot** (not congested): `max(MIN_FEE, suggested_fee)` — market sets the floor.
+    /// - **Rush** (congested): `max(MIN_FEE, suggested_fee × CAPACITY_RATIO)` — fees scale
+    ///   with the number of blocks worth of pending data, reflecting that transactions
+    ///   must outcompete ~10 blocks worth to be included next.
+    ///
+    /// Congestion is determined by `CONGESTION_THRESHOLD_PERMILLE` (100 permille = 10%):
+    /// when the mempool exceeds one block's worth of data, we're congested.
     pub fn effective_min_fee(&self, suggested_fee: u64) -> u64 {
-        let usage = self.total_size as f64 / MEMPOOL_MAX_SIZE_BYTES as f64;
-        if usage > 0.95 {
-            suggested_fee.saturating_mul(10)
-        } else if usage > 0.80 {
-            suggested_fee.saturating_mul(2)
+        let usage_permille = self.total_size * 1000 / MEMPOOL_MAX_SIZE_BYTES;
+        if usage_permille > CONGESTION_THRESHOLD_PERMILLE as usize {
+            suggested_fee.saturating_mul(CAPACITY_RATIO).max(MIN_FEE)
         } else {
-            MIN_FEE
+            suggested_fee.max(MIN_FEE)
         }
     }
 

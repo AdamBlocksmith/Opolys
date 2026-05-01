@@ -27,7 +27,7 @@
 //! is derived from on-chain entropy. There are no rounds, no schedules, and
 //! no fixed refiner sets — just continuous weighted selection.
 
-use opolys_core::{FlakeAmount, ObjectId, RefinerStatus, MIN_BOND_STAKE, EPOCH, MAX_ACTIVE_REFINERS};
+use opolys_core::{FlakeAmount, ObjectId, RefinerStatus, MIN_BOND_STAKE, EPOCH, MAX_ACTIVE_REFINERS, ANNUAL_ATTRITION_PERMILLE};
 use borsh::{BorshSerialize, BorshDeserialize};
 use serde::{Serialize, Deserialize};
 use std::collections::{HashMap, HashSet};
@@ -37,7 +37,7 @@ use opolys_crypto::Blake3Hasher;
 ///
 /// When a refiner unbonds, the stake is not returned immediately. Instead,
 /// it enters the unbonding queue and matures after `UNBONDING_DELAY_BLOCKS`
-/// (1,024 blocks = one epoch). Once matured, the stake is returned to the
+/// (960 blocks = one epoch). Once matured, the stake is returned to the
 /// account that originally bonded it.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize, Serialize, Deserialize)]
 pub struct PendingUnbond {
@@ -308,7 +308,7 @@ impl RefinerSet {
     /// The oldest entries are consumed first. If the amount exceeds an entry's
     /// stake, that entry is fully consumed and the remainder comes from the
     /// next oldest. The unbonded stake enters the unbonding queue and will
-    /// mature after `UNBONDING_DELAY_BLOCKS` (1,024 blocks = one epoch).
+    /// mature after `UNBONDING_DELAY_BLOCKS` (960 blocks = one epoch).
     ///
     /// If the refiner has no remaining entries after unbonding, they are
     /// removed from the refiner set but not slashed.
@@ -439,6 +439,37 @@ impl RefinerSet {
         }
 
         (newly_activated, newly_demoted)
+    }
+
+    /// Apply annual stake decay to all non-slashed refiners.
+    ///
+    /// Mirrors gold vault storage fees: ~1.5% of bonded stake decays per year.
+    /// Applied once per epoch (960 blocks = 24 hours).
+    /// Per-epoch decay factor: (1 - ANNUAL_ATTRITION_PERMILLE/1000)^(1/365) ≈ 999_959/1_000_000.
+    ///
+    /// Returns the total amount of stake burned across all refiners.
+    pub fn decay_stake(&mut self) -> FlakeAmount {
+        // Per-epoch decay: (1 - 0.015)^(1/365) ≈ 0.999959 per epoch
+        // Each entry: stake = stake * DECAY_NUMERATOR / DECAY_DENOMINATOR
+        // where DECAY_NUMERATOR ≈ 999_959, DECAY_DENOMINATOR = 1_000_000
+        const DECAY_NUMERATOR: u64 = 1_000_000 - (ANNUAL_ATTRITION_PERMILLE * 1_000 / 365);
+        const DECAY_DENOMINATOR: u64 = 1_000_000;
+        let mut total_burned: FlakeAmount = 0;
+        for refiner in self.cached_refiners.values_mut() {
+            if refiner.status == RefinerStatus::Slashed {
+                continue;
+            }
+            for entry in &mut refiner.entries {
+                if entry.stake == 0 {
+                    continue;
+                }
+                let new_stake = ((entry.stake as u128 * DECAY_NUMERATOR as u128) / DECAY_DENOMINATOR as u128) as FlakeAmount;
+                let burned = entry.stake.saturating_sub(new_stake);
+                total_burned = total_burned.saturating_add(burned);
+                entry.stake = new_stake;
+            }
+        }
+        total_burned
     }
 
     /// Count of refiners currently in `Active` status.
