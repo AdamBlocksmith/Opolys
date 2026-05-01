@@ -47,18 +47,19 @@ pub const DECIMAL_PLACES: u32 = 6;
 
 // ─── Block Rewards ───────────────────────────────────────────────────────────
 
-/// Base block reward in Flakes — the only source of new OPL issuance.
+/// Base block reward in Flakes used when no ceremony value is provided.
+/// Mainnet value is derived from the genesis ceremony and stored in ChainState.
 ///
-/// Derived from real-world gold production data:
+/// Derived from real-world gold production data (default value):
 /// ```text
 /// annual_oz = 3,630 tonnes × 32,150.7 oz/tonne ≈ 116,707,041 oz
-/// blocks_per_year = 365.25 epochs × 1,024 blocks = 374,016
-/// reward = floor(116,707,041 ÷ 374,016) = 312 OPL per block
+/// blocks_per_year = 365.25 × 86400 / 90 = 350,640
+/// reward = floor(116,707,041 ÷ 350,640) = 332 OPL per block
 /// ```
-/// With 84,375-second blocks (exactly 1,024 blocks per 24 hours),
-/// each block earns a base of 312 OPL. Vein yield and difficulty adjust
+/// With 90-second blocks (exactly 960 blocks per 24 hours = 86,400 s),
+/// each block earns a base of 332 OPL. Vein yield and difficulty adjust
 /// the actual reward upward or downward from this base.
-pub const BASE_REWARD: u64 = 312 * FLAKES_PER_OPL;
+pub const BASE_REWARD: u64 = 332 * FLAKES_PER_OPL;
 
 // ─── Consensus Parameters ────────────────────────────────────────────────────
 
@@ -69,24 +70,23 @@ pub const BASE_REWARD: u64 = 312 * FLAKES_PER_OPL;
 pub const MIN_DIFFICULTY: u64 = 1;
 
 /// Starting difficulty for the genesis block.
-/// At 1.48 H/s (Ryzen 7 7700 parallel) this gives ~91 second blocks,
-/// close to the 84 second target. The first retarget at block 1,024
-/// (~26 hours) will correct any deviation automatically.
+/// At difficulty 7, 1.48 H/s parallel (Ryzen 7 7700):
+/// 2^7 / 1.48 = 86.5s per block, target 90s (3.9% off).
+/// First retarget at block 960 self-corrects automatically.
 /// Must be >= MIN_DIFFICULTY and calibrated to typical launch hardware.
 pub const GENESIS_DIFFICULTY: u64 = 7;
 
 /// Unified epoch length for both EVO-OMAP dataset regeneration and
-/// difficulty retargeting. Every 1,024 blocks:
+/// difficulty retargeting. Every 960 blocks:
 /// - EVO-OMAP generates a new dataset from a fresh epoch seed
 /// - Difficulty is retargeted based on observed block times
-/// - Unbonding entries mature (1,024 blocks = one epoch delay)
+/// - Unbonding entries mature (960 blocks = one epoch delay)
 ///
-/// Replaces the previous separate RETARGET_EPOCH and EVO_OMAP_EPOCH_BLOCKS
-/// constants with a single unified EPOCH.
-pub const EPOCH: u64 = 1_024;
+/// 90,000 ms × 960 blocks = 86,400,000 ms = exactly 24 hours.
+pub const EPOCH: u64 = 960;
 
 /// Number of blocks a validator must wait before unbonded stake is returned.
-/// Equal to EPOCH (1,024 blocks ≈ 34 hours at 120s/block). Unbonding stake
+/// Equal to EPOCH (960 blocks = exactly 24 hours at 90s/block). Unbonding stake
 /// still earns rewards during this delay.
 pub const UNBONDING_DELAY_BLOCKS: u64 = EPOCH;
 
@@ -103,20 +103,18 @@ pub const MIN_FEE: u64 = 1;
 pub const POS_FINALITY_BLOCKS: u64 = 3;
 
 /// Target time between blocks in milliseconds.
-/// 84,375 ms = 84.375 seconds per block.
+/// 90,000 ms = 90 seconds per block.
 ///
-/// Chosen so that exactly 1,024 blocks (one epoch) takes 24 hours:
-/// 1,024 × 84,375 ms = 86,400,000 ms = 86,400 seconds = 24 hours.
+/// Chosen so that exactly 960 blocks (one epoch) takes 24 hours:
+/// 960 × 90,000 ms = 86,400,000 ms = 86,400 seconds = 24 hours.
 ///
-/// This yields 374,016 blocks per year (365.25 × 1,024), aligning block
-/// issuance with real-world gold mining rates. BASE_REWARD (312 OPL) per
-/// block produces an annual emission of ~312 × 374,016 ≈ 116.7 million OPL, closely
-/// tracks the ~3,630 tonnes of annual gold production.
-pub const BLOCK_TARGET_TIME_MS: u64 = 84_375;
+/// This yields 350,640 blocks per year (365.25 × 86400 / 90), aligning block
+/// issuance with real-world gold mining rates.
+pub const BLOCK_TARGET_TIME_MS: u64 = 90_000;
 
-/// Target time between blocks in seconds, rounded for convenience.
+/// Target time between blocks in seconds.
 /// Use BLOCK_TARGET_TIME_MS for precise calculations.
-pub const BLOCK_TARGET_TIME_SECS: u64 = 84;
+pub const BLOCK_TARGET_TIME_SECS: u64 = 90;
 
 /// Minimum stake (in Flakes) required for a **new** bond entry (1 OPL).
 ///
@@ -132,7 +130,7 @@ pub const MIN_BOND_STAKE: u64 = FLAKES_PER_OPL;
 /// until a slot opens (via unbond or slash). No `ValidatorBond` transaction
 /// is ever rejected — all validators are queued fairly.
 ///
-/// Can be raised via protocol upgrade after testnet validates scaling.
+/// Can be raised via protocol upgrade.
 /// Future upgrade path: soft-cap by weight (top-N by stake × seniority).
 pub const MAX_ACTIVE_VALIDATORS: usize = 5_000;
 
@@ -235,28 +233,11 @@ pub const MAX_FUTURE_BLOCK_TIME_SECS: u64 = 300; // 5 minutes
 
 // ─── Chain Identity ──────────────────────────────────────────────────────────
 // Chain ID is included in transaction signing and ID computation to prevent
-// cross-chain replay attacks. A valid mainnet transaction cannot be replayed
-// on testnet and vice versa.
+// cross-chain replay attacks.
 
 /// Chain ID for the Opolys mainnet. Included in transaction signing and tx_id
-/// hashing to prevent replay attacks across networks.
+/// hashing to prevent replay attacks. There is only one Opolys network.
 pub const MAINNET_CHAIN_ID: u64 = 1;
-
-/// Chain ID for the Opolys testnet.
-pub const TESTNET_CHAIN_ID: u64 = 2;
-
-// ─── Bootstrap Peers (local devnet only) ─────────────────────────────────────
-// Hardcoded IP addresses for isolated local devnet testing ONLY.
-// NOT used for testnet or mainnet — those use DNS seeds exclusively.
-// Format: /ip4/<IP>/udp/<PORT>/quic-v1/p2p/<PEER_ID>
-
-/// Local devnet bootstrap nodes for isolated testing.
-/// Pass these via --bootstrap for two-node local devnets.
-/// Testnet and mainnet bootstrap via DNS seeds, never hardcoded IPs.
-pub const DEVNET_BOOTSTRAP_PEERS: &[&str] = &[
-    "/ip4/127.0.0.1/udp/4170/quic-v1/p2p/PLACEHOLDER_PEER_ID_1",
-    "/ip4/127.0.0.1/udp/4171/quic-v1/p2p/PLACEHOLDER_PEER_ID_2",
-];
 
 #[cfg(test)]
 mod tests {
@@ -269,15 +250,15 @@ mod tests {
     }
 
     #[test]
-    fn base_reward_is_312_opl() {
-        assert_eq!(BASE_REWARD, 312 * FLAKES_PER_OPL);
+    fn base_reward_is_332_opl() {
+        assert_eq!(BASE_REWARD, 332 * FLAKES_PER_OPL);
         let base_reward_opl = BASE_REWARD / FLAKES_PER_OPL;
-        assert_eq!(base_reward_opl, 312);
+        assert_eq!(base_reward_opl, 332);
     }
 
     #[test]
     fn block_target_time_produces_24h_epochs() {
-        // 1,024 blocks × 84,375 ms = 86,400,000 ms = 86,400 s = 24 hours exactly
+        // 960 blocks × 90,000 ms = 86,400,000 ms = 86,400 s = 24 hours exactly
         let epoch_ms = EPOCH * BLOCK_TARGET_TIME_MS;
         assert_eq!(epoch_ms, 86_400_000);
     }

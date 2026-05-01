@@ -50,9 +50,8 @@ pub struct GenesisAttestation {
 /// `MIN_DIFFICULTY` and USGS/WGC 2024 figures for annual production and
 /// total above-ground reserves.
 ///
-/// Genesis accounts can be specified to pre-fund wallets for testnet.
-/// Each genesis account is credited with the specified amount of Flakes
-/// in the genesis state without requiring a transaction.
+/// Genesis accounts can be specified to pre-fund wallets (e.g. foundation
+/// or team allocations). Each is credited in genesis state without a transaction.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct GenesisConfig {
     /// The starting difficulty at height 0. Typically `MIN_DIFFICULTY`.
@@ -66,11 +65,10 @@ pub struct GenesisConfig {
     /// (ed25519 verifying key). Required so accounts can sign transactions immediately
     /// without an empty-key bypass.
     pub genesis_accounts: Vec<(ObjectId, FlakeAmount, Vec<u8>)>,
-    /// Block reward in Flakes for this chain. Mainnet: derived by the genesis ceremony.
-    /// Testnet/dev: defaults to the `BASE_REWARD` constant.
+    /// Block reward in Flakes for this chain, derived from the genesis ceremony.
+    /// Defaults to `BASE_REWARD` if the ceremony hasn't set a value.
     pub base_reward: FlakeAmount,
-    /// Optional ceremony attestation to embed in the genesis block.
-    /// Set by the genesis ceremony binary; `None` for testnet and dev chains.
+    /// Ceremony attestation embedded in the genesis block for audit verification.
     pub ceremony_data: Option<GenesisCeremonyData>,
 }
 
@@ -90,8 +88,8 @@ impl Default for GenesisConfig {
                 usgs_response_hash: [0u8; 32],
                 wgc_response_hash: [0u8; 32],
                 // Derivation: floor(annual_production * troy_oz_per_tonne / blocks_per_year)
-                // blocks_per_year = 365.25 * 1024 = 374,016
-                derivation_formula: "floor(annual_production_tonnes * 32150.7 / 374016)".to_string(),
+                // blocks_per_year = floor(365.25 * 86400 / 90) = 350,640
+                derivation_formula: "floor(annual_production_tonnes * 32150.7 / 350640)".to_string(),
             },
             genesis_accounts: vec![],
             base_reward: BASE_REWARD,

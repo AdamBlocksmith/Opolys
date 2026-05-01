@@ -22,7 +22,7 @@ pub mod challenge;
 pub use behaviour::*;
 pub use network::*;
 pub use sync::{SyncRequest, SyncResponse, SyncConfig, MAX_SYNC_BLOCKS, MAX_SYNC_HEADERS};
-pub use discovery::{DiscoveryConfig, resolve_dns_seeds, TESTNET_DNS_SEEDS, MAINNET_DNS_SEEDS};
+pub use discovery::{DiscoveryConfig, resolve_dns_seeds, MAINNET_DNS_SEEDS};
 pub use challenge::{ChallengeRequest, ChallengeResponse, challenge_protocol, CHALLENGE_TIMEOUT_SECS};
 pub use libp2p::Multiaddr;
 pub use libp2p::PeerId;

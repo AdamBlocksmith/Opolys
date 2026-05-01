@@ -30,7 +30,7 @@
 use opolys_core::{FlakeAmount, ObjectId, ValidatorStatus, MIN_BOND_STAKE, EPOCH, MAX_ACTIVE_VALIDATORS};
 use borsh::{BorshSerialize, BorshDeserialize};
 use serde::{Serialize, Deserialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use opolys_crypto::Blake3Hasher;
 
 /// A pending unbonding entry that matures after a delay of EPOCH blocks.
@@ -213,15 +213,30 @@ impl ValidatorInfo {
     }
 }
 
+/// Maximum number of validators kept in the in-memory cache.
+/// Active validators always stay cached; others are evicted when the cache
+/// is full. Non-cached validators are loaded from RocksDB on demand.
+const VALIDATOR_CACHE_MAX_SIZE: usize = 10_000;
+
 /// The set of all bonded validators, supporting bonding, unbonding,
 /// activating, slashing, and weighted block-producer selection.
 ///
 /// Only **double-signing** triggers slashing in Opolys — no other offense
 /// results in stake removal. Slashed stake is burned (removed from supply),
 /// not sent to any entity.
+///
+/// Supports up to 524,288 total validators with a 5,000-slot active set.
+/// Validators outside the top-5,000 by weight sit in Waiting status.
+/// rerank_validators() at epoch boundaries promotes/demotes as weights shift.
 #[derive(Debug)]
 pub struct ValidatorSet {
-    validators: HashMap<ObjectId, ValidatorInfo>,
+    /// In-memory validator cache (active set always resident; others evicted when full).
+    cached_validators: HashMap<ObjectId, ValidatorInfo>,
+    /// In-memory active set for O(1) total_bonded_stake() and active_validators().
+    active_set: Vec<ObjectId>,
+    /// Validators modified since the last state root was computed.
+    /// Used for incremental state root computation (O(changed) not O(total)).
+    pub dirty_validators: HashSet<ObjectId>,
     /// Pending unbonding entries that mature after EPOCH blocks.
     pub unbonding_queue: Vec<PendingUnbond>,
 }
@@ -230,9 +245,32 @@ impl ValidatorSet {
     /// Create an empty validator set.
     pub fn new() -> Self {
         ValidatorSet {
-            validators: HashMap::new(),
+            cached_validators: HashMap::new(),
+            active_set: Vec::new(),
+            dirty_validators: HashSet::new(),
             unbonding_queue: Vec::new(),
         }
+    }
+
+    /// Evict non-active validators from the in-memory cache when it exceeds
+    /// `VALIDATOR_CACHE_MAX_SIZE`. Active validators are never evicted.
+    fn evict_cache_if_full(&mut self) {
+        if self.cached_validators.len() <= VALIDATOR_CACHE_MAX_SIZE {
+            return;
+        }
+        let evict: Vec<ObjectId> = self.cached_validators.iter()
+            .filter(|(_, v)| v.status != ValidatorStatus::Active && v.status != ValidatorStatus::Waiting)
+            .map(|(id, _)| id.clone())
+            .take(self.cached_validators.len().saturating_sub(VALIDATOR_CACHE_MAX_SIZE))
+            .collect();
+        for id in evict {
+            self.cached_validators.remove(&id);
+        }
+    }
+
+    /// Clear the dirty set (called after state root is committed).
+    pub fn clear_dirty(&mut self) {
+        self.dirty_validators.clear();
     }
 
     /// Bond stake as a validator entry. If the validator doesn't exist, creates
@@ -256,15 +294,18 @@ impl ValidatorSet {
             ));
         }
 
-        if let Some(validator) = self.validators.get_mut(&object_id) {
+        if let Some(validator) = self.cached_validators.get_mut(&object_id) {
             if validator.status == ValidatorStatus::Slashed {
                 return Err("Slashed validators cannot re-bond".to_string());
             }
-            // Top-up or auto-merge
             validator.add_entry(stake, height, timestamp);
+            self.dirty_validators.insert(object_id);
         } else {
             // New validator: create with first bond entry
-            self.validators.insert(object_id.clone(), ValidatorInfo::new(object_id, stake, height, timestamp));
+            let id = object_id.clone();
+            self.cached_validators.insert(object_id.clone(), ValidatorInfo::new(object_id, stake, height, timestamp));
+            self.dirty_validators.insert(id);
+            self.evict_cache_if_full();
         }
 
         Ok(())
@@ -285,7 +326,7 @@ impl ValidatorSet {
         amount: FlakeAmount,
         current_height: u64,
     ) -> Result<FlakeAmount, String> {
-        let validator = self.validators.get_mut(object_id)
+        let validator = self.cached_validators.get_mut(object_id)
             .ok_or_else(|| "Validator not bonded".to_string())?;
 
         let total_stake = validator.total_stake();
@@ -307,8 +348,10 @@ impl ValidatorSet {
 
         // If no entries remain, remove the validator entirely
         if validator.entries.is_empty() {
-            self.validators.remove(object_id);
+            self.cached_validators.remove(object_id);
+            self.active_set.retain(|id| id != object_id);
         }
+        self.dirty_validators.insert(object_id.clone());
 
         Ok(unbonded)
     }
@@ -333,63 +376,112 @@ impl ValidatorSet {
         matured
     }
 
-    /// Activate all validators that have been bonding for at least one full epoch,
-    /// subject to the `MAX_ACTIVE_VALIDATORS` cap.
+    /// Activate all validators that have been bonding for at least one full epoch.
     ///
-    /// Validators transition from Bonding → Active once their bond has been confirmed
-    /// for EPOCH blocks **and** a slot is available. If the cap is already reached,
-    /// eligible validators remain in Bonding status until a slot opens via unbond or
-    /// slash. No bond transaction is ever rejected — all validators are queued fairly.
+    /// Moves Bonding → Waiting. rerank_validators() handles the Waiting → Active
+    /// promotion (top-N by weight). This separation allows fair competition for
+    /// active slots: all epoch-matured validators become eligible, then the highest-
+    /// weight ones are promoted.
     pub fn activate_matured_validators(&mut self, current_height: u64) -> Vec<ObjectId> {
-        let mut activated = Vec::new();
-        let mut current_active = self.validators.values()
-            .filter(|v| v.status == ValidatorStatus::Active)
-            .count();
+        let mut newly_waiting = Vec::new();
 
-        for validator in self.validators.values_mut() {
-            if validator.status == ValidatorStatus::Bonding {
-                if let Some(earliest) = validator.entries.first() {
-                    if current_height >= earliest.bonded_at_height.saturating_add(EPOCH) {
-                        if current_active >= MAX_ACTIVE_VALIDATORS {
-                            // Cap reached — this validator remains in Bonding until a slot opens
-                            continue;
-                        }
-                        validator.status = ValidatorStatus::Active;
-                        validator.last_signed_height = current_height;
-                        activated.push(validator.object_id.clone());
-                        current_active += 1;
+        // Collect eligible IDs first to avoid borrow conflict
+        let eligible: Vec<ObjectId> = self.cached_validators.iter()
+            .filter(|(_, v)| {
+                v.status == ValidatorStatus::Bonding
+                    && v.entries.first().map_or(false, |e| {
+                        current_height >= e.bonded_at_height.saturating_add(EPOCH)
+                    })
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        for id in eligible {
+            if let Some(v) = self.cached_validators.get_mut(&id) {
+                v.status = ValidatorStatus::Waiting;
+                v.last_signed_height = current_height;
+                self.dirty_validators.insert(id.clone());
+                newly_waiting.push(id);
+            }
+        }
+        newly_waiting
+    }
+
+    /// Re-rank all eligible validators at an epoch boundary.
+    ///
+    /// Collects all non-Slashed validators with stake > 0, sorts by total_weight()
+    /// descending, promotes the top MAX_ACTIVE_VALIDATORS to Active, and demotes the
+    /// rest to Waiting. Returns (newly_activated, newly_demoted) for logging.
+    ///
+    /// Must be called at epoch boundaries (height % EPOCH == 0) after
+    /// activate_matured_validators().
+    pub fn rerank_validators(&mut self, current_timestamp: u64) -> (Vec<ObjectId>, Vec<ObjectId>) {
+        // Sort all eligible validators by weight descending
+        let mut eligible: Vec<(ObjectId, u64)> = self.cached_validators.iter()
+            .filter(|(_, v)| v.status != ValidatorStatus::Slashed && v.total_stake() > 0)
+            .map(|(id, v)| (id.clone(), v.weight(current_timestamp)))
+            .collect();
+        eligible.sort_by(|a, b| b.1.cmp(&a.1));
+
+        let mut newly_activated = Vec::new();
+        let mut newly_demoted = Vec::new();
+
+        for (i, (id, _)) in eligible.iter().enumerate() {
+            if let Some(v) = self.cached_validators.get_mut(id) {
+                if i < MAX_ACTIVE_VALIDATORS {
+                    if v.status == ValidatorStatus::Waiting {
+                        v.status = ValidatorStatus::Active;
+                        self.active_set.push(id.clone());
+                        self.dirty_validators.insert(id.clone());
+                        newly_activated.push(id.clone());
+                    }
+                } else {
+                    if v.status == ValidatorStatus::Active {
+                        v.status = ValidatorStatus::Waiting;
+                        self.active_set.retain(|a| a != id);
+                        self.dirty_validators.insert(id.clone());
+                        newly_demoted.push(id.clone());
                     }
                 }
             }
         }
-        activated
+
+        (newly_activated, newly_demoted)
     }
 
     /// Count of validators currently in `Active` status.
     pub fn total_active_validators(&self) -> usize {
-        self.validators.values()
-            .filter(|v| v.status == ValidatorStatus::Active)
-            .count()
+        self.active_set.len()
     }
 
-    /// Count of validators currently in `Bonding` status (waiting for a slot or for epoch maturity).
+    /// Count of validators currently in `Bonding` status (waiting for epoch maturity).
     pub fn total_bonding_validators(&self) -> usize {
-        self.validators.values()
+        self.cached_validators.values()
             .filter(|v| v.status == ValidatorStatus::Bonding)
             .count()
     }
 
-    /// Activate a validator that is currently in `Bonding` status. This
-    /// transitions them to `Active`, making them eligible for block producer
-    /// selection and reward distribution.
+    /// Count of validators currently in `Waiting` status (eligible but outside top-N).
+    pub fn total_waiting_validators(&self) -> usize {
+        self.cached_validators.values()
+            .filter(|v| v.status == ValidatorStatus::Waiting)
+            .count()
+    }
+
+    /// Directly activate a validator (test helper and slash suspension recovery).
+    /// Transitions Bonding → Active and maintains active_set.
     pub fn activate(&mut self, object_id: &ObjectId, height: u64) -> Result<(), String> {
-        let validator = self.validators.get_mut(object_id)
+        let validator = self.cached_validators.get_mut(object_id)
             .ok_or_else(|| "Validator not found".to_string())?;
         if validator.status != ValidatorStatus::Bonding {
             return Err("Validator not in bonding state".to_string());
         }
         validator.status = ValidatorStatus::Active;
         validator.last_signed_height = height;
+        if !self.active_set.contains(object_id) {
+            self.active_set.push(object_id.clone());
+        }
+        self.dirty_validators.insert(object_id.clone());
         Ok(())
     }
 
@@ -406,7 +498,7 @@ impl ValidatorSet {
     /// Returns the Flake amount burned. Returns `Ok(0)` if the validator is already
     /// permanently `Slashed` (idempotent for already-punished validators).
     pub fn graduated_slash(&mut self, object_id: &ObjectId, current_height: u64) -> Result<FlakeAmount, String> {
-        let validator = self.validators.get_mut(object_id)
+        let validator = self.cached_validators.get_mut(object_id)
             .ok_or_else(|| "Validator not found".to_string())?;
 
         // Already permanently slashed — nothing more to take
@@ -433,14 +525,17 @@ impl ValidatorSet {
                 let burn = total_stake / 10;
                 let keep = total_stake - burn;
                 scale_entries(&mut validator.entries, keep, total_stake);
+                self.dirty_validators.insert(object_id.clone());
                 Ok(burn)
             }
             2 => {
-                // 33% burn; suspend for one epoch (reset to Bonding)
+                // 33% burn; suspend for one epoch (reset to Waiting)
                 let burn = total_stake / 3;
                 let keep = total_stake - burn;
                 scale_entries(&mut validator.entries, keep, total_stake);
-                validator.status = ValidatorStatus::Bonding;
+                validator.status = ValidatorStatus::Waiting;
+                self.active_set.retain(|id| id != object_id);
+                self.dirty_validators.insert(object_id.clone());
                 Ok(burn)
             }
             _ => {
@@ -450,6 +545,8 @@ impl ValidatorSet {
                 for entry in &mut validator.entries {
                     entry.stake = 0;
                 }
+                self.active_set.retain(|id| id != object_id);
+                self.dirty_validators.insert(object_id.clone());
                 Ok(burn)
             }
         }
@@ -457,54 +554,68 @@ impl ValidatorSet {
 
     /// Look up a validator by their ObjectId.
     pub fn get_validator(&self, object_id: &ObjectId) -> Option<&ValidatorInfo> {
-        self.validators.get(object_id)
+        self.cached_validators.get(object_id)
     }
 
-    /// Total stake across all Bonding and Active validators. Used to
+    /// Total stake across all Bonding, Waiting, and Active validators. Used to
     /// compute stake coverage, which determines the PoW/PoS reward split.
     pub fn total_bonded_stake(&self) -> FlakeAmount {
-        self.validators.values()
-            .filter(|v| v.status == ValidatorStatus::Active || v.status == ValidatorStatus::Bonding)
+        // Use active_set for Active validators (O(active_set.len()))
+        let active_stake: FlakeAmount = self.active_set.iter()
+            .filter_map(|id| self.cached_validators.get(id))
             .map(|v| v.total_stake())
-            .sum()
+            .sum();
+        // Add Bonding and Waiting stake (not in active_set)
+        let other_stake: FlakeAmount = self.cached_validators.values()
+            .filter(|v| v.status == ValidatorStatus::Bonding || v.status == ValidatorStatus::Waiting)
+            .map(|v| v.total_stake())
+            .sum();
+        active_stake.saturating_add(other_stake)
     }
 
     /// Return all validators currently in `Active` status.
     pub fn active_validators(&self) -> Vec<&ValidatorInfo> {
-        self.validators.values()
-            .filter(|v| v.status == ValidatorStatus::Active)
+        self.active_set.iter()
+            .filter_map(|id| self.cached_validators.get(id))
             .collect()
     }
 
-    /// Compute the total weight of all active validators. Weight is the sum
-    /// of per-entry weights: `Σ entry.stake × (1 + ln(1 + entry.age_years))`,
-    /// giving a logarithmic seniority bonus per entry that diminishes over time
-    /// rather than compounding endlessly.
+    /// Compute the total weight of all active validators.
     pub fn total_weight(&self, current_timestamp: u64) -> FlakeAmount {
-        self.validators.values()
-            .filter(|v| v.status == ValidatorStatus::Active)
+        self.active_set.iter()
+            .filter_map(|id| self.cached_validators.get(id))
             .map(|v| v.weight(current_timestamp))
             .sum()
     }
 
-    /// Number of validators in the set (regardless of status).
+    /// Number of validators in the cache (may be less than total if some are on disk).
     pub fn validator_count(&self) -> usize {
-        self.validators.len()
+        self.cached_validators.len()
     }
 
     /// Return all validators as a serializable Vec. Used for persistence.
     pub fn all_validators(&self) -> Vec<ValidatorInfo> {
-        self.validators.values().cloned().collect()
+        self.cached_validators.values().cloned().collect()
+    }
+
+    /// Return the active set IDs.
+    pub fn active_set_ids(&self) -> &Vec<ObjectId> {
+        &self.active_set
     }
 
     /// Load validators and unbonding queue from serialized data. Used for state restoration.
     pub fn load_from_validators(validators: Vec<ValidatorInfo>, unbonding_queue: Vec<PendingUnbond>) -> Self {
         let mut set = ValidatorSet {
-            validators: HashMap::new(),
+            cached_validators: HashMap::new(),
+            active_set: Vec::new(),
+            dirty_validators: HashSet::new(),
             unbonding_queue,
         };
         for v in validators {
-            set.validators.insert(v.object_id.clone(), v);
+            if v.status == ValidatorStatus::Active {
+                set.active_set.push(v.object_id.clone());
+            }
+            set.cached_validators.insert(v.object_id.clone(), v);
         }
         set
     }
@@ -513,14 +624,14 @@ impl ValidatorSet {
     /// and their bond entries. Validators are sorted by ObjectId for determinism.
     /// Also includes the unbonding queue to capture pending stake withdrawals.
     pub fn compute_state_root(&self) -> opolys_core::Hash {
-        let mut sorted_ids: Vec<&ObjectId> = self.validators.keys().collect();
+        let mut sorted_ids: Vec<&ObjectId> = self.cached_validators.keys().collect();
         sorted_ids.sort_by(|a, b| a.0 .0.cmp(&b.0 .0));
 
         let mut hasher = Blake3Hasher::new();
 
         // Hash all validator state (sorted by ObjectId)
         for id in sorted_ids {
-            if let Some(validator) = self.validators.get(id) {
+            if let Some(validator) = self.cached_validators.get(id) {
                 if let Ok(bytes) = borsh::to_vec(validator) {
                     hasher.update(&bytes);
                 }
@@ -548,8 +659,8 @@ impl ValidatorSet {
         current_timestamp: u64,
         seed: u64,
     ) -> Option<&ValidatorInfo> {
-        let active: Vec<&ValidatorInfo> = self.validators.values()
-            .filter(|v| v.status == ValidatorStatus::Active)
+        let active: Vec<&ValidatorInfo> = self.active_set.iter()
+            .filter_map(|id| self.cached_validators.get(id))
             .collect();
 
         if active.is_empty() {
@@ -730,17 +841,17 @@ mod tests {
         let id = test_id(b"validator1");
         vs.bond(id.clone(), MIN_BOND_STAKE * 3, 0, 0).unwrap();
 
-        // Unbond at height 100, matures at 100 + 1024 = 1124
+        // Unbond at height 100, matures at 100 + EPOCH
         let unbonded = vs.unbond_amount(&id, MIN_BOND_STAKE, 100).unwrap();
         assert_eq!(unbonded, MIN_BOND_STAKE);
 
-        // At height 1123, nothing has matured yet
-        let matured = vs.process_matured_unbonds(1123);
+        // One block before maturity — nothing matured yet
+        let matured = vs.process_matured_unbonds(100 + EPOCH - 1);
         assert!(matured.is_empty());
         assert_eq!(vs.unbonding_queue.len(), 1);
 
-        // At height 1124, the entry matures
-        let matured = vs.process_matured_unbonds(1124);
+        // At maturity height, the entry matures
+        let matured = vs.process_matured_unbonds(100 + EPOCH);
         assert_eq!(matured.len(), 1);
         assert_eq!(matured[0].0, id);
         assert_eq!(matured[0].1, MIN_BOND_STAKE);
@@ -756,32 +867,32 @@ mod tests {
         // At height 0, validator should be in Bonding status
         assert_eq!(vs.get_validator(&id).unwrap().status, ValidatorStatus::Bonding);
 
-        // Before epoch boundary, no activation
-        let activated = vs.activate_matured_validators(1023);
-        assert!(activated.is_empty());
+        // One block before epoch boundary — no activation yet
+        let waiting = vs.activate_matured_validators(EPOCH - 1);
+        assert!(waiting.is_empty());
         assert_eq!(vs.get_validator(&id).unwrap().status, ValidatorStatus::Bonding);
 
-        // At epoch boundary, validator activates
-        let activated = vs.activate_matured_validators(1024);
+        // At epoch boundary, validator moves to Waiting
+        let waiting = vs.activate_matured_validators(EPOCH);
+        assert_eq!(waiting.len(), 1);
+        assert_eq!(waiting[0], id);
+        assert_eq!(vs.get_validator(&id).unwrap().status, ValidatorStatus::Waiting);
+
+        // rerank promotes to Active (only 1 validator, so it takes the slot)
+        let (activated, demoted) = vs.rerank_validators(0);
         assert_eq!(activated.len(), 1);
-        assert_eq!(activated[0], id);
+        assert!(demoted.is_empty());
         assert_eq!(vs.get_validator(&id).unwrap().status, ValidatorStatus::Active);
     }
 
     #[test]
-    fn validator_cap_holds_excess_in_bonding() {
-        // Fill the active set to MAX_ACTIVE_VALIDATORS, then bond one more.
-        // The extra validator must remain Bonding even after its epoch matures.
-        // This test uses a tiny fake cap: we bond MAX_ACTIVE_VALIDATORS + 1
-        // validators all at height 0 and check that exactly MAX_ACTIVE_VALIDATORS
-        // become Active at the epoch boundary, with the remainder still Bonding.
-        //
-        // Testing with the real cap (5,000) is expensive, so we verify the logic
-        // with a smaller set and trust that MAX_ACTIVE_VALIDATORS is just a constant.
+    fn validator_cap_holds_excess_in_waiting() {
+        // Bond MAX_ACTIVE_VALIDATORS + 2 validators. After activate_matured_validators
+        // all move to Waiting. After rerank_validators, exactly MAX_ACTIVE_VALIDATORS
+        // become Active and 2 remain Waiting.
 
         let mut vs = ValidatorSet::new();
 
-        // Bond (MAX_ACTIVE_VALIDATORS + 2) validators, all bonded at height 0
         let n = MAX_ACTIVE_VALIDATORS + 2;
         let mut ids = Vec::new();
         for i in 0..n {
@@ -793,16 +904,23 @@ mod tests {
         assert_eq!(vs.total_active_validators(), 0);
         assert_eq!(vs.total_bonding_validators(), n);
 
-        // Activate at epoch boundary
-        let activated = vs.activate_matured_validators(EPOCH as u64);
-        assert_eq!(activated.len(), MAX_ACTIVE_VALIDATORS);
-        assert_eq!(vs.total_active_validators(), MAX_ACTIVE_VALIDATORS);
-        // The 2 extras remain Bonding — waiting for a slot
-        assert_eq!(vs.total_bonding_validators(), 2);
+        // All move to Waiting at epoch boundary
+        let waiting = vs.activate_matured_validators(EPOCH);
+        assert_eq!(waiting.len(), n);
+        assert_eq!(vs.total_active_validators(), 0);
+        assert_eq!(vs.total_waiting_validators(), n);
 
-        // A second call at the same height should not activate more (cap still full)
-        let activated2 = vs.activate_matured_validators(EPOCH as u64);
+        // rerank promotes top MAX_ACTIVE_VALIDATORS to Active
+        let (activated, demoted) = vs.rerank_validators(0);
+        assert_eq!(activated.len(), MAX_ACTIVE_VALIDATORS);
+        assert!(demoted.is_empty());
+        assert_eq!(vs.total_active_validators(), MAX_ACTIVE_VALIDATORS);
+        assert_eq!(vs.total_waiting_validators(), 2);
+
+        // A second rerank at the same height — no change (cap still full)
+        let (activated2, demoted2) = vs.rerank_validators(0);
         assert!(activated2.is_empty());
+        assert!(demoted2.is_empty());
         assert_eq!(vs.total_active_validators(), MAX_ACTIVE_VALIDATORS);
     }
 
@@ -833,7 +951,7 @@ mod tests {
         assert_eq!(burned, MIN_BOND_STAKE * 3); // floor(9,000,000 / 3) = 3 OPL
         let v = vs.get_validator(&id).unwrap();
         assert_eq!(v.total_stake(), MIN_BOND_STAKE * 6); // 6 OPL remains
-        assert_eq!(v.status, ValidatorStatus::Bonding); // suspended
+        assert_eq!(v.status, ValidatorStatus::Waiting); // suspended to Waiting
         assert_eq!(v.slash_offense_count, 2);
     }
 
@@ -1009,11 +1127,15 @@ mod tests {
         assert_eq!(vs.total_bonded_stake(), MIN_BOND_STAKE * 35);
 
         // Phase 2: Before epoch boundary, no activation
-        let activated = vs.activate_matured_validators(1023);
-        assert!(activated.is_empty());
+        let waiting = vs.activate_matured_validators(EPOCH - 1);
+        assert!(waiting.is_empty());
 
-        // Phase 3: At epoch boundary (height 1024), all validators activate
-        let activated = vs.activate_matured_validators(1024);
+        // Phase 3: At epoch boundary, all validators move to Waiting then Active
+        let waiting = vs.activate_matured_validators(EPOCH);
+        assert_eq!(waiting.len(), 3);
+        assert_eq!(vs.get_validator(&alice).unwrap().status, ValidatorStatus::Waiting);
+
+        let (activated, _) = vs.rerank_validators(0);
         assert_eq!(activated.len(), 3);
         assert_eq!(vs.get_validator(&alice).unwrap().status, ValidatorStatus::Active);
         assert_eq!(vs.get_validator(&bob).unwrap().status, ValidatorStatus::Active);
@@ -1028,23 +1150,23 @@ mod tests {
             "Producer must be one of the bonded validators"
         );
 
-        // Phase 5: Unbond Alice at height 2000, matures at height 2000 + 1024 = 3024
+        // Phase 5: Unbond Alice at height 2000, matures at height 2000 + EPOCH
         let unbonded = vs.unbond_amount(&alice, MIN_BOND_STAKE * 3, 2000).unwrap();
         assert_eq!(unbonded, MIN_BOND_STAKE * 3);
         assert_eq!(vs.unbonding_queue.len(), 1);
         assert_eq!(vs.unbonding_queue[0].account, alice);
         assert_eq!(vs.unbonding_queue[0].amount, MIN_BOND_STAKE * 3);
-        assert_eq!(vs.unbonding_queue[0].matures_at, 2000 + EPOCH as u64);
+        assert_eq!(vs.unbonding_queue[0].matures_at, 2000 + EPOCH);
 
         // Alice still has 7 OPL bonded
         assert_eq!(vs.get_validator(&alice).unwrap().total_stake(), MIN_BOND_STAKE * 7);
 
-        // Phase 6: Process matured unbonds — nothing at height 3023
-        let matured = vs.process_matured_unbonds(3023);
+        // Phase 6: Process matured unbonds — nothing before maturity
+        let matured = vs.process_matured_unbonds(2000 + EPOCH - 1);
         assert!(matured.is_empty());
 
-        // At height 3024, Alice's unbonding entry matures
-        let matured = vs.process_matured_unbonds(3024);
+        // At maturity height, Alice's unbonding entry matures
+        let matured = vs.process_matured_unbonds(2000 + EPOCH);
         assert_eq!(matured.len(), 1);
         assert_eq!(matured[0].0, alice);
         assert_eq!(matured[0].1, MIN_BOND_STAKE * 3);
@@ -1058,10 +1180,10 @@ mod tests {
         assert_eq!(burn1, MIN_BOND_STAKE / 2);
         assert_eq!(vs.get_validator(&charlie).unwrap().status, ValidatorStatus::Active);
 
-        // 2nd offense: 33% burn of 4.5 OPL = 1.5 OPL, suspended to Bonding
+        // 2nd offense: 33% burn of 4.5 OPL = 1.5 OPL, suspended to Waiting
         let burn2 = vs.graduated_slash(&charlie, 2200).unwrap();
         assert_eq!(burn2, MIN_BOND_STAKE + MIN_BOND_STAKE / 2);
-        assert_eq!(vs.get_validator(&charlie).unwrap().status, ValidatorStatus::Bonding);
+        assert_eq!(vs.get_validator(&charlie).unwrap().status, ValidatorStatus::Waiting);
 
         // 3rd offense: 100% burn of remaining 3 OPL, permanent Slashed
         let burn3 = vs.graduated_slash(&charlie, 2300).unwrap();

@@ -48,7 +48,7 @@ use tokio::time::Duration;
 // ─── Physical constants ───────────────────────────────────────────────────────
 
 const TROY_OZ_PER_TONNE: f64 = 32_150.7;
-const BLOCK_TARGET_TIME_MS: u64 = 84_375;
+const BLOCK_TARGET_TIME_MS: u64 = 90_000;
 const FLAKES_PER_OPL: u64 = 1_000_000;
 
 // Sanity bounds — values outside these are rejected before the algorithm runs

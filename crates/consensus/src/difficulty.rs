@@ -249,7 +249,8 @@ mod tests {
     }
 
     #[test]
-    fn epoch_is_1024() {
-        assert_eq!(EPOCH, 1024);
+    fn epoch_is_960() {
+        // 960 blocks × 90,000 ms = exactly 24 hours
+        assert_eq!(EPOCH, 960);
     }
 }

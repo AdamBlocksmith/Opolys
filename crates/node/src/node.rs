@@ -77,7 +77,7 @@ pub struct Args {
 
     /// Skip all hardcoded and DNS-resolved bootstrap peers.
     /// User-provided --bootstrap addresses are still dialed.
-    /// Useful for isolated local testnets where you control all peers manually.
+    /// Useful for isolated local networks where you control all peers manually.
     #[arg(long)]
     pub no_bootstrap: bool,
 
@@ -118,14 +118,6 @@ pub struct Args {
     #[arg(long)]
     pub key_file: Option<String>,
 
-    /// Run in testnet mode with pre-funded genesis accounts.
-    ///
-    /// Creates 3 genesis accounts each funded with 10,000 OPL for testing.
-    /// These accounts have deterministic ObjectIds derived from well-known
-    /// testnet keys. Do NOT use testnet mode for production.
-    #[arg(long)]
-    pub testnet: bool,
-
     /// Path to the genesis ceremony attestation JSON file.
     ///
     /// Required for mainnet operation. The JSON must contain the ceremony
@@ -133,7 +125,7 @@ pub struct Args {
     /// `base_reward_flakes`, `ceremony_timestamp`, `gold_spot_price_usd_cents`,
     /// `annual_production_tonnes`, `total_above_ground_tonnes`,
     /// `lbma_response_hash`, `usgs_response_hash`, `wgc_response_hash`,
-    /// and `derivation_formula`. Not required for testnet (ignored if --testnet).
+    /// and `derivation_formula`. Required before starting the node.
     #[arg(long)]
     pub genesis_params: Option<String>,
 
@@ -170,49 +162,13 @@ pub struct NodeConfig {
     /// Path to the miner/validator key file (32-byte ed25519 seed).
     /// When provided, the node can sign PoS blocks and receive block rewards.
     pub key_file: Option<String>,
-    /// Run in testnet mode with pre-funded genesis accounts.
-    /// Creates 3 accounts each with 10,000 OPL. Do NOT use in production.
-    pub testnet: bool,
     /// IP address the RPC server listens on. Default: "127.0.0.1".
     /// Set to "0.0.0.0" to expose publicly (use with --rpc-api-key).
     pub rpc_listen_addr: String,
     /// Optional API key for write and mining RPC endpoints.
     pub rpc_api_key: Option<String>,
-    /// Path to the genesis ceremony JSON for mainnet. None for testnet/dev.
+    /// Path to the genesis ceremony JSON. Required on startup.
     pub genesis_params_path: Option<String>,
-}
-
-/// Build the testnet genesis config with pre-funded accounts.
-///
-/// These are deterministic testnet keys — NOT for production use.
-/// Each account starts with 10,000 OPL (10,000,000,000 Flakes).
-fn testnet_genesis_config() -> opolys_consensus::GenesisConfig {
-    use opolys_core::FLAKES_PER_OPL;
-    let mut config = opolys_consensus::GenesisConfig::default();
-    config.initial_difficulty = 4; // testnet: faster blocks for testing
-    // 10,000 OPL per testnet account
-    let testnet_funding = 10_000 * FLAKES_PER_OPL;
-    config.genesis_accounts = vec![
-        // Testnet Account 0 — see testnet-data/testnet-keys.txt for seed
-        (
-            ObjectId::from_hex("12865e52536fc1d6e63e1c5430f01134efd540514b4d66df76a990dd7875dc16").unwrap(),
-            testnet_funding,
-            hex::decode("7e6db137e7e59a3f96ae682b5c7292f9ecc0529f8c55c728a631456190a97a66").unwrap(),
-        ),
-        // Testnet Account 1 — see testnet-data/testnet-keys.txt for seed
-        (
-            ObjectId::from_hex("558af9966416c04a2b2aff355f386aeb5d356b100861992069b8592a0021dc8b").unwrap(),
-            testnet_funding,
-            hex::decode("8aef2fc5caa3343aac5000072d2a6fe837746f912c6c26b1071b39c2b83a35c4").unwrap(),
-        ),
-        // Testnet Account 2 — see testnet-data/testnet-keys.txt for seed
-        (
-            ObjectId::from_hex("e024a035a42f9858bb498f0a64c28d9702783265fb7f6cc484b7f986d48eef9d").unwrap(),
-            testnet_funding,
-            hex::decode("cd606e8a8f63b78c1a8fb2f063bd9a9db8699dc44a6f0447ba2505276efca57a").unwrap(),
-        ),
-    ];
-    config
 }
 
 impl Default for NodeConfig {
@@ -228,7 +184,6 @@ impl Default for NodeConfig {
             no_rpc: false,
             validate: false,
             key_file: None,
-            testnet: false,
             rpc_listen_addr: "127.0.0.1".to_string(),
             rpc_api_key: None,
             genesis_params_path: None,
@@ -453,12 +408,7 @@ impl OpolysNode {
             (ObjectId(Hash::zero()), None)
         };
 
-        let genesis_config = if config.testnet {
-            tracing::warn!("TESTNET MODE: Pre-funded genesis accounts enabled. DO NOT use in production.");
-            testnet_genesis_config()
-        } else {
-            opolys_consensus::GenesisConfig::default()
-        };
+        let genesis_config = opolys_consensus::GenesisConfig::default();
 
         // Try to open the database and load existing state
         let data_path = std::path::PathBuf::from(&config.data_dir);
@@ -1081,7 +1031,7 @@ impl OpolysNode {
         chain.suggested_fee = next_suggested_fee;
 
         // Execute all transactions in order
-        let expected_chain_id = if self.config.testnet { TESTNET_CHAIN_ID } else { MAINNET_CHAIN_ID };
+        let expected_chain_id = MAINNET_CHAIN_ID;
         let mut total_fees_burned: FlakeAmount = 0;
         for tx in &block.transactions {
             let result = TransactionDispatcher::apply_transaction(
@@ -1262,7 +1212,6 @@ mod tests {
             no_rpc: true,
             validate: false,
             key_file: None,
-            testnet: false,
             rpc_listen_addr: "127.0.0.1".to_string(),
             rpc_api_key: None,
             genesis_params_path: None,

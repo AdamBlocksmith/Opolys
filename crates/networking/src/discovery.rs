@@ -23,13 +23,6 @@ impl Default for DiscoveryConfig {
     }
 }
 
-/// DNS seeds for testnet — resolved at startup, not hardcoded IPs.
-/// Update these DNS records to rotate bootstrap infrastructure without releasing a new binary.
-pub const TESTNET_DNS_SEEDS: &[&str] = &[
-    "testnet-seed.opolys.io",
-    "testnet-seed2.opolys.io",
-];
-
 /// DNS seeds for mainnet — resolved at startup, not hardcoded IPs.
 /// Update these DNS records to rotate bootstrap infrastructure without releasing a new binary.
 pub const MAINNET_DNS_SEEDS: &[&str] = &[

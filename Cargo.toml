@@ -17,6 +17,7 @@ members = [
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+authors = ["The Blocksmith <adamblocksmith@protonmail.com>"]
 
 [workspace.dependencies]
 opolys-core = { path = "crates/core" }

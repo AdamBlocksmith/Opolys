@@ -17,7 +17,7 @@ Opolys encodes these properties directly into consensus:
 | **Gold is lost over time** | All transaction fees are burned | Every fee permanently destroys OPL from circulation. Shipwrecks, lost jewelry, melted coins — Opolys models this as fee burning. The circulating supply can *shrink*. |
 | **Gold mining is a physical process** | EVO-OMAP memory-hard proof-of-work | Mining requires 256 MiB of memory and data-dependent computation. No shortcut, no ASIC cheat. Like digging a shaft — you have to move the rock. |
 | **Gold ore varies in richness** | Vein yield: `1 + ln(target / hash_int)` | A lucky gold strike yields more than a poor one. Vein yield models this: most blocks earn ~2x base reward, exceptional ones earn more. The math is natural, not scheduled. |
-| **Gold production rate is known** | BASE_REWARD = 332 OPL (testnet), derived from world gold production | 3,630 tonnes of gold are mined annually (~116.7 million troy ounces). Divided by 350,640 blocks per year = 332 OPL per block at minimum difficulty. Mainnet BASE_REWARD is set from live data at genesis ceremony. |
+| **Gold production rate is known** | BASE_REWARD derived from world gold production via genesis ceremony | 3,630 tonnes of gold are mined annually (~116.7 million troy ounces). Divided by 350,640 blocks per year = 332 OPL per block at minimum difficulty. BASE_REWARD is set from live LBMA/USGS/WGC data at the genesis ceremony. |
 | **Gold must be refined before use** | Difficulty must be overcome to earn reward | You can't just claim gold exists — you have to prove you did the work. EVO-OMAP requires a valid proof-of-work with at least D leading zero bits. |
 | **Gold held in vaults earns trust** | Validator staking with seniority | Bonded OPL gives validators block production rights. Senior validators earn slightly more (logarithmic weight), just as trusted vaults command higher fees. But the marginal bonus shrinks over time — no permanent aristocracy. |
 | **Gold can be unvaulted** | FIFO unbonding with 1-epoch delay | Unbonding OPL is like withdrawing gold from a vault. It takes time (960 blocks = exactly 24 hours). During the delay, you still earn rewards. The oldest deposits are withdrawn first. |
@@ -30,13 +30,13 @@ Opolys encodes these properties directly into consensus:
 
 ## The Gold Derivation
 
-The testnet base block reward of 332 OPL is not an arbitrary number. It comes directly from real-world gold production data:
+The base block reward of 332 OPL is not an arbitrary number. It comes directly from real-world gold production data:
 
 ```
 Annual gold production           ≈ 3,630 tonnes          (USGS/WGC 2024-2025)
 Convert to troy ounces           ≈ 116,707,041 oz        (3,630 × 32,150.7)
 Blocks per year                  = 350,640                (365.25 × 86,400 / 90)
-BASE_REWARD (testnet)            = floor(116,707,041 / 350,640) = 332 OPL
+BASE_REWARD                      = floor(116,707,041 / 350,640) = 332 OPL
 ```
 
 For **mainnet**, `BASE_REWARD` is not hardcoded — it is derived during the genesis ceremony from live LBMA/USGS/WGC data at launch time and embedded in the genesis block attestation. This anchors the supply model to real gold market data on the exact day the network starts.
@@ -67,33 +67,9 @@ cd Opolys
 cargo build --release
 ```
 
-### Run a Testnet Node
+### Run a Node
 
-The fastest way to test Opolys locally:
-
-```bash
-# One-command testnet (builds node, generates miner key, starts mining)
-./scripts/testnet-bootstrap.sh          # Start with defaults
-./scripts/testnet-bootstrap.sh --reset  # Reset chain data and start fresh
-```
-
-Three genesis accounts are pre-funded with 10,000 OPL each.
-Testnet keys are at: `testnet-data/testnet-keys.txt`
-
-```bash
-# Manual testnet start
-cargo run --release -- --testnet --mine --validate --key-file testnet-data/miner.key
-
-# Testnet with debug logging and custom ports
-cargo run --release -- --testnet --mine --port 5000 --rpc-port 5001 --log-level debug
-
-# Testnet isolated (no bootstrap peers)
-cargo run --release -- --testnet --mine --no-bootstrap
-```
-
-### Run a Mainnet Node
-
-Mainnet requires a genesis ceremony attestation file:
+Every node requires a genesis ceremony attestation file:
 
 ```bash
 # Run the genesis ceremony to generate attestation
@@ -124,8 +100,7 @@ cargo run --release -- \
 | `--mine` | disabled | Enable PoW mining loop |
 | `--validate` | disabled | Enable PoS block production |
 | `--key-file` | _(none)_ | Path to 32-byte ed25519 seed file |
-| `--testnet` | disabled | Pre-funded genesis accounts (DO NOT use in production) |
-| `--genesis-params` | _(none)_ | Path to genesis ceremony JSON (required for mainnet) |
+| `--genesis-params` | _(none)_ | Path to genesis ceremony JSON (required) |
 | `--no-rpc` | disabled | Disable JSON-RPC server |
 | `--rpc-listen-addr` | `127.0.0.1` | RPC listen address (`0.0.0.0` to expose publicly) |
 | `--rpc-api-key` | _(none)_ | API key for write/mining RPC methods |
@@ -199,7 +174,6 @@ The name "Flake" comes directly from gold: a flake is the smallest piece of gold
 Opolys/
 ├── Cargo.toml                                        # Workspace
 ├── THE_PLAN.md                                       # Single source of truth
-├── scripts/testnet-bootstrap.sh                      # One-command testnet launcher
 ├── crates/
 │   ├── core/          — Shared types, constants, errors
 │   │   ├── constants.rs     # BASE_REWARD, EPOCH, BLOCK_TARGET_TIME_MS, etc.
@@ -217,7 +191,7 @@ Opolys/
 │   │   ├── mempool.rs        # Fee-priority mempool
 │   │   ├── pos.rs            # ValidatorSet, FIFO unbonding, seniority weights
 │   │   ├── pow.rs            # EVO-OMAP PowContext, mine_parallel, verify_light
-│   │   └── genesis.rs        # GenesisConfig, testnet_genesis_config()
+│   │   └── genesis.rs        # GenesisConfig, build_genesis_block()
 │   ├── execution/     — Transaction dispatcher (Transfer, Bond, Unbond)
 │   │   └── dispatcher.rs      # verify_transaction(), apply_transaction()
 │   ├── storage/       — RocksDB persistence
@@ -454,7 +428,7 @@ After unbonding, stake enters the **unbonding queue** for `UNBONDING_DELAY_BLOCK
 Newly bonded validators start in `Bonding` status. They activate to `Active` after their earliest bond entry has been confirmed for at least one full epoch (960 blocks). Only `Active` validators are eligible for block production.
 
 **Validator caps:**
-- **Active set**: 5,000 validators maximum (can be raised via protocol upgrade after testnet)
+- **Active set**: 5,000 validators maximum (can be raised via protocol upgrade)
 - **Total registered**: up to 524,288 validators can be in `Bonding`/`Waiting` status
 - New validators bond successfully and queue fairly — no `ValidatorBond` is ever rejected
 
@@ -702,7 +676,7 @@ Every block applied to the chain must pass these checks:
 | `CURRENCY_SMALLEST_UNIT` | `"Flake"` | Name of 1/1,000,000 OPL |
 | `FLAKES_PER_OPL` | 1,000,000 | Fundamental unit ratio |
 | `DECIMAL_PLACES` | 6 | Always 6 decimal places |
-| `BASE_REWARD` | 332,000,000 Flakes (332 OPL) testnet; mainnet from genesis ceremony | Gold-derived block reward base |
+| `BASE_REWARD` | From genesis ceremony (default: 332,000,000 Flakes / 332 OPL) | Gold-derived block reward base |
 | `MIN_DIFFICULTY` | 1 | Mathematical floor (not a cap) |
 | `EPOCH` | 960 blocks | Unified epoch for retarget, dataset regen, unbonding (= exactly 24 hours) |
 | `UNBONDING_DELAY_BLOCKS` | 960 | One epoch delay for unbonding |
@@ -791,8 +765,6 @@ The genesis block is created from a `GenesisAttestation` containing:
 
 The genesis block has height 0, zero previous hash, no transactions, no PoW proof, and a state root computed from ceremony parameters and protocol constants.
 
-In `--testnet` mode, three deterministic testnet accounts are pre-funded with 10,000 OPL each for testing.
-
 ---
 
 ## Security Features
@@ -835,7 +807,7 @@ Opolys implements layered P2P defenses to protect honest nodes from adversarial 
 | **No schedules** | Difficulty and rewards emerge from chain state, not from a calendar |
 | **No hardcoded fees** | Fees are market-driven and burned entirely |
 | **Only double-signing slashed** | No reversal windows, no confiscation for any other reason |
-| **Gold-derived emission** | BASE_REWARD = 312 OPL, derived from annual gold production (~3,630 tonnes) |
+| **Gold-derived emission** | BASE_REWARD from genesis ceremony, derived from annual gold production (~3,630 tonnes) |
 | **Integer-only consensus** | No floating-point arithmetic in consensus-critical code (except `f64::ln()` for vein yield, which is IEEE 754 deterministic) |
 | **Single key** | One ed25519 key for both transactions and validation, derived from BIP-39 mnemonic |
 | **Core only** | The node is the protocol layer (like Bitcoin Core). Community builds explorers, wallets, and mining pools |
@@ -857,8 +829,7 @@ Opolys implements layered P2P defenses to protect honest nodes from adversarial 
 | Networking | **DONE** | libp2p gossip/sync/discovery wired to node |
 | Staking & PoS | **DONE** | Validator bonding, graduated slash, PoS block production, `--validate` |
 | Security hardening | **DONE** | Eclipse protection, subnet diversity, DoS limits, memory challenge |
-| Testnet | **READY** | Code complete; deploy and run public testnet |
-| Mainnet | **PLANNED** | Genesis ceremony and launch |
+| Mainnet | **READY** | Genesis ceremony and launch |
 
 ---
 

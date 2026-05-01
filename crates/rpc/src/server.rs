@@ -84,6 +84,8 @@ pub struct ChainInfo {
     pub block_timestamps: Vec<u64>,
     /// Suggested fee for the next block (Flakes), computed via EMA.
     pub suggested_fee: u64,
+    /// Height of the most recently finalized block (cannot be reverted).
+    pub finalized_height: u64,
 }
 
 // ─── Shared state for RPC handlers ────────────────────────────────
@@ -245,6 +247,7 @@ pub async fn handle_jsonrpc(
         "opl_getSupply" => handle_get_supply(&state).await,
         "opl_getDifficulty" => handle_get_difficulty(&state).await,
         "opl_getValidators" => handle_get_validators(&state).await,
+        "opl_getFinalizedHeight" => handle_get_finalized_height(&state).await,
         // ── Write endpoints ──
         "opl_sendTransaction" => handle_send_transaction(&state, &req.params).await,
         // ── Mining endpoints ──
@@ -299,12 +302,19 @@ async fn handle_get_chain_info(state: &RpcState) -> Result<serde_json::Value, Js
         validator_count: validators.validator_count(),
         active_validators: validators.total_active_validators(),
         bonding_validators: validators.total_bonding_validators(),
+        waiting_validators: validators.total_waiting_validators(),
         max_active_validators: MAX_ACTIVE_VALIDATORS,
         bonded_stake: validators.total_bonded_stake(),
         phase: chain.phase.clone(),
         protocol_version: opolys_core::NETWORK_PROTOCOL_VERSION.to_string(),
+        finalized_height: chain.finalized_height,
     };
     serde_json::to_value(info).map_err(|e| JsonRpcError::internal_error(&e.to_string()))
+}
+
+async fn handle_get_finalized_height(state: &RpcState) -> Result<serde_json::Value, JsonRpcError> {
+    let chain = state.chain.read().await;
+    serde_json::to_value(chain.finalized_height).map_err(|e| JsonRpcError::internal_error(&e.to_string()))
 }
 
 fn handle_get_network_version() -> Result<serde_json::Value, JsonRpcError> {
@@ -341,8 +351,9 @@ async fn handle_get_account(state: &RpcState, params: &serde_json::Value) -> Res
 
 async fn handle_get_block_by_height(state: &RpcState, params: &serde_json::Value) -> Result<serde_json::Value, JsonRpcError> {
     let height = require_u64_param(params, "height")?;
+    let finalized_height = state.chain.read().await.finalized_height;
     match state.store.load_block(height) {
-        Ok(Some(block)) => serde_json::to_value(block_to_response(&block))
+        Ok(Some(block)) => serde_json::to_value(block_to_response(&block, finalized_height))
             .map_err(|e| JsonRpcError::internal_error(&e.to_string())),
         Ok(None) => Err(JsonRpcError::not_found(&format!("Block at height {} not found", height))),
         Err(e) => Err(JsonRpcError::internal_error(&e.to_string())),
@@ -352,9 +363,10 @@ async fn handle_get_block_by_height(state: &RpcState, params: &serde_json::Value
 async fn handle_get_block_by_hash(state: &RpcState, params: &serde_json::Value) -> Result<serde_json::Value, JsonRpcError> {
     let hex_hash = require_string_param(params, "hash")?;
     let hash = parse_hash(&hex_hash)?;
+    let finalized_height = state.chain.read().await.finalized_height;
     // Look up height by hash via the store's reverse index
     match state.store.load_block_by_hash(&hash) {
-        Ok(Some(block)) => serde_json::to_value(block_to_response(&block))
+        Ok(Some(block)) => serde_json::to_value(block_to_response(&block, finalized_height))
             .map_err(|e| JsonRpcError::internal_error(&e.to_string())),
         Ok(None) => Err(JsonRpcError::not_found("Block not found")),
         Err(e) => Err(JsonRpcError::internal_error(&e.to_string())),
@@ -365,11 +377,13 @@ async fn handle_get_latest_blocks(state: &RpcState, params: &serde_json::Value) 
     let count = optional_u64_param(params, 10)?;
     let chain = state.chain.read().await;
     let current_height = chain.height;
+    let finalized_height = chain.finalized_height;
+    drop(chain);
     let mut blocks = Vec::new();
     let limit = count.min(50) as u64;
     for h in (0..=current_height).rev().take(limit as usize) {
         match state.store.load_block(h) {
-            Ok(Some(block)) => blocks.push(block_to_response(&block)),
+            Ok(Some(block)) => blocks.push(block_to_response(&block, finalized_height)),
             Ok(None) => break,
             Err(_) => break,
         }
@@ -708,7 +722,7 @@ fn format_action(action: &opolys_core::TransactionAction) -> String {
 }
 
 /// Convert a Block to a JSON-serializable response.
-fn block_to_response(block: &Block) -> BlockResponse {
+fn block_to_response(block: &Block, finalized_height: u64) -> BlockResponse {
     BlockResponse {
         version: block.header.version,
         height: block.header.height,
@@ -720,6 +734,7 @@ fn block_to_response(block: &Block) -> BlockResponse {
         suggested_fee: block.header.suggested_fee,
         transaction_count: block.transactions.len(),
         block_hash: compute_block_hash(&block.header).to_hex(),
+        finalized: block.header.height <= finalized_height,
     }
 }
 
@@ -740,14 +755,17 @@ pub struct ChainInfoResponse {
     pub validator_count: usize,
     /// Validators currently in Active status (producing blocks, earning rewards).
     pub active_validators: usize,
-    /// Validators in Bonding status — either waiting for epoch maturity or for
-    /// an Active slot to open (if active_validators == max_active_validators).
+    /// Validators in Bonding status — waiting for epoch maturity before joining Waiting pool.
     pub bonding_validators: usize,
-    /// Protocol cap on simultaneously Active validators (1,000 at launch).
+    /// Validators in Waiting status — eligible but outside the top-N active set by weight.
+    pub waiting_validators: usize,
+    /// Protocol cap on simultaneously Active validators.
     pub max_active_validators: usize,
     pub bonded_stake: u64,
     pub phase: String,
     pub protocol_version: String,
+    /// Height of the most recently finalized block (cannot be reverted).
+    pub finalized_height: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -777,6 +795,8 @@ pub struct BlockResponse {
     pub suggested_fee: u64,
     pub transaction_count: usize,
     pub block_hash: String,
+    /// True if this block cannot be reverted (POS_FINALITY_BLOCKS consecutive PoS blocks follow it).
+    pub finalized: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

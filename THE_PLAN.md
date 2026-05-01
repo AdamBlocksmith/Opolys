@@ -70,7 +70,7 @@ From `crates/core/src/constants.rs`:
 | `CURRENCY_SMALLEST_UNIT` | `"Flake"` | Name of 1/1,000,000 OPL |
 | `FLAKES_PER_OPL` | `1_000_000` | Fundamental unit ratio |
 | `DECIMAL_PLACES` | `6` | Always 6 decimal places |
-| `BASE_REWARD` | `332,000,000` Flakes (332 OPL) testnet; mainnet from genesis ceremony | Gold-derived block reward base |
+| `BASE_REWARD` | From genesis ceremony (default: `332,000,000` Flakes / 332 OPL) | Gold-derived block reward base |
 | `MIN_DIFFICULTY` | `1` | Mathematical floor (not a cap) |
 | `EPOCH` | `960` blocks (= exactly 24 hours at 90 s/block) | Unified epoch for retarget, dataset regen, unbonding |
 | `UNBONDING_DELAY_BLOCKS` | `960` | One epoch delay for unbonding |
@@ -143,8 +143,7 @@ Opolys uses **hybrid PoW/PoS** with a smooth transition:
 | Annual gold production | 3,630 tonnes | USGS/WGC 2024-2025 avg |
 | Annual production in troy oz | ~116,707,041 | 3,630 × 32,150.7 |
 | Blocks per year | 350,640 | 365.25 × 86,400 / 90 |
-| **BASE_REWARD (testnet)** | **332 OPL** | floor(116,707,041 / 350,640) |
-| **BASE_REWARD (mainnet)** | **from genesis ceremony** | derived from live gold data at launch |
+| **BASE_REWARD** | **from genesis ceremony** | floor(live_production / 350,640); default 332 OPL |
 
 ### Block Reward Formula
 
@@ -153,7 +152,7 @@ block_reward = (BASE_REWARD / difficulty) × vein_yield
 ```
 
 Where:
-- `BASE_REWARD = 312 × FLAKES_PER_OPL = 312,000,000 flakes`
+- `BASE_REWARD` = from genesis ceremony (default 332 OPL = 332,000,000 flakes)
 - `difficulty` = effective difficulty (max of retarget, consensus_floor, MIN_DIFFICULTY)
 - `vein_yield` = `1 + ln(target / hash_int)` (see Section 12)
 
@@ -167,7 +166,7 @@ There is **no hard cap**. Issuance shrinks as difficulty rises (like gold gettin
 
 ### Genesis Difficulty
 
-Genesis difficulty: 7 (mainnet), 4 (testnet)
+Genesis difficulty: 7
 - At difficulty 7, single Ryzen 7 7700 parallel produces ~86.5s blocks (vs 90s target)
 - First retarget at block 960 (~24 hours) self-corrects automatically
 - Difficulty 1 at genesis would allow 332 OPL × ~5,000 cheap blocks = unacceptable supply distortion
@@ -267,7 +266,7 @@ Newly bonded validators start in `Bonding` status. They activate to `Active` sta
 - They are activated when a slot opens (unbond or slash creates an opening)
 - No `ValidatorBond` transaction is ever rejected — all are queued fairly
 - Future upgrade path: soft-cap by weight (top-N by stake × seniority)
-- Can be raised via protocol upgrade after testnet validates scaling
+- Can be raised via protocol upgrade
 
 ### Double-Sign Slashing
 
@@ -561,8 +560,7 @@ Opolys/
 | 9: Networking | **DONE** | P2P gossip/sync/discovery wired to node |
 | 10: Staking | **DONE** | `--validate`, graduated slash, PoS block production |
 | 11: Security | **DONE** | Eclipse protection, subnet diversity, DoS limits, memory challenge |
-| 12: Testnet | **READY** | Code complete; deploy and run public testnet |
-| 13: Mainnet | **PLANNED** | Genesis ceremony and launch |
+| 12: Mainnet | **READY** | Genesis ceremony and launch |
 
 ---
 

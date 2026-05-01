@@ -4,13 +4,16 @@
 //! validators, and chain state. It uses RocksDB column families to
 //! partition data:
 //!
-//! | Column Family | Key                | Value                        |
-//! |----------------|--------------------|------------------------------|
-//! | `blocks`       | height (big-endian) | serialized `Block`          |
-//! | `accounts`     | `"all_accounts"`    | serialized `Vec<Account>`   |
-//! | `validators`   | `"all_validators"`  | serialized `Vec<ValidatorInfo>` |
-//! | `chain_state`  | `"chain_state"`     | serialized `PersistedChainState` |
-//! | `chain_state`  | `"latest_block_height"` | height (big-endian)    |
+//! | Column Family | Key                      | Value                                  |
+//! |----------------|--------------------------|----------------------------------------|
+//! | `blocks`       | height (big-endian)      | serialized `Block`                     |
+//! | `accounts`     | `"all_accounts"`         | serialized `Vec<Account>`              |
+//! | `validators`   | `"validator:{hex_id}"`   | Borsh-serialized `ValidatorInfo`       |
+//! | `validators`   | `"active_validator_ids"` | Borsh-serialized `Vec<ObjectId>`       |
+//! | `validators`   | `"validator_count"`      | u64 little-endian total count          |
+//! | `validators`   | `"unbonding_queue"`      | Borsh-serialized `Vec<PendingUnbond>`  |
+//! | `chain_state`  | `"chain_state"`          | serialized `PersistedChainState`       |
+//! | `chain_state`  | `"latest_block_height"`  | height (big-endian)                    |
 //!
 //! Serialization uses [Borsh](https://borsh.io) for deterministic binary encoding.
 //! Compression is enabled with LZ4 to reduce disk footprint.
@@ -54,6 +57,9 @@ pub struct PersistedChainState {
     /// Persisted double-sign detection map: (height, producer_hex, block_hash, signature).
     /// Survives node restarts so evidence can still be built after a reboot.
     pub producer_signatures: Vec<(u64, String, Hash, Vec<u8>)>,
+    /// Height of the latest finalized block (confirmed by POS_FINALITY_BLOCKS PoS blocks).
+    /// 0 means no block is finalized yet.
+    pub finalized_height: u64,
 }
 
 /// Persistent storage backed by RocksDB.
@@ -268,24 +274,76 @@ impl BlockchainStore {
 
     // ─── Validator storage ───────────────────────────────────────────
 
-    /// Save all validators and unbonding queue atomically.
+    /// Save all validators individually and update the active-set index.
+    ///
+    /// Each validator is stored under key `"validator:{hex_object_id}"`.
+    /// The active set is separately stored as `"active_validator_ids"` for
+    /// fast O(active_set) startup load, and `"validator_count"` tracks total.
     pub fn save_validators(&self, validators: &ValidatorSet) -> Result<(), String> {
         let cf = self.db.cf_handle("validators")
             .ok_or_else(|| "Column family 'validators' not found".to_string())?;
 
+        // Write each validator individually
         let all_validators = validators.all_validators();
+        let count = all_validators.len() as u64;
+        for v in &all_validators {
+            let key = format!("validator:{}", v.object_id.to_hex());
+            let data = borsh::to_vec(v)
+                .map_err(|e| format!("Validator serialization failed: {}", e))?;
+            self.db.put_cf(&cf, key.as_bytes(), &data)
+                .map_err(|e| format!("Validator put failed: {}", e))?;
+        }
+
+        // Write active set index for fast startup
+        let active_ids = validators.active_set_ids().clone();
+        let active_data = borsh::to_vec(&active_ids)
+            .map_err(|e| format!("Active set serialization failed: {}", e))?;
+        self.db.put_cf(&cf, b"active_validator_ids", &active_data)
+            .map_err(|e| format!("Active set put failed: {}", e))?;
+
+        // Write total count
+        self.db.put_cf(&cf, b"validator_count", &count.to_le_bytes())
+            .map_err(|e| format!("Validator count put failed: {}", e))?;
+
+        // Also keep backward-compatible "all_validators" blob for migration
         let data = borsh::to_vec(&all_validators)
             .map_err(|e| format!("Validator serialization failed: {}", e))?;
-
         self.db.put_cf(&cf, b"all_validators", &data)
             .map_err(|e| format!("Validator put failed: {}", e))?;
 
-        // Also persist the unbonding queue
+        // Persist the unbonding queue
         let queue_data = borsh::to_vec(&validators.unbonding_queue)
             .map_err(|e| format!("Unbonding queue serialization failed: {}", e))?;
-
         self.db.put_cf(&cf, b"unbonding_queue", &queue_data)
             .map_err(|e| format!("Unbonding queue put failed: {}", e))?;
+
+        Ok(())
+    }
+
+    /// Save only the validators marked dirty since the last full save.
+    ///
+    /// Incremental save: only writes changed validators. Caller must pass
+    /// the dirty set from `ValidatorSet::dirty_validators`.
+    pub fn save_dirty_validators(&self, validators: &ValidatorSet, dirty_ids: &std::collections::HashSet<ObjectId>) -> Result<(), String> {
+        let cf = self.db.cf_handle("validators")
+            .ok_or_else(|| "Column family 'validators' not found".to_string())?;
+
+        for id in dirty_ids {
+            if let Some(v) = validators.get_validator(id) {
+                let key = format!("validator:{}", v.object_id.to_hex());
+                let data = borsh::to_vec(v)
+                    .map_err(|e| format!("Validator serialization failed: {}", e))?;
+                self.db.put_cf(&cf, key.as_bytes(), &data)
+                    .map_err(|e| format!("Validator put failed: {}", e))?;
+            }
+        }
+
+        // Always update active set index when saving dirty validators
+        let active_ids = validators.active_set_ids().clone();
+        let active_data = borsh::to_vec(&active_ids)
+            .map_err(|e| format!("Active set serialization failed: {}", e))?;
+        self.db.put_cf(&cf, b"active_validator_ids", &active_data)
+            .map_err(|e| format!("Active set index put failed: {}", e))?;
 
         Ok(())
     }
@@ -295,11 +353,11 @@ impl BlockchainStore {
         let cf = self.db.cf_handle("validators")
             .ok_or_else(|| "Column family 'validators' not found".to_string())?;
 
+        // Load from the blob (supports both old and new storage formats)
         let validators = match self.db.get_cf(&cf, b"all_validators") {
             Ok(Some(data)) => {
-                let validators: Vec<ValidatorInfo> = Vec::<ValidatorInfo>::try_from_slice(&data)
-                    .map_err(|e| format!("Validator deserialization failed: {}", e))?;
-                validators
+                Vec::<ValidatorInfo>::try_from_slice(&data)
+                    .map_err(|e| format!("Validator deserialization failed: {}", e))?
             }
             Ok(None) => vec![],
             Err(e) => return Err(format!("Validator get failed: {}", e)),
@@ -386,8 +444,9 @@ mod tests {
             state_root: [0u8; 32],
             phase: 0,
             suggested_fee: 1,
-            base_reward: 312_000_000,
+            base_reward: 332_000_000,
             producer_signatures: vec![],
+            finalized_height: 0,
         };
 
         store.save_chain_state(&state).unwrap();

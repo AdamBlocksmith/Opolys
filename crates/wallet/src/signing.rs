@@ -28,9 +28,9 @@ impl TransactionSigner {
     /// **burned** (permanently removed from supply), not collected by any validator.
     /// This is a core Opolys design choice: fees are market-driven and burned.
     ///
-    /// `chain_id` must match the target network (use `MAINNET_CHAIN_ID` for mainnet,
-    /// `TESTNET_CHAIN_ID` for testnet). It is included in both the tx_id hash and
-    /// the signed data to prevent cross-chain replay attacks.
+    /// `chain_id` must match the target network (`MAINNET_CHAIN_ID` for mainnet).
+    /// It is included in both the tx_id hash and the signed data to prevent
+    /// cross-chain replay attacks.
     pub fn create_transfer(
         sender: &KeyPair,
         recipient: ObjectId,
@@ -154,7 +154,7 @@ impl TransactionSigner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opolys_core::{FLAKES_PER_OPL, MAINNET_CHAIN_ID, TESTNET_CHAIN_ID};
+    use opolys_core::{FLAKES_PER_OPL, MAINNET_CHAIN_ID};
 
     #[test]
     fn create_transfer_transaction() {
@@ -221,11 +221,12 @@ mod tests {
     fn tx_id_differs_across_chain_ids() {
         let keypair = KeyPair::generate();
         let recipient = hash_to_object_id(b"recipient");
+        let other_chain_id: u64 = 2;
         let mainnet_tx = TransactionSigner::create_transfer(&keypair, recipient.clone(), 1000, 100, 0, MAINNET_CHAIN_ID);
-        let testnet_tx = TransactionSigner::create_transfer(&keypair, recipient.clone(), 1000, 100, 0, TESTNET_CHAIN_ID);
+        let other_tx = TransactionSigner::create_transfer(&keypair, recipient.clone(), 1000, 100, 0, other_chain_id);
         // Same sender, action, fee, nonce — but different chain_id → different tx_id
-        assert_ne!(mainnet_tx.tx_id, testnet_tx.tx_id);
+        assert_ne!(mainnet_tx.tx_id, other_tx.tx_id);
         assert_eq!(mainnet_tx.chain_id, MAINNET_CHAIN_ID);
-        assert_eq!(testnet_tx.chain_id, TESTNET_CHAIN_ID);
+        assert_eq!(other_tx.chain_id, other_chain_id);
     }
 }

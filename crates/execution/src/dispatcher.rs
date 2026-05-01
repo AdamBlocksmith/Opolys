@@ -81,9 +81,8 @@ impl TransactionDispatcher {
     /// - `ValidatorBond` → `apply_bond`
     /// - `ValidatorUnbond { amount }` → `apply_unbond`
     ///
-    /// `expected_chain_id` must match the network the node is running on
-    /// (MAINNET_CHAIN_ID=1, TESTNET_CHAIN_ID=2). Transactions with a mismatched
-    /// chain_id are rejected to prevent cross-chain replay attacks.
+    /// `expected_chain_id` must match the network's chain ID (MAINNET_CHAIN_ID=1).
+    /// Transactions with a mismatched chain_id are rejected to prevent replay attacks.
     ///
     /// Returns an `ApplyResult` indicating success or failure, along with the
     /// fee amount that was burned.
@@ -775,7 +774,7 @@ mod tests {
     /// Chain ID mismatch must be rejected — prevents cross-chain replay attacks.
     #[test]
     fn wrong_chain_id_rejected() {
-        use opolys_core::TESTNET_CHAIN_ID;
+        let wrong_chain_id: u64 = 2;
         let mut accounts = AccountStore::new();
         let mut validators = ValidatorSet::new();
         let (sk, alice, pk) = test_keypair(1);
@@ -788,11 +787,11 @@ mod tests {
         let tx = signed_transfer(&sk, &alice, pk, &bob, opl_to_flake(10), opl_to_flake(1), 0);
         assert_eq!(tx.chain_id, MAINNET_CHAIN_ID);
 
-        // Applying it to a testnet node must fail
+        // Applying it with a different chain_id must fail
         let result = TransactionDispatcher::apply_transaction(
-            &tx, &mut accounts, &mut validators, 1, 100, TESTNET_CHAIN_ID,
+            &tx, &mut accounts, &mut validators, 1, 100, wrong_chain_id,
         );
-        assert!(!result.success, "Mainnet tx must be rejected on testnet");
+        assert!(!result.success, "Mainnet tx must be rejected with wrong chain_id");
         let err = result.error.unwrap();
         assert!(err.contains("chain_id"), "Error must mention chain_id: {}", err);
     }

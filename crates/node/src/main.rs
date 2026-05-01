@@ -23,7 +23,7 @@ use opolys_node::{Args, NodeConfig, OpolysNode, ChainState};
 use opolys_rpc::RpcState;
 use opolys_rpc::server::{ChainInfo, BlockSubmission, BlockSubmissionResult};
 use opolys_networking::{OpolysNetwork, NetworkConfig, SyncResponse, SyncRequest, MAX_SYNC_BLOCKS,
-    resolve_dns_seeds, TESTNET_DNS_SEEDS, MAINNET_DNS_SEEDS, PeerId};
+    resolve_dns_seeds, MAINNET_DNS_SEEDS, PeerId};
 
 /// Maximum gossip blocks accepted from a single peer per second.
 const MAX_BLOCKS_PER_PEER_PER_SECOND: u32 = 10;
@@ -127,12 +127,11 @@ async fn main() {
         )
         .init();
 
-    // Construct node configuration from CLI arguments
-    // Mainnet requires --genesis-params to anchor the supply model to real gold data
-    if !args.testnet && args.genesis_params.is_none() {
+    // --genesis-params is required: it anchors the supply model to real gold data
+    if args.genesis_params.is_none() {
         tracing::error!(
-            "Mainnet requires --genesis-params <path>. \
-             Generate the file with the genesis-ceremony tool, or use --testnet for testing."
+            "Node requires --genesis-params <path>. \
+             Generate the file with the genesis-ceremony tool before starting."
         );
         std::process::exit(1);
     }
@@ -148,7 +147,6 @@ async fn main() {
         no_rpc: args.no_rpc,
         validate: args.validate,
         key_file: args.key_file,
-        testnet: args.testnet,
         rpc_listen_addr: args.rpc_listen_addr,
         rpc_api_key: args.rpc_api_key,
         genesis_params_path: args.genesis_params,
@@ -161,7 +159,6 @@ async fn main() {
         mining = config.mine,
         validating = config.validate,
         rpc = !config.no_rpc,
-        testnet = config.testnet,
         "Starting Opolys node"
     );
 
@@ -181,8 +178,7 @@ async fn main() {
             }
 
             // 2. DNS seeds — best-effort, failures are silently skipped
-            let dns_seeds = if config.testnet { TESTNET_DNS_SEEDS } else { MAINNET_DNS_SEEDS };
-            let resolved = resolve_dns_seeds(dns_seeds).await;
+            let resolved = resolve_dns_seeds(MAINNET_DNS_SEEDS).await;
             if !resolved.is_empty() {
                 tracing::info!(count = resolved.len(), "DNS seed resolution succeeded");
                 peers.extend(resolved);
@@ -886,7 +882,7 @@ async fn handle_network_event(
 
             match borsh::from_slice::<opolys_core::Transaction>(&data) {
                 Ok(tx) => {
-                    let expected_chain_id = if node.config.testnet { opolys_core::TESTNET_CHAIN_ID } else { opolys_core::MAINNET_CHAIN_ID };
+                    let expected_chain_id = opolys_core::MAINNET_CHAIN_ID;
                     if let Err(e) = opolys_execution::verify_transaction(&tx, expected_chain_id) {
                         if matches!(e, opolys_core::OpolysError::InvalidSignature) {
                             // FIX 5: invalid ed25519 signature — immediate permanent ban
