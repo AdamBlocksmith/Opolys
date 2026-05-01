@@ -16,7 +16,7 @@ use std::collections::HashMap;
 pub struct AccountInfo {
     /// The on-chain identity (Blake3-256 hash of the public key).
     pub object_id: ObjectId,
-    /// Human-readable account label (e.g. "alice", "validator-1").
+    /// Human-readable account label (e.g. "alice", "refiner-1").
     pub name: String,
     /// Hex-encoded ed25519 public key (64 hex chars = 32 bytes).
     pub public_key_hex: String,

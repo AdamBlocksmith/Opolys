@@ -1,17 +1,17 @@
 //! RocksDB-backed persistent storage for the Opolys blockchain.
 //!
 //! The `BlockchainStore` provides durable storage for blocks, accounts,
-//! validators, and chain state. It uses RocksDB column families to
+//! refiners, and chain state. It uses RocksDB column families to
 //! partition data:
 //!
 //! | Column Family | Key                      | Value                                  |
 //! |----------------|--------------------------|----------------------------------------|
 //! | `blocks`       | height (big-endian)      | serialized `Block`                     |
 //! | `accounts`     | `"all_accounts"`         | serialized `Vec<Account>`              |
-//! | `validators`   | `"validator:{hex_id}"`   | Borsh-serialized `ValidatorInfo`       |
-//! | `validators`   | `"active_validator_ids"` | Borsh-serialized `Vec<ObjectId>`       |
-//! | `validators`   | `"validator_count"`      | u64 little-endian total count          |
-//! | `validators`   | `"unbonding_queue"`      | Borsh-serialized `Vec<PendingUnbond>`  |
+//! | `refiners`   | `"refiner:{hex_id}"`   | Borsh-serialized `RefinerInfo`       |
+//! | `refiners`   | `"active_refiner_ids"` | Borsh-serialized `Vec<ObjectId>`       |
+//! | `refiners`   | `"refiner_count"`      | u64 little-endian total count          |
+//! | `refiners`   | `"unbonding_queue"`      | Borsh-serialized `Vec<PendingUnbond>`  |
 //! | `chain_state`  | `"chain_state"`          | serialized `PersistedChainState`       |
 //! | `chain_state`  | `"latest_block_height"`  | height (big-endian)                    |
 //!
@@ -20,7 +20,7 @@
 
 use opolys_core::{Block, ObjectId, Hash, Transaction};
 use opolys_consensus::account::{Account, AccountStore};
-use opolys_consensus::pos::{ValidatorInfo, ValidatorSet, PendingUnbond};
+use opolys_consensus::refiner::{RefinerInfo, RefinerSet, PendingUnbond};
 use borsh::{BorshSerialize, BorshDeserialize};
 use std::path::Path;
 
@@ -45,9 +45,6 @@ pub struct PersistedChainState {
     pub latest_block_hash: [u8; 32],
     /// Blake3-256 hash of the state root after applying the most recent block.
     pub state_root: [u8; 32],
-    /// Consensus phase: 0 = ProofOfWork, 1 = ProofOfStake.
-    /// Transitions naturally as stake coverage grows.
-    pub phase: u8,
     /// Suggested fee for the next block (Flakes), computed via EMA.
     /// Starts at MIN_FEE (1 Flake) and adjusts based on network demand.
     pub suggested_fee: u64,
@@ -57,14 +54,14 @@ pub struct PersistedChainState {
     /// Persisted double-sign detection map: (height, producer_hex, block_hash, signature).
     /// Survives node restarts so evidence can still be built after a reboot.
     pub producer_signatures: Vec<(u64, String, Hash, Vec<u8>)>,
-    /// Height of the latest finalized block (confirmed by POS_FINALITY_BLOCKS PoS blocks).
+    /// Height of the latest finalized block.
     /// 0 means no block is finalized yet.
     pub finalized_height: u64,
 }
 
 /// Persistent storage backed by RocksDB.
 ///
-/// Stores blocks, accounts, validators, and chain state in column families.
+/// Stores blocks, accounts, refiners, and chain state in column families.
 /// On startup the node loads persisted state; after each block it saves
 /// all state atomically. Uses LZ4 compression to reduce disk usage.
 pub struct BlockchainStore {
@@ -85,7 +82,7 @@ impl BlockchainStore {
         let cf_names = vec![
             "blocks",
             "accounts",
-            "validators",
+            "refiners",
             "chain_state",
             "transactions",
         ];
@@ -272,47 +269,47 @@ impl BlockchainStore {
         }
     }
 
-    // ─── Validator storage ───────────────────────────────────────────
+    // ─── Refiner storage ───────────────────────────────────────────
 
-    /// Save all validators individually and update the active-set index.
+    /// Save all refiners individually and update the active-set index.
     ///
-    /// Each validator is stored under key `"validator:{hex_object_id}"`.
-    /// The active set is separately stored as `"active_validator_ids"` for
-    /// fast O(active_set) startup load, and `"validator_count"` tracks total.
-    pub fn save_validators(&self, validators: &ValidatorSet) -> Result<(), String> {
-        let cf = self.db.cf_handle("validators")
-            .ok_or_else(|| "Column family 'validators' not found".to_string())?;
+    /// Each refiner is stored under key `"refiner:{hex_object_id}"`.
+    /// The active set is separately stored as `"active_refiner_ids"` for
+    /// fast O(active_set) startup load, and `"refiner_count"` tracks total.
+    pub fn save_refiners(&self, refiners: &RefinerSet) -> Result<(), String> {
+        let cf = self.db.cf_handle("refiners")
+            .ok_or_else(|| "Column family 'refiners' not found".to_string())?;
 
-        // Write each validator individually
-        let all_validators = validators.all_validators();
-        let count = all_validators.len() as u64;
-        for v in &all_validators {
-            let key = format!("validator:{}", v.object_id.to_hex());
+        // Write each refiner individually
+        let all_refiners = refiners.all_refiners();
+        let count = all_refiners.len() as u64;
+        for v in &all_refiners {
+            let key = format!("refiner:{}", v.object_id.to_hex());
             let data = borsh::to_vec(v)
-                .map_err(|e| format!("Validator serialization failed: {}", e))?;
+                .map_err(|e| format!("Refiner serialization failed: {}", e))?;
             self.db.put_cf(&cf, key.as_bytes(), &data)
-                .map_err(|e| format!("Validator put failed: {}", e))?;
+                .map_err(|e| format!("Refiner put failed: {}", e))?;
         }
 
         // Write active set index for fast startup
-        let active_ids = validators.active_set_ids().clone();
+        let active_ids = refiners.active_set_ids().clone();
         let active_data = borsh::to_vec(&active_ids)
             .map_err(|e| format!("Active set serialization failed: {}", e))?;
-        self.db.put_cf(&cf, b"active_validator_ids", &active_data)
+        self.db.put_cf(&cf, b"active_refiner_ids", &active_data)
             .map_err(|e| format!("Active set put failed: {}", e))?;
 
         // Write total count
-        self.db.put_cf(&cf, b"validator_count", &count.to_le_bytes())
-            .map_err(|e| format!("Validator count put failed: {}", e))?;
+        self.db.put_cf(&cf, b"refiner_count", &count.to_le_bytes())
+            .map_err(|e| format!("Refiner count put failed: {}", e))?;
 
-        // Also keep backward-compatible "all_validators" blob for migration
-        let data = borsh::to_vec(&all_validators)
-            .map_err(|e| format!("Validator serialization failed: {}", e))?;
-        self.db.put_cf(&cf, b"all_validators", &data)
-            .map_err(|e| format!("Validator put failed: {}", e))?;
+        // Also keep backward-compatible "all_refiners" blob for migration
+        let data = borsh::to_vec(&all_refiners)
+            .map_err(|e| format!("Refiner serialization failed: {}", e))?;
+        self.db.put_cf(&cf, b"all_refiners", &data)
+            .map_err(|e| format!("Refiner put failed: {}", e))?;
 
         // Persist the unbonding queue
-        let queue_data = borsh::to_vec(&validators.unbonding_queue)
+        let queue_data = borsh::to_vec(&refiners.unbonding_queue)
             .map_err(|e| format!("Unbonding queue serialization failed: {}", e))?;
         self.db.put_cf(&cf, b"unbonding_queue", &queue_data)
             .map_err(|e| format!("Unbonding queue put failed: {}", e))?;
@@ -320,47 +317,47 @@ impl BlockchainStore {
         Ok(())
     }
 
-    /// Save only the validators marked dirty since the last full save.
+    /// Save only the refiners marked dirty since the last full save.
     ///
-    /// Incremental save: only writes changed validators. Caller must pass
-    /// the dirty set from `ValidatorSet::dirty_validators`.
-    pub fn save_dirty_validators(&self, validators: &ValidatorSet, dirty_ids: &std::collections::HashSet<ObjectId>) -> Result<(), String> {
-        let cf = self.db.cf_handle("validators")
-            .ok_or_else(|| "Column family 'validators' not found".to_string())?;
+    /// Incremental save: only writes changed refiners. Caller must pass
+    /// the dirty set from `RefinerSet::dirty_refiners`.
+    pub fn save_dirty_refiners(&self, refiners: &RefinerSet, dirty_ids: &std::collections::HashSet<ObjectId>) -> Result<(), String> {
+        let cf = self.db.cf_handle("refiners")
+            .ok_or_else(|| "Column family 'refiners' not found".to_string())?;
 
         for id in dirty_ids {
-            if let Some(v) = validators.get_validator(id) {
-                let key = format!("validator:{}", v.object_id.to_hex());
+            if let Some(v) = refiners.get_refiner(id) {
+                let key = format!("refiner:{}", v.object_id.to_hex());
                 let data = borsh::to_vec(v)
-                    .map_err(|e| format!("Validator serialization failed: {}", e))?;
+                    .map_err(|e| format!("Refiner serialization failed: {}", e))?;
                 self.db.put_cf(&cf, key.as_bytes(), &data)
-                    .map_err(|e| format!("Validator put failed: {}", e))?;
+                    .map_err(|e| format!("Refiner put failed: {}", e))?;
             }
         }
 
-        // Always update active set index when saving dirty validators
-        let active_ids = validators.active_set_ids().clone();
+        // Always update active set index when saving dirty refiners
+        let active_ids = refiners.active_set_ids().clone();
         let active_data = borsh::to_vec(&active_ids)
             .map_err(|e| format!("Active set serialization failed: {}", e))?;
-        self.db.put_cf(&cf, b"active_validator_ids", &active_data)
+        self.db.put_cf(&cf, b"active_refiner_ids", &active_data)
             .map_err(|e| format!("Active set index put failed: {}", e))?;
 
         Ok(())
     }
 
-    /// Load all validators and unbonding queue from disk. Returns a fresh ValidatorSet if none exist.
-    pub fn load_validators(&self) -> Result<ValidatorSet, String> {
-        let cf = self.db.cf_handle("validators")
-            .ok_or_else(|| "Column family 'validators' not found".to_string())?;
+    /// Load all refiners and unbonding queue from disk. Returns a fresh RefinerSet if none exist.
+    pub fn load_refiners(&self) -> Result<RefinerSet, String> {
+        let cf = self.db.cf_handle("refiners")
+            .ok_or_else(|| "Column family 'refiners' not found".to_string())?;
 
         // Load from the blob (supports both old and new storage formats)
-        let validators = match self.db.get_cf(&cf, b"all_validators") {
+        let refiners = match self.db.get_cf(&cf, b"all_refiners") {
             Ok(Some(data)) => {
-                Vec::<ValidatorInfo>::try_from_slice(&data)
-                    .map_err(|e| format!("Validator deserialization failed: {}", e))?
+                Vec::<RefinerInfo>::try_from_slice(&data)
+                    .map_err(|e| format!("Refiner deserialization failed: {}", e))?
             }
             Ok(None) => vec![],
-            Err(e) => return Err(format!("Validator get failed: {}", e)),
+            Err(e) => return Err(format!("Refiner get failed: {}", e)),
         };
 
         let unbonding_queue = match self.db.get_cf(&cf, b"unbonding_queue") {
@@ -372,7 +369,7 @@ impl BlockchainStore {
             Err(e) => return Err(format!("Unbonding queue get failed: {}", e)),
         };
 
-        Ok(ValidatorSet::load_from_validators(validators, unbonding_queue))
+        Ok(RefinerSet::load_from_refiners(refiners, unbonding_queue))
     }
 
     // ─── Chain state storage ──────────────────────────────────────────
@@ -442,7 +439,6 @@ mod tests {
             block_timestamps: vec![1000, 1120, 1240],
             latest_block_hash: [99u8; 32],
             state_root: [0u8; 32],
-            phase: 0,
             suggested_fee: 1,
             base_reward: 332_000_000,
             producer_signatures: vec![],
@@ -476,19 +472,19 @@ mod tests {
     }
 
     #[test]
-    fn save_and_load_validators() {
+    fn save_and_load_refiners() {
         let dir = temp_dir();
         let store = BlockchainStore::open(dir.path()).unwrap();
 
-        let mut validators = ValidatorSet::new();
-        let id = opolys_crypto::hash_to_object_id(b"validator1");
-        validators.bond(id.clone(), opolys_core::MIN_BOND_STAKE, 0, 0).unwrap();
+        let mut refiners = RefinerSet::new();
+        let id = opolys_crypto::hash_to_object_id(b"refiner1");
+        refiners.bond(id.clone(), opolys_core::MIN_BOND_STAKE, 0, 0).unwrap();
 
-        store.save_validators(&validators).unwrap();
-        let loaded = store.load_validators().unwrap();
+        store.save_refiners(&refiners).unwrap();
+        let loaded = store.load_refiners().unwrap();
 
-        assert_eq!(loaded.validator_count(), 1);
-        assert_eq!(loaded.get_validator(&id).unwrap().total_stake(), opolys_core::MIN_BOND_STAKE);
+        assert_eq!(loaded.refiner_count(), 1);
+        assert_eq!(loaded.get_refiner(&id).unwrap().total_stake(), opolys_core::MIN_BOND_STAKE);
     }
 
     #[test]
@@ -514,6 +510,6 @@ mod tests {
         assert!(store.load_chain_state().unwrap().is_none());
         assert!(store.load_block(0).unwrap().is_none());
         assert_eq!(store.load_accounts().unwrap().account_count(), 0);
-        assert_eq!(store.load_validators().unwrap().validator_count(), 0);
+        assert_eq!(store.load_refiners().unwrap().refiner_count(), 0);
     }
 }

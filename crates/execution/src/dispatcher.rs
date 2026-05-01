@@ -2,22 +2,22 @@
 //!
 //! This module provides the `TransactionDispatcher` — the single entry point
 //! for executing transactions against chain state. Every transaction type
-//! (Transfer, ValidatorBond, ValidatorUnbond) flows through `apply_transaction`,
+//! (Transfer, RefinerBond, RefinerUnbond) flows through `apply_transaction`,
 //! which validates the sender's nonce, dispatches to a type-specific handler,
 //! and returns an `ApplyResult`.
 //!
 //! # Fee model
 //!
 //! All transaction fees are **burned** (permanently removed from supply).
-//! Validators do not collect fees — they earn from block rewards only.
+//! Refiners do not collect fees — they earn from block rewards only.
 //! This aligns with Opolys' model as decentralized digital gold: supply
 //! expands via emission and contracts via fee burning, with no hard cap.
 //!
-//! # Per-entry validator bonds with FIFO unbonding
+//! # Per-entry refiner bonds with FIFO unbonding
 //!
-//! Validators can hold multiple bond entries, each with its own stake amount
-//! and seniority clock. `ValidatorBond` creates a new entry (or the first
-//! one if the validator doesn't exist yet). `ValidatorUnbond { amount }`
+//! Refiners can hold multiple bond entries, each with its own stake amount
+//! and seniority clock. `RefinerBond` creates a new entry (or the first
+//! one if the refiner doesn't exist yet). `RefinerUnbond { amount }`
 //! unbonds the specified amount using FIFO order — oldest entries consumed
 //! first. If the amount exceeds an entry's stake, that entry is fully
 //! consumed and the remainder comes from the next oldest. Split entries
@@ -26,7 +26,7 @@
 
 use opolys_core::{Transaction, TransactionAction, ObjectId, FlakeAmount, OpolysError, MIN_BOND_STAKE, MIN_FEE, SIGNATURE_TYPE_ED25519};
 use opolys_consensus::account::{AccountStore, TransferResult};
-use opolys_consensus::pos::ValidatorSet;
+use opolys_consensus::refiner::RefinerSet;
 use opolys_crypto::hash_to_object_id;
 
 /// Result of applying a transaction to the chain state.
@@ -67,19 +67,19 @@ impl ApplyResult {
 ///
 /// All methods are associated functions (no instance state) because transaction
 /// execution is purely deterministic given its inputs. Every transaction fee is
-/// burned (permanently removed from supply) — validators earn from block rewards,
+/// burned (permanently removed from supply) — refiners earn from block rewards,
 /// not from fees.
 pub struct TransactionDispatcher;
 
 impl TransactionDispatcher {
-    /// Apply a transaction against the current account and validator state.
+    /// Apply a transaction against the current account and refiner state.
     ///
     /// This is the single entry point for all transaction execution in Opolys.
     /// It first validates the sender's nonce and minimum fee, then dispatches
     /// to the appropriate handler based on `tx.action`:
     /// - `Transfer` → `apply_transfer`
-    /// - `ValidatorBond` → `apply_bond`
-    /// - `ValidatorUnbond { amount }` → `apply_unbond`
+    /// - `RefinerBond` → `apply_bond`
+    /// - `RefinerUnbond { amount }` → `apply_unbond`
     ///
     /// `expected_chain_id` must match the network's chain ID (MAINNET_CHAIN_ID=1).
     /// Transactions with a mismatched chain_id are rejected to prevent replay attacks.
@@ -89,7 +89,7 @@ impl TransactionDispatcher {
     pub fn apply_transaction(
         tx: &Transaction,
         accounts: &mut AccountStore,
-        validators: &mut ValidatorSet,
+        refiners: &mut RefinerSet,
         block_height: u64,
         block_timestamp: u64,
         expected_chain_id: u64,
@@ -125,11 +125,11 @@ impl TransactionDispatcher {
             TransactionAction::Transfer { recipient, amount } => {
                 Self::apply_transfer(tx, sender, recipient, *amount, accounts)
             }
-            TransactionAction::ValidatorBond { amount } => {
-                Self::apply_bond(tx, sender, *amount, accounts, validators, block_height, block_timestamp)
+            TransactionAction::RefinerBond { amount } => {
+                Self::apply_bond(tx, sender, *amount, accounts, refiners, block_height, block_timestamp)
             }
-            TransactionAction::ValidatorUnbond { amount } => {
-                Self::apply_unbond(tx, sender, *amount, accounts, validators, block_height)
+            TransactionAction::RefinerUnbond { amount } => {
+                Self::apply_unbond(tx, sender, *amount, accounts, refiners, block_height)
             }
         };
 
@@ -164,25 +164,25 @@ impl TransactionDispatcher {
         }
     }
 
-    /// Bond OPL as validator stake.
+    /// Bond OPL as refiner stake.
     ///
-    /// If the sender is already a validator, this creates a new bond entry
+    /// If the sender is already a refiner, this creates a new bond entry
     /// (top-up) with its own seniority clock starting from zero, or merges
     /// with an existing entry at the same timestamp. Each new entry must be
     /// at least `MIN_BOND_STAKE` (1 OPL).
     ///
-    /// If the sender is not yet a validator, this creates a new validator with
+    /// If the sender is not yet a refiner, this creates a new refiner with
     /// this as their first bond entry (status: Bonding).
     ///
     /// The sender's balance is debited by `stake + fee`, where `stake` becomes
-    /// locked validator stake and `fee` is burned. If the bond fails (e.g.
+    /// locked refiner stake and `fee` is burned. If the bond fails (e.g.
     /// insufficient balance), the debit is refunded.
     fn apply_bond(
         tx: &Transaction,
         sender: &ObjectId,
         stake: FlakeAmount,
         accounts: &mut AccountStore,
-        validators: &mut ValidatorSet,
+        refiners: &mut RefinerSet,
         block_height: u64,
         block_timestamp: u64,
     ) -> ApplyResult {
@@ -212,7 +212,7 @@ impl TransactionDispatcher {
 
         // Register the bond (creates new entry or merges with same-timestamp entry)
         let sender_clone = sender.clone();
-        if let Err(e) = validators.bond(sender_clone, stake, block_height, block_timestamp) {
+        if let Err(e) = refiners.bond(sender_clone, stake, block_height, block_timestamp) {
             // Refund on failure
             if let Ok(()) = accounts.credit(sender, total_needed) {}
             return ApplyResult::err(&e);
@@ -227,7 +227,7 @@ impl TransactionDispatcher {
         ApplyResult::ok(tx.fee)
     }
 
-    /// Unbond `amount` Flakes from the validator using FIFO order.
+    /// Unbond `amount` Flakes from the refiner using FIFO order.
     ///
     /// The oldest entries are consumed first. If the amount exceeds an entry's
     /// stake, that entry is fully consumed and the remainder comes from the
@@ -235,7 +235,7 @@ impl TransactionDispatcher {
     /// returned after `UNBONDING_DELAY_BLOCKS` (1,024 blocks = one epoch).
     ///
     /// The transaction fee is burned from the sender's balance immediately.
-    /// If the validator has insufficient stake, the transaction fails with
+    /// If the refiner has insufficient stake, the transaction fails with
     /// no fee burn and no nonce advance.
     ///
     fn apply_unbond(
@@ -243,16 +243,16 @@ impl TransactionDispatcher {
         sender: &ObjectId,
         amount: FlakeAmount,
         accounts: &mut AccountStore,
-        validators: &mut ValidatorSet,
+        refiners: &mut RefinerSet,
         block_height: u64,
     ) -> ApplyResult {
-        // Check that the validator exists
-        if validators.get_validator(sender).is_none() {
-            return ApplyResult::err("Validator not bonded");
+        // Check that the refiner exists
+        if refiners.get_refiner(sender).is_none() {
+            return ApplyResult::err("Refiner not bonded");
         }
 
         // Perform FIFO unbond — oldest entries consumed first, queued for delayed return
-        let unbonded = match validators.unbond_amount(sender, amount, block_height) {
+        let unbonded = match refiners.unbond_amount(sender, amount, block_height) {
             Ok(stake) => stake,
             Err(e) => return ApplyResult::err(&e),
         };
@@ -312,8 +312,8 @@ pub fn validate_transaction_basic(tx: &Transaction, sender_balance: FlakeAmount,
     // Total cost depends on the transaction type
     let total_cost = match &tx.action {
         TransactionAction::Transfer { amount, .. } => amount.saturating_add(tx.fee),
-        TransactionAction::ValidatorBond { amount } => amount.saturating_add(tx.fee),
-        TransactionAction::ValidatorUnbond { .. } => tx.fee,
+        TransactionAction::RefinerBond { amount } => amount.saturating_add(tx.fee),
+        TransactionAction::RefinerUnbond { .. } => tx.fee,
     };
 
     if sender_balance < total_cost {
@@ -453,7 +453,7 @@ mod tests {
     }
 
     fn signed_bond(sk: &SigningKey, sender: &ObjectId, pk: Vec<u8>, amount: FlakeAmount, fee: FlakeAmount, nonce: u64) -> Transaction {
-        let action = TransactionAction::ValidatorBond { amount };
+        let action = TransactionAction::RefinerBond { amount };
         let tx_id = compute_tx_id(sender, &action, fee, nonce, MAINNET_CHAIN_ID);
         let msg = borsh::to_vec(&(sender.clone(), &action, fee, nonce, MAINNET_CHAIN_ID)).unwrap();
         Transaction {
@@ -465,7 +465,7 @@ mod tests {
     }
 
     fn signed_unbond(sk: &SigningKey, sender: &ObjectId, pk: Vec<u8>, amount: FlakeAmount, fee: FlakeAmount, nonce: u64) -> Transaction {
-        let action = TransactionAction::ValidatorUnbond { amount };
+        let action = TransactionAction::RefinerUnbond { amount };
         let tx_id = compute_tx_id(sender, &action, fee, nonce, MAINNET_CHAIN_ID);
         let msg = borsh::to_vec(&(sender.clone(), &action, fee, nonce, MAINNET_CHAIN_ID)).unwrap();
         Transaction {
@@ -489,7 +489,7 @@ mod tests {
 
     /// Unsigned helper used only for validate_transaction_basic tests (no sig check).
     fn unsigned_bond(sender: &ObjectId, amount: FlakeAmount, fee: FlakeAmount, nonce: u64) -> Transaction {
-        let action = TransactionAction::ValidatorBond { amount };
+        let action = TransactionAction::RefinerBond { amount };
         let tx_id = compute_tx_id(sender, &action, fee, nonce, MAINNET_CHAIN_ID);
         Transaction {
             tx_id, sender: sender.clone(), action, fee,
@@ -501,7 +501,7 @@ mod tests {
     #[test]
     fn transfer_success() {
         let mut accounts = AccountStore::new();
-        let mut validators = ValidatorSet::new();
+        let mut refiners = RefinerSet::new();
         let (sk, alice, pk) = test_keypair(1);
         let (_, bob, _) = test_keypair(2);
 
@@ -510,7 +510,7 @@ mod tests {
 
         let tx = signed_transfer(&sk, &alice, pk, &bob, opl_to_flake(10), opl_to_flake(1), 0);
         let result = TransactionDispatcher::apply_transaction(
-            &tx, &mut accounts, &mut validators, 1, 100, MAINNET_CHAIN_ID,
+            &tx, &mut accounts, &mut refiners, 1, 100, MAINNET_CHAIN_ID,
         );
         assert!(result.success, "Transfer should succeed: {:?}", result.error);
         assert_eq!(result.fee_burned, opl_to_flake(1));
@@ -521,7 +521,7 @@ mod tests {
     #[test]
     fn transfer_insufficient_balance() {
         let mut accounts = AccountStore::new();
-        let mut validators = ValidatorSet::new();
+        let mut refiners = RefinerSet::new();
         let (sk, alice, pk) = test_keypair(1);
         let (_, bob, _) = test_keypair(2);
 
@@ -530,17 +530,17 @@ mod tests {
 
         let tx = signed_transfer(&sk, &alice, pk, &bob, 200, 10, 0);
         let result = TransactionDispatcher::apply_transaction(
-            &tx, &mut accounts, &mut validators, 1, 100, MAINNET_CHAIN_ID,
+            &tx, &mut accounts, &mut refiners, 1, 100, MAINNET_CHAIN_ID,
         );
         assert!(!result.success);
     }
 
-    /// Bond validator with sufficient stake — should succeed.
+    /// Bond refiner with sufficient stake — should succeed.
     /// Alice bonds 1 OPL (MIN_BOND_STAKE) with a 1 OPL fee.
     #[test]
-    fn bond_validator_success() {
+    fn bond_refiner_success() {
         let mut accounts = AccountStore::new();
-        let mut validators = ValidatorSet::new();
+        let mut refiners = RefinerSet::new();
         let (sk, alice, pk) = test_keypair(1);
 
         accounts.create_account(alice.clone()).unwrap();
@@ -548,19 +548,19 @@ mod tests {
 
         let tx = signed_bond(&sk, &alice, pk, MIN_BOND_STAKE, opl_to_flake(1), 0);
         let result = TransactionDispatcher::apply_transaction(
-            &tx, &mut accounts, &mut validators, 1, 100, MAINNET_CHAIN_ID,
+            &tx, &mut accounts, &mut refiners, 1, 100, MAINNET_CHAIN_ID,
         );
         assert!(result.success, "Bond should succeed: {:?}", result.error);
-        assert_eq!(validators.validator_count(), 1);
+        assert_eq!(refiners.refiner_count(), 1);
         // Alice's balance: 200 - 1 (stake) - 1 (fee) = 198 OPL
         assert_eq!(accounts.get_account(&alice).unwrap().balance, opl_to_flake(198));
     }
 
-    /// Bond validator with insufficient stake — should fail.
+    /// Bond refiner with insufficient stake — should fail.
     #[test]
-    fn bond_validator_below_minimum() {
+    fn bond_refiner_below_minimum() {
         let mut accounts = AccountStore::new();
-        let mut validators = ValidatorSet::new();
+        let mut refiners = RefinerSet::new();
         let (sk, alice, pk) = test_keypair(1);
 
         accounts.create_account(alice.clone()).unwrap();
@@ -569,16 +569,16 @@ mod tests {
         let too_low = 50; // Below MIN_BOND_STAKE (1 OPL = 1,000,000 flakes)
         let tx = signed_bond(&sk, &alice, pk, too_low, opl_to_flake(1), 0);
         let result = TransactionDispatcher::apply_transaction(
-            &tx, &mut accounts, &mut validators, 1, 100, MAINNET_CHAIN_ID,
+            &tx, &mut accounts, &mut refiners, 1, 100, MAINNET_CHAIN_ID,
         );
         assert!(!result.success);
     }
 
-    /// Top-up: existing validator bonds again, creating a second entry.
+    /// Top-up: existing refiner bonds again, creating a second entry.
     #[test]
     fn bond_top_up_creates_new_entry() {
         let mut accounts = AccountStore::new();
-        let mut validators = ValidatorSet::new();
+        let mut refiners = RefinerSet::new();
         let (sk, alice, pk) = test_keypair(1);
 
         accounts.create_account(alice.clone()).unwrap();
@@ -587,28 +587,28 @@ mod tests {
         // First bond: 1 OPL
         let tx1 = signed_bond(&sk, &alice, pk.clone(), MIN_BOND_STAKE, opl_to_flake(1), 0);
         let result1 = TransactionDispatcher::apply_transaction(
-            &tx1, &mut accounts, &mut validators, 1, 100, MAINNET_CHAIN_ID,
+            &tx1, &mut accounts, &mut refiners, 1, 100, MAINNET_CHAIN_ID,
         );
         assert!(result1.success);
 
         // Second bond (top-up): 2 OPL
         let tx2 = signed_bond(&sk, &alice, pk, MIN_BOND_STAKE * 2, opl_to_flake(1), 1);
         let result2 = TransactionDispatcher::apply_transaction(
-            &tx2, &mut accounts, &mut validators, 2, 200, MAINNET_CHAIN_ID,
+            &tx2, &mut accounts, &mut refiners, 2, 200, MAINNET_CHAIN_ID,
         );
         assert!(result2.success, "Top-up bond should succeed: {:?}", result2.error);
 
-        let v = validators.get_validator(&alice).unwrap();
+        let v = refiners.get_refiner(&alice).unwrap();
         assert_eq!(v.entries.len(), 2);
         assert_eq!(v.total_stake(), MIN_BOND_STAKE * 3);
-        assert_eq!(validators.validator_count(), 1);
+        assert_eq!(refiners.refiner_count(), 1);
     }
 
     /// Unbond using FIFO — oldest entries consumed first.
     #[test]
     fn unbond_fifo_partial() {
         let mut accounts = AccountStore::new();
-        let mut validators = ValidatorSet::new();
+        let mut refiners = RefinerSet::new();
         let (sk, alice, pk) = test_keypair(1);
 
         accounts.create_account(alice.clone()).unwrap();
@@ -616,12 +616,12 @@ mod tests {
 
         // Bond 1 OPL at t=100
         let tx1 = signed_bond(&sk, &alice, pk.clone(), MIN_BOND_STAKE, opl_to_flake(1), 0);
-        let r1 = TransactionDispatcher::apply_transaction(&tx1, &mut accounts, &mut validators, 1, 100, MAINNET_CHAIN_ID);
+        let r1 = TransactionDispatcher::apply_transaction(&tx1, &mut accounts, &mut refiners, 1, 100, MAINNET_CHAIN_ID);
         assert!(r1.success, "First bond should succeed: {:?}", r1.error);
 
         // Bond 2 OPL at t=1000
         let tx2 = signed_bond(&sk, &alice, pk.clone(), MIN_BOND_STAKE * 2, opl_to_flake(1), 1);
-        let r2 = TransactionDispatcher::apply_transaction(&tx2, &mut accounts, &mut validators, 2, 1000, MAINNET_CHAIN_ID);
+        let r2 = TransactionDispatcher::apply_transaction(&tx2, &mut accounts, &mut refiners, 2, 1000, MAINNET_CHAIN_ID);
         assert!(r2.success, "Second bond (top-up) should succeed: {:?}", r2.error);
 
         // Alice balance: 500 - 1 - 1 - 2 - 1 = 495 OPL
@@ -630,19 +630,19 @@ mod tests {
         // Unbond 1.5 OPL — consumes first entry (1 OPL) + 0.5 OPL from second entry
         let tx3 = signed_unbond(&sk, &alice, pk, MIN_BOND_STAKE + MIN_BOND_STAKE / 2, opl_to_flake(1), 2);
         let result = TransactionDispatcher::apply_transaction(
-            &tx3, &mut accounts, &mut validators, 3, 300, MAINNET_CHAIN_ID,
+            &tx3, &mut accounts, &mut refiners, 3, 300, MAINNET_CHAIN_ID,
         );
         assert!(result.success, "Unbond should succeed: {:?}", result.error);
 
-        let v = validators.get_validator(&alice).unwrap();
+        let v = refiners.get_refiner(&alice).unwrap();
         assert_eq!(v.entries.len(), 1);
         // Remaining: 2 - 0.5 = 1.5 OPL
         assert_eq!(v.total_stake(), MIN_BOND_STAKE * 3 / 2);
 
         // Unbonded stake goes into the unbonding queue, not immediately returned
-        assert_eq!(validators.unbonding_queue.len(), 1);
-        assert_eq!(validators.unbonding_queue[0].amount, MIN_BOND_STAKE + MIN_BOND_STAKE / 2);
-        assert_eq!(validators.unbonding_queue[0].matures_at, 3 + EPOCH as u64);
+        assert_eq!(refiners.unbonding_queue.len(), 1);
+        assert_eq!(refiners.unbonding_queue[0].amount, MIN_BOND_STAKE + MIN_BOND_STAKE / 2);
+        assert_eq!(refiners.unbonding_queue[0].matures_at, 3 + EPOCH as u64);
 
         // Alice's balance: 500 - 1 - 1 (bond1) - 2 - 1 (bond2) - 1 (unbond fee) = 494 OPL
         assert_eq!(accounts.get_account(&alice).unwrap().balance, opl_to_flake(494));
@@ -652,39 +652,39 @@ mod tests {
     #[test]
     fn unbond_more_than_stake() {
         let mut accounts = AccountStore::new();
-        let mut validators = ValidatorSet::new();
+        let mut refiners = RefinerSet::new();
         let (sk, alice, pk) = test_keypair(1);
 
         accounts.create_account(alice.clone()).unwrap();
         accounts.credit(&alice, opl_to_flake(200)).unwrap();
 
         let tx1 = signed_bond(&sk, &alice, pk.clone(), MIN_BOND_STAKE, opl_to_flake(1), 0);
-        let r = TransactionDispatcher::apply_transaction(&tx1, &mut accounts, &mut validators, 1, 100, MAINNET_CHAIN_ID);
+        let r = TransactionDispatcher::apply_transaction(&tx1, &mut accounts, &mut refiners, 1, 100, MAINNET_CHAIN_ID);
         assert!(r.success, "Bond should succeed: {:?}", r.error);
 
         // Try to unbond 10x the total stake
         let tx2 = signed_unbond(&sk, &alice, pk, MIN_BOND_STAKE * 10, opl_to_flake(1), 1);
         let result = TransactionDispatcher::apply_transaction(
-            &tx2, &mut accounts, &mut validators, 2, 200, MAINNET_CHAIN_ID,
+            &tx2, &mut accounts, &mut refiners, 2, 200, MAINNET_CHAIN_ID,
         );
         assert!(result.success);
-        // Validator removed because all stake unbonded
-        assert_eq!(validators.validator_count(), 0);
+        // Refiner removed because all stake unbonded
+        assert_eq!(refiners.refiner_count(), 0);
         // But the unbonded stake is in the queue, not immediately credited
-        assert_eq!(validators.unbonding_queue.len(), 1);
+        assert_eq!(refiners.unbonding_queue.len(), 1);
     }
 
-    /// Unbond a non-existent validator — should fail.
+    /// Unbond a non-existent refiner — should fail.
     #[test]
-    fn unbond_nonexistent_validator() {
+    fn unbond_nonexistent_refiner() {
         let mut accounts = AccountStore::new();
-        let mut validators = ValidatorSet::new();
+        let mut refiners = RefinerSet::new();
         let (sk, alice, pk) = test_keypair(1);
 
-        // Alice has no account and is not a validator
+        // Alice has no account and is not a refiner
         let tx = signed_unbond(&sk, &alice, pk, MIN_BOND_STAKE, opl_to_flake(1), 0);
         let result = TransactionDispatcher::apply_transaction(
-            &tx, &mut accounts, &mut validators, 1, 100, MAINNET_CHAIN_ID,
+            &tx, &mut accounts, &mut refiners, 1, 100, MAINNET_CHAIN_ID,
         );
         assert!(!result.success);
     }
@@ -711,7 +711,7 @@ mod tests {
     #[test]
     fn bond_stores_public_key_in_account() {
         let mut accounts = AccountStore::new();
-        let mut validators = ValidatorSet::new();
+        let mut refiners = RefinerSet::new();
         let (sk, alice, pk) = test_keypair(42);
 
         accounts.create_account(alice.clone()).unwrap();
@@ -719,7 +719,7 @@ mod tests {
 
         let tx = signed_bond(&sk, &alice, pk.clone(), MIN_BOND_STAKE, opl_to_flake(1), 0);
         let result = TransactionDispatcher::apply_transaction(
-            &tx, &mut accounts, &mut validators, 1, 100, MAINNET_CHAIN_ID,
+            &tx, &mut accounts, &mut refiners, 1, 100, MAINNET_CHAIN_ID,
         );
         assert!(result.success, "Bond should succeed: {:?}", result.error);
 
@@ -732,7 +732,7 @@ mod tests {
     #[test]
     fn transfer_stores_public_key_in_account() {
         let mut accounts = AccountStore::new();
-        let mut validators = ValidatorSet::new();
+        let mut refiners = RefinerSet::new();
         let (sk, alice, pk) = test_keypair(7);
         let (_, bob, _) = test_keypair(8);
 
@@ -741,7 +741,7 @@ mod tests {
 
         let tx = signed_transfer(&sk, &alice, pk.clone(), &bob, opl_to_flake(10), opl_to_flake(1), 0);
         let result = TransactionDispatcher::apply_transaction(
-            &tx, &mut accounts, &mut validators, 1, 100, MAINNET_CHAIN_ID,
+            &tx, &mut accounts, &mut refiners, 1, 100, MAINNET_CHAIN_ID,
         );
         assert!(result.success, "Transfer should succeed: {:?}", result.error);
 
@@ -754,7 +754,7 @@ mod tests {
     #[test]
     fn empty_public_key_rejected() {
         let mut accounts = AccountStore::new();
-        let mut validators = ValidatorSet::new();
+        let mut refiners = RefinerSet::new();
         let alice = hash_to_object_id(b"alice");
         let bob = hash_to_object_id(b"bob");
 
@@ -764,7 +764,7 @@ mod tests {
         // Unsigned transfer with empty public_key — must be rejected
         let tx = unsigned_transfer(&alice, &bob, opl_to_flake(10), opl_to_flake(1), 0);
         let result = TransactionDispatcher::apply_transaction(
-            &tx, &mut accounts, &mut validators, 1, 100, MAINNET_CHAIN_ID,
+            &tx, &mut accounts, &mut refiners, 1, 100, MAINNET_CHAIN_ID,
         );
         assert!(!result.success, "Empty public_key must be rejected");
         // Balance must be unchanged — no funds drained
@@ -776,7 +776,7 @@ mod tests {
     fn wrong_chain_id_rejected() {
         let wrong_chain_id: u64 = 2;
         let mut accounts = AccountStore::new();
-        let mut validators = ValidatorSet::new();
+        let mut refiners = RefinerSet::new();
         let (sk, alice, pk) = test_keypair(1);
         let (_, bob, _) = test_keypair(2);
 
@@ -789,7 +789,7 @@ mod tests {
 
         // Applying it with a different chain_id must fail
         let result = TransactionDispatcher::apply_transaction(
-            &tx, &mut accounts, &mut validators, 1, 100, wrong_chain_id,
+            &tx, &mut accounts, &mut refiners, 1, 100, wrong_chain_id,
         );
         assert!(!result.success, "Mainnet tx must be rejected with wrong chain_id");
         let err = result.error.unwrap();

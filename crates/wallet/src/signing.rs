@@ -7,8 +7,8 @@
 //!
 //! Transactions are:
 //! - **Transfer** — move OPL between accounts (fees are burned, not collected)
-//! - **ValidatorBond** — lock OPL as stake to become a validator (min 1 OPL per entry)
-//! - **ValidatorUnbond** — release stake using FIFO order (oldest entries first)
+//! - **RefinerBond** — lock OPL as stake to become a refiner (min 1 OPL per entry)
+//! - **RefinerUnbond** — release stake using FIFO order (oldest entries first)
 
 use opolys_core::{FlakeAmount, ObjectId, Transaction, TransactionAction, SIGNATURE_TYPE_ED25519};
 use crate::key::KeyPair;
@@ -25,7 +25,7 @@ impl TransactionSigner {
     /// Create a signed transfer transaction.
     ///
     /// Moves `amount` OPL (in flakes) from sender to recipient. The `fee` is
-    /// **burned** (permanently removed from supply), not collected by any validator.
+    /// **burned** (permanently removed from supply), not collected by any refiner.
     /// This is a core Opolys design choice: fees are market-driven and burned.
     ///
     /// `chain_id` must match the target network (`MAINNET_CHAIN_ID` for mainnet).
@@ -60,22 +60,22 @@ impl TransactionSigner {
         }
     }
 
-    /// Create a signed validator bond transaction.
+    /// Create a signed refiner bond transaction.
     ///
-    /// Locks `amount` OPL (in flakes) as validator stake. If the sender is
-    /// already a validator, this creates a new bond entry (top-up) with its
+    /// Locks `amount` OPL (in flakes) as refiner stake. If the sender is
+    /// already a refiner, this creates a new bond entry (top-up) with its
     /// own seniority clock starting from zero. Each new entry must be at least
     /// `MIN_BOND_STAKE` (1 OPL).
     ///
     /// `chain_id` must match the target network to prevent cross-chain replay attacks.
-    pub fn create_validator_bond(
+    pub fn create_refiner_bond(
         sender: &KeyPair,
         amount: FlakeAmount,
         fee: FlakeAmount,
         nonce: u64,
         chain_id: u64,
     ) -> Transaction {
-        let action = TransactionAction::ValidatorBond { amount };
+        let action = TransactionAction::RefinerBond { amount };
         let sender_id = sender.object_id().clone();
 
         let tx_id = Self::compute_tx_id(&sender_id, &action, fee, nonce, chain_id);
@@ -96,23 +96,23 @@ impl TransactionSigner {
         }
     }
 
-    /// Create a signed validator unbond transaction for FIFO amount-based unbonding.
+    /// Create a signed refiner unbond transaction for FIFO amount-based unbonding.
     ///
-    /// Unbonds `amount` Flakes from the validator's stake using FIFO order —
+    /// Unbonds `amount` Flakes from the refiner's stake using FIFO order —
     /// the oldest entries are consumed first. If the amount exceeds an entry's
     /// stake, that entry is fully consumed and the remainder comes from the next
     /// oldest. After a UNBONDING_DELAY_BLOCKS delay, the unbonded stake is
     /// returned to the sender's wallet.
     ///
     /// `chain_id` must match the target network to prevent cross-chain replay attacks.
-    pub fn create_validator_unbond(
+    pub fn create_refiner_unbond(
         sender: &KeyPair,
         amount: FlakeAmount,
         fee: FlakeAmount,
         nonce: u64,
         chain_id: u64,
     ) -> Transaction {
-        let action = TransactionAction::ValidatorUnbond { amount };
+        let action = TransactionAction::RefinerUnbond { amount };
         let sender_id = sender.object_id().clone();
 
         let tx_id = Self::compute_tx_id(&sender_id, &action, fee, nonce, chain_id);
@@ -179,14 +179,14 @@ mod tests {
     fn create_bond_transaction() {
         let keypair = KeyPair::generate();
         let bond_amount = FLAKES_PER_OPL;
-        let tx = TransactionSigner::create_validator_bond(
+        let tx = TransactionSigner::create_refiner_bond(
             &keypair,
             bond_amount,
             FLAKES_PER_OPL,
             0,
             MAINNET_CHAIN_ID,
         );
-        assert!(matches!(tx.action, TransactionAction::ValidatorBond { amount } if amount == bond_amount));
+        assert!(matches!(tx.action, TransactionAction::RefinerBond { amount } if amount == bond_amount));
         assert_eq!(tx.chain_id, MAINNET_CHAIN_ID);
         assert_eq!(tx.signature_type, SIGNATURE_TYPE_ED25519);
     }
@@ -194,14 +194,14 @@ mod tests {
     #[test]
     fn create_unbond_transaction_with_amount() {
         let keypair = KeyPair::generate();
-        let tx = TransactionSigner::create_validator_unbond(
+        let tx = TransactionSigner::create_refiner_unbond(
             &keypair,
             FLAKES_PER_OPL,
             FLAKES_PER_OPL / 100,
             1,
             MAINNET_CHAIN_ID,
         );
-        assert!(matches!(tx.action, TransactionAction::ValidatorUnbond { amount } if amount == FLAKES_PER_OPL));
+        assert!(matches!(tx.action, TransactionAction::RefinerUnbond { amount } if amount == FLAKES_PER_OPL));
         assert_eq!(tx.nonce, 1);
         assert_eq!(tx.chain_id, MAINNET_CHAIN_ID);
         assert_eq!(tx.signature_type, SIGNATURE_TYPE_ED25519);
@@ -212,7 +212,7 @@ mod tests {
         let keypair = KeyPair::generate();
         let recipient = hash_to_object_id(b"recipient");
         let transfer = TransactionSigner::create_transfer(&keypair, recipient.clone(), 1000, 100, 0, MAINNET_CHAIN_ID);
-        let bond = TransactionSigner::create_validator_bond(&keypair, 1000, 100, 0, MAINNET_CHAIN_ID);
+        let bond = TransactionSigner::create_refiner_bond(&keypair, 1000, 100, 0, MAINNET_CHAIN_ID);
         // Same sender, same fee, same nonce, different action → different tx_id
         assert_ne!(transfer.tx_id, bond.tx_id);
     }

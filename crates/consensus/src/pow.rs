@@ -126,7 +126,7 @@ impl Default for PowContext {
 
 /// Serialize the block header fields for EVO-OMAP mining.
 ///
-/// Includes all fields except `pow_proof` and `validator_signature`,
+/// Includes all fields except `pow_proof` and `refiner_signature`,
 /// which are set after mining. Also includes `version` and `suggested_fee`
 /// to bind the PoW to the complete header state.
 pub fn serialize_header_for_pow(header: &BlockHeader) -> Vec<u8> {
@@ -235,7 +235,7 @@ mod tests {
             extension_root: None,
             producer: ObjectId(Hash::zero()),
             pow_proof: None,
-            validator_signature: None,
+            refiner_signature: None,
         }
     }
 

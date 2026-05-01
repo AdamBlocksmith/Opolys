@@ -10,7 +10,7 @@
 //! - **Persistence** — saving and loading state via RocksDB
 //! - **RPC** — serving chain queries via JSON-RPC
 //!
-//! The node transitions from pure PoW to blended PoW/PoS as validator stake
+//! The node transitions from pure PoW to blended PoW/PoS as refiner stake
 //! coverage grows (no governance or schedules — difficulty and rewards emerge
 //! from chain state).
 

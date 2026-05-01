@@ -85,7 +85,7 @@ pub const GENESIS_DIFFICULTY: u64 = 7;
 /// 90,000 ms × 960 blocks = 86,400,000 ms = exactly 24 hours.
 pub const EPOCH: u64 = 960;
 
-/// Number of blocks a validator must wait before unbonded stake is returned.
+/// Number of blocks a refiner must wait before unbonded stake is returned.
 /// Equal to EPOCH (960 blocks = exactly 24 hours at 90s/block). Unbonding stake
 /// still earns rewards during this delay.
 pub const UNBONDING_DELAY_BLOCKS: u64 = EPOCH;
@@ -96,11 +96,6 @@ pub const UNBONDING_DELAY_BLOCKS: u64 = EPOCH;
 /// fees, but can never fall below MIN_FEE.
 /// Minimum transaction fee in Flakes. 1 Flake = the atomic unit.
 pub const MIN_FEE: u64 = 1;
-
-/// Number of PoS-finalized blocks required before a block is considered final.
-///
-/// After this many subsequent PoS blocks, a block cannot be reverted.
-pub const POS_FINALITY_BLOCKS: u64 = 3;
 
 /// Target time between blocks in milliseconds.
 /// 90,000 ms = 90 seconds per block.
@@ -123,16 +118,16 @@ pub const BLOCK_TARGET_TIME_SECS: u64 = 90;
 /// Only brand-new bond entries enforce this 1 OPL floor.
 pub const MIN_BOND_STAKE: u64 = FLAKES_PER_OPL;
 
-/// Maximum number of simultaneously active validators.
+/// Maximum number of simultaneously active refiners.
 ///
 /// Prevents unbounded O(n) per-block computation and disk writes.
-/// Validators that bond when the cap is full wait in `Bonding` status
-/// until a slot opens (via unbond or slash). No `ValidatorBond` transaction
-/// is ever rejected — all validators are queued fairly.
+/// Refiners that bond when the cap is full wait in `Bonding` status
+/// until a slot opens (via unbond or slash). No `RefinerBond` transaction
+/// is ever rejected — all refiners are queued fairly.
 ///
 /// Can be raised via protocol upgrade.
 /// Future upgrade path: soft-cap by weight (top-N by stake × seniority).
-pub const MAX_ACTIVE_VALIDATORS: usize = 5_000;
+pub const MAX_ACTIVE_REFINERS: usize = 5_000;
 
 /// Block header version number. Incremented for protocol upgrades.
 /// Version 1 is the initial protocol version with EVO-OMAP PoW and

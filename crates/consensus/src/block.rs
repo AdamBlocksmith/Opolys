@@ -1,7 +1,7 @@
 //! # Block hashing, transaction roots, and display formatting.
 //!
 //! Opolys blocks are linked by Blake3-256 hashes of their headers. Every header
-//! field — except `pow_proof` and `validator_signature`, which are set after
+//! field — except `pow_proof` and `refiner_signature`, which are set after
 //! the block is produced — is hashed in a fixed order for deterministic
 //! identification. Transaction integrity is guaranteed by a streaming Merkle-
 //! like root over each transaction's ID, fee, and nonce.
@@ -68,7 +68,7 @@ pub enum BlockStatus {
 /// linking each block to its predecessor via `previous_hash`. The genesis
 /// block uses `Hash::zero()` as its `previous_hash`.
 ///
-/// Note: `pow_proof` and `validator_signature` are intentionally excluded
+/// Note: `pow_proof` and `refiner_signature` are intentionally excluded
 /// because they are populated after mining — the proof must satisfy the hash,
 /// not the other way around. The `version`, `suggested_fee`, and
 /// `extension_root` fields are included to bind the PoW to the complete
@@ -76,9 +76,9 @@ pub enum BlockStatus {
 pub fn compute_block_hash(header: &BlockHeader) -> Hash {
     let mut hasher = Blake3Hasher::new();
     // Hash every field of the header in a fixed order for determinism.
-    // pow_proof and validator_signature are excluded because:
+    // pow_proof and refiner_signature are excluded because:
     // - pow_proof is set AFTER mining (the proof must satisfy the hash, not vice versa)
-    // - validator_signature (ed25519) is appended after block producer selection
+    // - refiner_signature (ed25519) is appended after block producer selection
     // producer IS included because it identifies who earns the block reward.
     hasher.update(&header.version.to_be_bytes());
     hasher.update(&header.height.to_be_bytes());
@@ -269,7 +269,7 @@ pub fn validate_block(
 
 // 12. Block proof check:
     // - PoW blocks: verify the EVO-OMAP proof-of-work
-    // - PoS blocks: verify the validator's ed25519 signature over the block hash
+    // - PoS blocks: verify the refiner's ed25519 signature over the block hash
     //   The producer's public key must be stored on-chain in the AccountStore.
     // - Genesis block (height 0): skip both
     if expected_height > 0 {
@@ -278,20 +278,20 @@ pub fn validate_block(
             if let Err(e) = crate::pow::verify_pow_light(&block.header, block.header.difficulty) {
                 return Err(e);
             }
-        } else if block.header.validator_signature.is_some() {
-            // PoS block — verify the validator's ed25519 signature
+        } else if block.header.refiner_signature.is_some() {
+            // PoS block — verify the refiner's ed25519 signature
             // 1. The signature must be exactly 64 bytes (ed25519)
-            let sig = block.header.validator_signature.as_ref().unwrap();
+            let sig = block.header.refiner_signature.as_ref().unwrap();
             if sig.len() != 64 {
                 return Err(OpolysError::BlockValidationFailed(format!(
-                    "Invalid validator signature length: {} bytes (expected 64)",
+                    "Invalid refiner signature length: {} bytes (expected 64)",
                     sig.len()
                 )));
             }
             // 2. The producer must not be the zero ObjectId
             if block.header.producer.0.is_zero() {
                 return Err(OpolysError::BlockValidationFailed(
-                    "PoS block producer must be a valid validator ObjectId".to_string()
+                    "PoS block producer must be a valid refiner ObjectId".to_string()
                 ));
             }
             // 3. Verify the ed25519 signature over the block hash
@@ -301,9 +301,9 @@ pub fn validate_block(
             //    The signature length, producer non-zero, and structure checks
             //    are all we can verify without on-chain account data.
         } else {
-            // Neither PoW proof nor validator signature — invalid
+            // Neither PoW proof nor refiner signature — invalid
             return Err(OpolysError::BlockValidationFailed(
-                "Block must have either pow_proof or validator_signature".to_string()
+                "Block must have either pow_proof or refiner_signature".to_string()
             ));
         }
     }
@@ -357,7 +357,7 @@ mod tests {
             suggested_fee: 1,
             extension_root: None,
             pow_proof: None,
-            validator_signature: None,
+            refiner_signature: None,
             producer: ObjectId(Hash::from_bytes([0u8; 32])),
         }
     }
@@ -375,7 +375,7 @@ mod tests {
             suggested_fee: 1,
             extension_root: None,
             pow_proof: None,
-            validator_signature: None,
+            refiner_signature: None,
             producer: ObjectId(Hash::from_bytes([0u8; 32])),
         };
         let h1 = compute_block_hash(&header);

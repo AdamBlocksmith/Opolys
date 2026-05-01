@@ -10,13 +10,13 @@
 //! - **Base reward** = `BASE_REWARD / effective_difficulty`. As difficulty
 //!   rises, the per-block reward naturally declines — mimicking the
 //!   diminishing returns of real-world gold extraction.
-//! - **Validator weight** = `Σ entry.stake × (1 + ln(1 + entry.age_years))`,
+//! - **Refiner weight** = `Σ entry.stake × (1 + ln(1 + entry.age_years))`,
 //!   computed per bond entry. Each entry has its own seniority clock, so
 //!   older entries earn proportionally more, but the marginal gain diminishes
 //!   logarithmically over time, preventing permanent dominance by early stakers.
 //! - **Stake coverage** — the ratio of bonded stake to total issued supply —
-//!   determines how much of each block reward flows to miners vs. validators.
-//!   At 0% coverage, all rewards go to miners; at 100%, all go to validators.
+//!   determines how much of each block reward flows to miners vs. refiners.
+//!   At 0% coverage, all rewards go to miners; at 100%, all go to refiners.
 //!
 //! There is no governance body and no parameter votes. Fee markets and chain
 //! state drive everything.
@@ -82,7 +82,7 @@ pub fn compute_base_reward(base_reward: FlakeAmount, difficulty: u64) -> FlakeAm
 /// earns at least the base reward.
 pub fn compute_vein_yield(difficulty: u64, hash_int: u64) -> u64 {
     // hash_int == 0 means PoS block — returns flat 1.0x yield by design
-    // PoS validators earn predictable steady income (BASE_REWARD / difficulty)
+    // PoS refiners earn predictable steady income (BASE_REWARD / difficulty)
     // PoW miners earn variable income based on hash luck (1x to ~10x)
     // This distinction is intentional: vaults earn fees, miners earn ore
     if difficulty == 0 || hash_int == 0 {
@@ -127,22 +127,22 @@ pub fn ln_milli(x: u64) -> u64 {
     result.round().max(0.0) as u64
 }
 
-/// Compute a validator's share of the block reward based on their total weight
-/// relative to all active validators. Weight is the sum of per-entry weights.
+/// Compute a refiner's share of the block reward based on their total weight
+/// relative to all active refiners. Weight is the sum of per-entry weights.
 ///
 /// Each entry's weight = `stake × (1 + ln(1 + age_years))`, giving a logarithmic
 /// seniority bonus. Rewards are distributed proportionally to total weight.
-pub fn compute_validator_reward(
+pub fn compute_refiner_reward(
     block_reward: FlakeAmount,
-    validator_stake: FlakeAmount,
-    validator_age_years: u64,
+    refiner_stake: FlakeAmount,
+    refiner_age_years: u64,
     total_weight: FlakeAmount,
 ) -> FlakeAmount {
     if total_weight == 0 {
         return 0;
     }
-    // Compute validator weight using integer-only seniority
-    let weight = compute_validator_weight(validator_stake, validator_age_years);
+    // Compute refiner weight using integer-only seniority
+    let weight = compute_refiner_weight(refiner_stake, refiner_age_years);
     // u128 intermediate prevents overflow on large reward × weight products
     ((block_reward as u128 * weight as u128) / total_weight as u128) as FlakeAmount
 }
@@ -157,7 +157,7 @@ pub fn compute_validator_reward(
 /// The logarithmic seniority bonus means older entries earn proportionally
 /// more per-coin, but the marginal gain diminishes over time, preventing
 /// permanent dominance by early stakers.
-pub fn compute_validator_weight(stake: FlakeAmount, age_years_milli: u64) -> FlakeAmount {
+pub fn compute_refiner_weight(stake: FlakeAmount, age_years_milli: u64) -> FlakeAmount {
     // 1 + age in milli
     let one_plus_age_milli = 1000u64.saturating_add(age_years_milli);
     // ln(1 + age) in milli
@@ -175,16 +175,16 @@ pub fn compute_pow_share(stake_coverage: f64) -> f64 {
     1.0 - stake_coverage
 }
 
-/// Compute the PoS (validator) share of block rewards.
+/// Compute the PoS (refiner) share of block rewards.
 /// Equals `stake_coverage`, so as more $OPL is bonded,
-/// validators receive a larger share.
+/// refiners receive a larger share.
 pub fn compute_pos_share(stake_coverage: f64) -> f64 {
     stake_coverage
 }
 
 /// Compute stake coverage — the ratio of total bonded $OPL to total issued
 /// $OPL, clamped to [0.0, 1.0]. This single metric determines how block
-/// rewards are split between miners and validators.
+/// rewards are split between miners and refiners.
 pub fn compute_stake_coverage(total_bonded: FlakeAmount, total_issued: FlakeAmount) -> f64 {
     if total_issued == 0 {
         return 0.0;
@@ -349,17 +349,17 @@ mod tests {
     }
 
     #[test]
-    fn validator_weight_increases_with_age() {
-        let w1 = compute_validator_weight(100_000, 500);
-        let w2 = compute_validator_weight(100_000, 2000);
-        let w5 = compute_validator_weight(100_000, 5000);
+    fn refiner_weight_increases_with_age() {
+        let w1 = compute_refiner_weight(100_000, 500);
+        let w2 = compute_refiner_weight(100_000, 2000);
+        let w5 = compute_refiner_weight(100_000, 5000);
         assert!(w1 < w2);
         assert!(w2 < w5);
     }
 
     #[test]
-    fn validator_weight_zero_age() {
-        let w = compute_validator_weight(100_000, 0);
+    fn refiner_weight_zero_age() {
+        let w = compute_refiner_weight(100_000, 0);
         assert_eq!(w, 100_000);
     }
 
@@ -402,21 +402,21 @@ mod tests {
     }
 
     #[test]
-    fn validator_reward_proportional_to_weight() {
+    fn refiner_reward_proportional_to_weight() {
         let reward = 1_000_000u64;
-        let r1 = compute_validator_reward(reward, 100_000, 1000, 200_000);
+        let r1 = compute_refiner_reward(reward, 100_000, 1000, 200_000);
         assert!(r1 > 0);
         assert!(r1 < reward);
     }
 
     /// Integration test: verify that stake_coverage drives the PoW/PoS reward split.
-    /// With 0% coverage, all rewards go to miners. With 100%, all go to validators.
+    /// With 0% coverage, all rewards go to miners. With 100%, all go to refiners.
     #[test]
     fn reward_split_follows_stake_coverage() {
         // At 0% coverage, miner gets 100%
         assert!((compute_pow_share(0.0) - 1.0).abs() < 0.001);
         assert!((compute_pos_share(0.0) - 0.0).abs() < 0.001);
-        // At 100% coverage, validators get 100%
+        // At 100% coverage, refiners get 100%
         assert!((compute_pow_share(1.0) - 0.0).abs() < 0.001);
         assert!((compute_pos_share(1.0) - 1.0).abs() < 0.001);
         // At 30% coverage, split is 70/30

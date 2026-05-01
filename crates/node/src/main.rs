@@ -16,7 +16,7 @@
 //!
 //! Opolys ($OPL) is a blockchain built as decentralized digital gold with no hard cap.
 //! Difficulty and rewards emerge from chain state. Fees are market-driven and burned.
-//! Validators earn from block rewards only.
+//! Refiners earn from block rewards only.
 
 use clap::Parser;
 use opolys_node::{Args, NodeConfig, OpolysNode, ChainState};
@@ -107,7 +107,6 @@ fn chain_state_to_info(chain: &ChainState) -> ChainInfo {
         circulating_supply: chain.circulating_supply(),
         latest_block_hash: chain.latest_block_hash.clone(),
         state_root: chain.state_root.clone(),
-        phase: format!("{:?}", chain.phase),
         block_timestamps: chain.block_timestamps.clone(),
         suggested_fee: chain.suggested_fee,
         finalized_height: chain.finalized_height,
@@ -145,7 +144,7 @@ async fn main() {
         log_level: args.log_level,
         mine: args.mine,
         no_rpc: args.no_rpc,
-        validate: args.validate,
+        refine: args.refine,
         key_file: args.key_file,
         rpc_listen_addr: args.rpc_listen_addr,
         rpc_api_key: args.rpc_api_key,
@@ -157,7 +156,7 @@ async fn main() {
         rpc_port = config.rpc_port,
         data_dir = %config.data_dir,
         mining = config.mine,
-        validating = config.validate,
+        validating = config.refine,
         rpc = !config.no_rpc,
         "Starting Opolys node"
     );
@@ -249,8 +248,8 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
     if !config.mine {
         tracing::info!("Mining: disabled (run with --mine to enable block production)");
     }
-    if config.validate {
-        tracing::info!("Validation: enabled (producing PoS blocks when validator is active)");
+    if config.refine {
+        tracing::info!("Validation: enabled (producing PoS blocks when refiner is active)");
     }
     if config.no_rpc {
         tracing::info!("RPC: disabled (run without --no-rpc to enable)");
@@ -276,7 +275,7 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
         let rpc_state = RpcState::new(
             chain_info.clone(),
             node.accounts.clone(),
-            node.validators.clone(),
+            node.refiners.clone(),
             node.mempool.clone(),
             node.store.as_ref().unwrap().clone(),
             block_sender,
@@ -435,65 +434,73 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
         tracing::info!("Mining loop active");
     }
 
-    // Optionally start the validator block production loop
-    let _validator_handle: Option<tokio::task::JoinHandle<()>> = if config.validate && node.signing_key.is_some() {
-        let validating_node = node.clone();
-        let validating_broadcast = block_broadcast_tx.clone();
-        let validating_chain_info = chain_info.clone();
+    // Optionally start the refiner block production loop
+    let _refiner_handle: Option<tokio::task::JoinHandle<()>> = if config.refine && node.signing_key.is_some() {
+        let refining_node = node.clone();
+        let refining_broadcast = block_broadcast_tx.clone();
+        let refining_chain_info = chain_info.clone();
         Some(tokio::spawn(async move {
-            tracing::info!(miner_id = %validating_node.miner_id.to_hex(), "Validator block production loop starting");
+            tracing::info!(miner_id = %refining_node.miner_id.to_hex(), "Refiner block production loop starting");
             loop {
-                // Wait for the target block time before producing
+                // Record current height before waiting
+                let height_before = {
+                    let chain = refining_node.chain.read().await;
+                    chain.current_height
+                };
+
+                // Wait for the target block time
                 tokio::time::sleep(std::time::Duration::from_millis(opolys_core::BLOCK_TARGET_TIME_MS)).await;
 
-                // Only produce if we're in PoS mode (stake coverage > 0)
-                let chain = validating_node.chain.read().await;
-                let phase = chain.phase.clone();
-                drop(chain);
+                // Check if a miner block arrived while we waited
+                let height_after = {
+                    let chain = refining_node.chain.read().await;
+                    chain.current_height
+                };
 
-                if phase != opolys_core::ConsensusPhase::ProofOfStake {
+                // A new block arrived (from miner or peer) — no need to produce
+                if height_after > height_before {
                     continue;
                 }
 
-                match validating_node.produce_pos_block().await {
+                match refining_node.produce_pos_block().await {
                     Some(block) => {
                         let height = block.header.height;
                         let tx_count = block.transactions.len();
 
-                        match validating_node.apply_block(&block).await {
+                        match refining_node.apply_block(&block).await {
                             Ok(hash) => {
                                 tracing::info!(
                                     height,
                                     tx_count,
                                     hash = %hash.to_hex(),
-                                    "Validator block produced and applied"
+                                    "Refiner block produced and applied"
                                 );
 
                                 // Refresh the RPC chain info snapshot
                                 {
-                                    let chain = validating_node.chain.read().await;
-                                    let mut info = validating_chain_info.write().await;
+                                    let chain = refining_node.chain.read().await;
+                                    let mut info = refining_chain_info.write().await;
                                     *info = chain_state_to_info(&chain);
                                 }
 
                                 // Queue block for P2P broadcast (non-blocking)
                                 if let Ok(block_bytes) = borsh::to_vec(&block) {
-                                    let _ = validating_broadcast.try_send(block_bytes);
+                                    let _ = refining_broadcast.try_send(block_bytes);
                                 }
                             }
                             Err(e) => {
-                                tracing::error!(height, error = %e, "Failed to apply validator block");
+                                tracing::error!(height, error = %e, "Failed to apply refiner block");
                             }
                         }
                     }
                     None => {
-                        // Not this validator's turn or not an active validator
+                        // Not this refiner's turn or not an active refiner
                     }
                 }
             }
         }))
-    } else if config.validate {
-        tracing::warn!("--validate requires --key-file to specify a validator key");
+    } else if config.refine {
+        tracing::warn!("--refine requires --key-file to specify a refiner key");
         None
     } else {
         None
@@ -721,9 +728,9 @@ async fn handle_network_event(
                 return;
             }
 
-            // Validators get 2x rate limits; all peers get full penalties (FIX 1)
-            let is_validator = node.is_validator_peer(&source).await;
-            let block_limit = if is_validator {
+            // Refiners get 2x rate limits; all peers get full penalties (FIX 1)
+            let is_refiner = node.is_refiner_peer(&source).await;
+            let block_limit = if is_refiner {
                 MAX_BLOCKS_PER_PEER_PER_SECOND * 2
             } else {
                 MAX_BLOCKS_PER_PEER_PER_SECOND
@@ -735,7 +742,7 @@ async fn handle_network_event(
                 rl.maybe_reset();
                 rl.block_count += 1;
                 if rl.block_count > block_limit {
-                    tracing::warn!(peer = %source, count = rl.block_count, is_validator, "Rate limiting block gossip from peer");
+                    tracing::warn!(peer = %source, count = rl.block_count, is_refiner, "Rate limiting block gossip from peer");
                     return;
                 }
             }
@@ -823,9 +830,9 @@ async fn handle_network_event(
                         }
                         Err(e) => {
                             tracing::warn!(peer = %source, error = %e, "Failed to apply P2P block");
-                            // FIX 1: full penalty regardless of validator status
-                            // FIX 2: anonymous peers banned after 2 strikes; validators after 3
-                            let max_strikes = if is_validator { 3u32 } else { 2u32 };
+                            // FIX 1: full penalty regardless of refiner status
+                            // FIX 2: anonymous peers banned after 2 strikes; refiners after 3
+                            let max_strikes = if is_refiner { 3u32 } else { 2u32 };
                             let strikes = peer_strikes.entry(source).or_insert(0);
                             *strikes += 1;
                             if *strikes >= max_strikes {
@@ -854,8 +861,8 @@ async fn handle_network_event(
                 return;
             }
 
-            let is_validator = node.is_validator_peer(&source).await;
-            let tx_limit = if is_validator {
+            let is_refiner = node.is_refiner_peer(&source).await;
+            let tx_limit = if is_refiner {
                 MAX_TXS_PER_PEER_PER_SECOND * 2
             } else {
                 MAX_TXS_PER_PEER_PER_SECOND
@@ -867,7 +874,7 @@ async fn handle_network_event(
                 rl.maybe_reset();
                 rl.tx_count += 1;
                 if rl.tx_count > tx_limit {
-                    tracing::warn!(peer = %source, count = rl.tx_count, is_validator, "Rate limiting tx gossip from peer");
+                    tracing::warn!(peer = %source, count = rl.tx_count, is_refiner, "Rate limiting tx gossip from peer");
                     return;
                 }
             }
@@ -1023,31 +1030,31 @@ async fn handle_network_event(
                 tracing::debug!(peer = %peer_id, agent = %agent_version, "Non-opolys peer verified (no challenge required)");
             }
 
-            // Check if the peer's agent string contains a validator announcement.
-            // Format: "opolys-node/1.0 validator:<hex_object_id>"
-            if let Some(rest) = agent_version.split("validator:").nth(1) {
+            // Check if the peer's agent string contains a refiner announcement.
+            // Format: "opolys-node/1.0 refiner:<hex_object_id>"
+            if let Some(rest) = agent_version.split("refiner:").nth(1) {
                 let hex = rest.split_whitespace().next().unwrap_or(rest).trim();
                 match hex::decode(hex) {
                     Ok(bytes) if bytes.len() == 32 => {
                         let mut arr = [0u8; 32];
                         arr.copy_from_slice(&bytes);
                         let object_id = opolys_core::ObjectId(opolys_core::Hash::from_bytes(arr));
-                        let validators = node.validators.read().await;
-                        if let Some(v) = validators.get_validator(&object_id) {
-                            if v.status == opolys_core::ValidatorStatus::Active {
-                                drop(validators);
-                                let mut vp = node.validator_peers.write().await;
+                        let refiners = node.refiners.read().await;
+                        if let Some(v) = refiners.get_refiner(&object_id) {
+                            if v.status == opolys_core::RefinerStatus::Active {
+                                drop(refiners);
+                                let mut vp = node.refiner_peers.write().await;
                                 vp.insert(peer_id, object_id.clone());
                                 tracing::info!(
                                     peer = %peer_id,
-                                    validator = %object_id.to_hex(),
-                                    "Peer identified as active validator"
+                                    refiner = %object_id.to_hex(),
+                                    "Peer identified as active refiner"
                                 );
                             }
                         }
                     }
                     _ => {
-                        tracing::debug!(peer = %peer_id, %agent_version, "Peer agent contains validator: prefix but hex is invalid");
+                        tracing::debug!(peer = %peer_id, %agent_version, "Peer agent contains refiner: prefix but hex is invalid");
                     }
                 }
             }
@@ -1056,7 +1063,7 @@ async fn handle_network_event(
             tracing::info!(peer = %peer_id, "Peer disconnected");
             peer_strikes.remove(&peer_id);
             peer_rate_limits.remove(&peer_id);
-            node.validator_peers.write().await.remove(&peer_id);
+            node.refiner_peers.write().await.remove(&peer_id);
             // FIX 7: clean up challenge state
             verified_peers.remove(&peer_id);
             pending_challenges.remove(&peer_id);

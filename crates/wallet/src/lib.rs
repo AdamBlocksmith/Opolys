@@ -12,7 +12,7 @@
 //!
 //! Opolys uses Blake3-256 for hashing. Addresses (ObjectId) are derived from
 //! the ed25519 public key via Blake3. The same ed25519 key is used for both
-//! transaction signing and validator block signing. Full wallet recovery from
+//! transaction signing and refiner block signing. Full wallet recovery from
 //! mnemonic alone is supported — no separate backup file needed.
 
 pub mod key;

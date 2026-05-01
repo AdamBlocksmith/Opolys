@@ -40,23 +40,23 @@ pub enum OpolysError {
     #[error("Account not found: {0}")]
     AccountNotFound(String),
 
-    /// No validator entry exists in the state for the given identifier.
-    #[error("Validator not found: {0}")]
-    ValidatorNotFound(String),
+    /// No refiner entry exists in the state for the given identifier.
+    #[error("Refiner not found: {0}")]
+    RefinerNotFound(String),
 
-    /// The validator's stake is below the minimum required for the requested operation.
+    /// The refiner's stake is below the minimum required for the requested operation.
     ///
     /// `need` is the minimum stake (e.g., `MIN_BOND_STAKE`), `have` is the current stake.
     #[error("Insufficient stake: need {need}, have {have}")]
     InsufficientStake { need: u64, have: u64 },
 
-    /// The account is already bonded as a validator. Must unbond first.
-    #[error("Validator already bonded")]
-    ValidatorAlreadyBonded,
+    /// The account is already bonded as a refiner. Must unbond first.
+    #[error("Refiner already bonded")]
+    RefinerAlreadyBonded,
 
-    /// Attempted an unbond or slash operation on an account that is not a validator.
-    #[error("Validator not bonded")]
-    ValidatorNotBonded,
+    /// Attempted an unbond or slash operation on an account that is not a refiner.
+    #[error("Refiner not bonded")]
+    RefinerNotBonded,
 
     /// The transaction fee is below the minimum required.
     #[error("Invalid params: {0}")]

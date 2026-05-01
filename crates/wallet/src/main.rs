@@ -7,8 +7,8 @@
 //!   opl new                    — Generate a new 24-word mnemonic
 //!   opl balance <address>      — Query account balance via RPC
 //!   opl transfer <to> <amt>   — Create and sign a transfer transaction
-//!   opl bond <amount>           — Create and sign a validator bond
-//!   opl unbond <amount>         — Create and sign a validator unbond
+//!   opl bond <amount>           — Create and sign a refiner bond
+//!   opl unbond <amount>         — Create and sign a refiner unbond
 //!   opl send <tx_hex>          — Broadcast a signed transaction via RPC
 
 use clap::Parser;
@@ -75,7 +75,7 @@ enum Command {
         account: u32,
     },
 
-    /// Create a signed validator bond transaction
+    /// Create a signed refiner bond transaction
     Bond {
         /// 24-word mnemonic phrase
         phrase: String,
@@ -96,7 +96,7 @@ enum Command {
         account: u32,
     },
 
-    /// Create a signed validator unbond transaction
+    /// Create a signed refiner unbond transaction
     Unbond {
         /// 24-word mnemonic phrase
         phrase: String,
@@ -241,7 +241,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 None => query_nonce(&cli.rpc_url, keypair.object_id().to_hex()).await?,
             };
 
-            let tx = TransactionSigner::create_validator_bond(
+            let tx = TransactionSigner::create_refiner_bond(
                 &keypair,
                 amount_flakes,
                 fee_flakes,
@@ -266,7 +266,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 None => query_nonce(&cli.rpc_url, keypair.object_id().to_hex()).await?,
             };
 
-            let tx = TransactionSigner::create_validator_unbond(
+            let tx = TransactionSigner::create_refiner_unbond(
                 &keypair,
                 amount_flakes,
                 fee_flakes,

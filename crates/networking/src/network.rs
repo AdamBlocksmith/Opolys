@@ -618,7 +618,7 @@ impl SwarmTask {
                         for addr in info.listen_addrs {
                             self.swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
                         }
-                        // Forward the agent version so main.rs can detect validator announcements
+                        // Forward the agent version so main.rs can detect refiner announcements
                         let _ = self.event_tx.try_send(
                             crate::behaviour::OpolysNetworkEvent::PeerIdentified {
                                 peer_id,

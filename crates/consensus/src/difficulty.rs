@@ -51,7 +51,7 @@ impl DifficultyTarget {
 ///
 /// The floor rises as more $OPL is issued relative to bonded stake, ensuring
 /// that PoW difficulty cannot fall below the organic growth rate of the network.
-/// When `bonded_stake` is zero, the floor is zero (no validators yet).
+/// When `bonded_stake` is zero, the floor is zero (no refiners yet).
 pub fn compute_consensus_floor(total_issued: u64, bonded_stake: u64) -> u64 {
     if bonded_stake == 0 {
         return 0;

@@ -12,7 +12,7 @@
 //! All derivation levels are hardened because ed25519 only supports hardened
 //! child key derivation per SLIP-0010.
 //!
-//! The same ed25519 key is used for both transaction signing and validator
+//! The same ed25519 key is used for both transaction signing and refiner
 //! block signing. Wallet recovery from mnemonic alone restores all keys —
 //! no separate backup file is needed.
 
@@ -111,7 +111,7 @@ impl DerivedSeed {
     /// are hardened (≥ 0x80000000) because ed25519 only supports hardened
     /// child key derivation.
     ///
-    /// The same key is used for both transaction signing and validator
+    /// The same key is used for both transaction signing and refiner
     /// block signing. Full wallet recovery from mnemonic alone is supported.
     pub fn derive_keypair(&self, account: u32) -> KeyPair {
         let path = DerivationPath::new(BIP44_PURPOSE, OPOLYS_COIN_TYPE, account);

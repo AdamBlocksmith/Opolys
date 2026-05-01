@@ -86,7 +86,7 @@ pub enum OpolysNetworkEvent {
     PeerIdentified {
         peer_id: libp2p::PeerId,
         /// The peer's self-reported agent version string.
-        /// Validators embed their ObjectId here as "validator:<hex_object_id>".
+        /// Refiners embed their ObjectId here as "refiner:<hex_object_id>".
         agent_version: String,
     },
 

@@ -5,7 +5,7 @@
 //! ensuring a direct cryptographic link between identity and key material.
 //!
 //! For deterministic key derivation from mnemonics, see the `bip39` module.
-//! The same ed25519 key is used for both transaction signing and validator
+//! The same ed25519 key is used for both transaction signing and refiner
 //! block signing. Full wallet recovery from mnemonic alone is supported.
 
 use ed25519_dalek::{SigningKey, VerifyingKey, Signature as DalekSignature, Signer, Verifier};

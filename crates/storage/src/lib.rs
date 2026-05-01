@@ -5,7 +5,7 @@
 //!
 //! - **blocks** — block data indexed by height
 //! - **accounts** — all account state (balances, nonces)
-//! - **validators** — validator set (stake, status)
+//! - **refiners** — refiner set (stake, status)
 //! - **chain_state** — chain metadata (height, difficulty, issued/burned totals)
 //!
 //! After each block is applied, all state is written to disk atomically.

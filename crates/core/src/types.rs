@@ -5,7 +5,7 @@
 //! - **Hash**: A Blake3-256 hash wrapper with serialization support
 //! - **ObjectId**: A typed identifier for accounts and entities on-chain
 //! - **TransactionAction**: The payload enum describing what a transaction does
-//! - **ConsensusPhase & ValidatorStatus**: Consensus and staking state machines
+//! - **RefinerStatus**: Staking state machine for refiner lifecycle
 //! - **BlockHeader, Transaction, Block**: The wire-format ledger structures
 //! - **Currency conversion helpers**: Functions to convert between OPL sub-units
 //!
@@ -26,7 +26,7 @@ pub type FlakeAmount = u64;
 /// Genesis block has height 0. Each subsequent block increments by 1.
 pub type BlockHeight = u64;
 
-/// Public key bytes for a validator or account.
+/// Public key bytes for a refiner or account.
 ///
 /// In Opolys this is a raw byte vector whose interpretation depends on the
 /// cryptographic scheme in use (e.g., Ed25519).
@@ -138,10 +138,10 @@ impl ObjectId {
 ///
 /// Each variant carries all data needed to execute it:
 /// - **Transfer**: move OPL from sender to recipient; the fee is burned
-/// - **ValidatorBond**: lock `amount` OPL as stake (new entry or top-up)
-/// - **ValidatorUnbond**: unbond `amount` OPL using FIFO order (oldest first)
+/// - **RefinerBond**: lock `amount` OPL as stake (new entry or top-up)
+/// - **RefinerUnbond**: unbond `amount` OPL using FIFO order (oldest first)
 ///
-/// Validators can hold multiple bond entries, each with its own stake, seniority
+/// Refiners can hold multiple bond entries, each with its own stake, seniority
 /// clock, and bond_id. Top-up bonding creates a new entry; unbonding follows FIFO
 /// order — the oldest entries are consumed first. If the unbond amount exceeds
 /// an oldest entry's stake, that entry is fully consumed and the remainder comes
@@ -157,66 +157,51 @@ pub enum TransactionAction {
     /// The attached `fee` (set on the Transaction itself) is burned, not collected.
     Transfer { recipient: ObjectId, amount: FlakeAmount },
 
-    /// Bond `amount` Flakes as validator stake. If the sender is already a
-    /// validator, this creates a new bond entry (top-up) with its own seniority
-    /// clock. If not, this creates the validator with their first bond entry.
+    /// Bond `amount` Flakes as refiner stake. If the sender is already a
+    /// refiner, this creates a new bond entry (top-up) with its own seniority
+    /// clock. If not, this creates the refiner with their first bond entry.
     /// Each entry requires `>= MIN_BOND_STAKE` (1 OPL) for new entries only.
-    ValidatorBond { amount: FlakeAmount },
+    RefinerBond { amount: FlakeAmount },
 
-    /// Unbond `amount` Flakes from the validator's stake using FIFO order.
+    /// Unbond `amount` Flakes from the refiner's stake using FIFO order.
     /// The oldest bond entries are consumed first. If the amount exceeds an
     /// entry's stake, that entry is fully consumed and the remainder comes from
     /// the next oldest. Split entries keep their original timestamp for weight.
     /// The fee is burned. After a UNBONDING_DELAY_BLOCKS delay, the unbonded
     /// stake is returned to the sender. Unbonding stake still earns rewards
     /// during the delay period.
-    ValidatorUnbond { amount: FlakeAmount },
+    RefinerUnbond { amount: FlakeAmount },
 }
 
-/// The current consensus phase for a given block height.
-///
-/// Opolys uses a hybrid PoW/PoS model:
-/// - **ProofOfWork**: miners compete to find a valid nonce (difficult block heights)
-/// - **ProofOfStake**: validators take turns producing blocks (easier block heights)
-///
-/// The phase is deterministic based on block height and difficulty.
-#[derive(Debug, Clone, BorshSerialize, BorshDeserialize, Serialize, Deserialize, PartialEq, Eq)]
-pub enum ConsensusPhase {
-    /// Miners produce this block by finding a hash below the difficulty target.
-    ProofOfWork,
-    /// A selected validator produces this block by signing it.
-    ProofOfStake,
-}
-
-/// The bonding status of a validator account.
+/// The bonding status of a refiner account.
 ///
 /// Transitions:
-/// - `None` → `Bonding` (on `ValidatorBond` tx)
+/// - `None` → `Bonding` (on `RefinerBond` tx)
 /// - `Bonding` → `Waiting` (after activation epoch passes)
-/// - `Waiting` → `Active` (promoted by rerank_validators at epoch boundaries)
+/// - `Waiting` → `Active` (promoted by rerank_refiners at epoch boundaries)
 /// - `Active` → `Waiting` (demoted if outranked during rerank)
-/// - `Active` → `Unbonding` (on `ValidatorUnbond` tx, instant removal)
-/// - Any → `Slashed` (if the validator signs conflicting blocks)
+/// - `Active` → `Unbonding` (on `RefinerUnbond` tx, instant removal)
+/// - Any → `Slashed` (if the refiner signs conflicting blocks)
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize, Serialize, Deserialize, PartialEq, Eq)]
-pub enum ValidatorStatus {
-    /// The account is not a validator.
+pub enum RefinerStatus {
+    /// The account is not a refiner.
     None,
-    /// The validator has bonded stake but is not yet past their activation epoch.
+    /// The refiner has bonded stake but is not yet past their activation epoch.
     Bonding,
     /// Eligible by epoch maturity but outside the top-N active set by weight.
-    /// Promoted to Active by rerank_validators() at epoch boundaries.
+    /// Promoted to Active by rerank_refiners() at epoch boundaries.
     Waiting,
-    /// The validator is actively producing and attesting blocks (top-N by weight).
+    /// The refiner is actively producing and attesting blocks (top-N by weight).
     Active,
-    /// The validator has unbonded and stake is being returned.
+    /// The refiner has unbonded and stake is being returned.
     Unbonding,
-    /// The validator was caught signing conflicting blocks; stake is forfeited.
+    /// The refiner was caught signing conflicting blocks; stake is forfeited.
     Slashed,
 }
 
 /// Header metadata for a block — everything that is hashed to produce the block hash.
 ///
-/// The header is separated from transaction data so that validators can verify
+/// The header is separated from transaction data so that refiners can verify
 /// proof-of-work and state roots without downloading the full block body.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize, Serialize, Deserialize)]
 pub struct BlockHeader {
@@ -238,23 +223,23 @@ pub struct BlockHeader {
     pub difficulty: u64,
     /// Suggested fee in Flakes for the next block. Computed as an EMA of the
     /// previous block's transaction fees, floored at MIN_FEE (1 Flake).
-    /// Miners/validators should include this in the block template so wallets
+    /// Miners/refiners should include this in the block template so wallets
     /// can estimate appropriate fees, but any fee >= MIN_FEE is valid.
     pub suggested_fee: FlakeAmount,
     /// Optional Merkle root of extension data (e.g., rollup anchors).
     /// `None` for normal blocks. Reserved for future protocol extensions.
     pub extension_root: Option<Hash>,
-    /// The ObjectId of the block producer — the miner (PoW) or validator (PoS)
+    /// The ObjectId of the block producer — the miner (PoW) or refiner (PoS)
     /// who earns the block reward. Set to `ObjectId::zero()` for the genesis block.
     /// In PoW mode, this is the miner's address. In PoS mode, this is the
-    /// validator's on-chain identity.
+    /// refiner's on-chain identity.
     pub producer: ObjectId,
     /// The nonce/solution that satisfies the difficulty target (present in PoW phases).
     /// `None` for PoS blocks and the genesis block.
     pub pow_proof: Option<Vec<u8>>,
-    /// The validator's ed25519 signature over the block hash (present in PoS phases).
+    /// The refiner's ed25519 signature over the block hash (present in PoS phases).
     /// `None` for PoW blocks and the genesis block.
-    pub validator_signature: Option<Vec<u8>>,
+    pub refiner_signature: Option<Vec<u8>>,
 }
 
 /// A signed transaction that transitions the ledger state.
@@ -280,7 +265,7 @@ pub struct Transaction {
     pub sender: ObjectId,
     /// The action this transaction performs (transfer, bond, or unbond).
     pub action: TransactionAction,
-    /// Fee in Flakes — burned permanently, incentivizing miners/validators to include this tx.
+    /// Fee in Flakes — burned permanently, incentivizing miners/refiners to include this tx.
     pub fee: FlakeAmount,
     /// Cryptographic signature over the transaction body by the sender.
     pub signature: Vec<u8>,
@@ -301,25 +286,25 @@ pub struct Transaction {
     pub public_key: Vec<u8>,
 }
 
-/// Evidence that a validator signed two different blocks at the same height.
+/// Evidence that a refiner signed two different blocks at the same height.
 ///
 /// Embedded in a future block's body so every full node can independently verify
 /// the proof and apply graduated slashing — no single node's memory is trusted.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize, Serialize, Deserialize)]
 pub struct DoubleSignEvidence {
-    /// The validator who double-signed.
+    /// The refiner who double-signed.
     pub producer: ObjectId,
-    /// Validator's ed25519 public key (32 bytes). Must Blake3-hash to `producer`.
+    /// Refiner's ed25519 public key (32 bytes). Must Blake3-hash to `producer`.
     pub producer_pubkey: Vec<u8>,
     /// Block height at which the double-sign occurred.
     pub height: BlockHeight,
-    /// First block hash the validator signed at this height.
+    /// First block hash the refiner signed at this height.
     pub hash_a: Hash,
-    /// Validator's ed25519 signature over `hash_a` (64 bytes).
+    /// Refiner's ed25519 signature over `hash_a` (64 bytes).
     pub signature_a: Vec<u8>,
-    /// Second, conflicting block hash the validator signed at this height.
+    /// Second, conflicting block hash the refiner signed at this height.
     pub hash_b: Hash,
-    /// Validator's ed25519 signature over `hash_b` (64 bytes).
+    /// Refiner's ed25519 signature over `hash_b` (64 bytes).
     pub signature_b: Vec<u8>,
 }
 
@@ -441,8 +426,8 @@ mod tests {
             recipient: ObjectId::zero(),
             amount: 100,
         };
-        let bond = TransactionAction::ValidatorBond { amount: 10_000_000 };
-        let unbond = TransactionAction::ValidatorUnbond { amount: 5_000_000 };
+        let bond = TransactionAction::RefinerBond { amount: 10_000_000 };
+        let unbond = TransactionAction::RefinerUnbond { amount: 5_000_000 };
         assert_ne!(bond, unbond);
     }
 

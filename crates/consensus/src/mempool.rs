@@ -2,7 +2,7 @@
 //!
 //! Opolys uses a market-driven fee model: transactions specify their own fee,
 //! and block producers select the highest-fees-first. Fees are **burned** (not
-//! collected by miners or validators), creating deflationary pressure that
+//! collected by miners or refiners), creating deflationary pressure that
 //! scales with network usage. No governance sets fee minimums — the market
 //! decides.
 //!

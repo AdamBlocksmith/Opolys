@@ -11,7 +11,7 @@
 //! constants and attestation fields, ensuring that every node derives the
 //! exact same chain state from the same config.
 
-use opolys_core::{Block, BlockHeader, Hash, ObjectId, FlakeAmount, GenesisCeremonyData, MIN_DIFFICULTY, GENESIS_DIFFICULTY, BASE_REWARD, NETWORK_PROTOCOL_VERSION, BLOCK_TARGET_TIME_MS, MIN_BOND_STAKE, FLAKES_PER_OPL, EPOCH, POS_FINALITY_BLOCKS, BLOCK_VERSION, MIN_FEE, CURRENCY_NAME, CURRENCY_TICKER, CURRENCY_SMALLEST_UNIT};
+use opolys_core::{Block, BlockHeader, Hash, ObjectId, FlakeAmount, GenesisCeremonyData, MIN_DIFFICULTY, GENESIS_DIFFICULTY, BASE_REWARD, NETWORK_PROTOCOL_VERSION, BLOCK_TARGET_TIME_MS, MIN_BOND_STAKE, FLAKES_PER_OPL, EPOCH, BLOCK_VERSION, MIN_FEE, CURRENCY_NAME, CURRENCY_TICKER, CURRENCY_SMALLEST_UNIT};
 use borsh::{BorshSerialize, BorshDeserialize};
 use opolys_crypto::Blake3Hasher;
 use crate::account::AccountStore;
@@ -102,7 +102,7 @@ impl Default for GenesisConfig {
 ///
 /// The genesis block has:
 /// - Height 0 and `previous_hash` set to all zeros.
-/// - No PoW proof, no validator signature.
+/// - No PoW proof, no refiner signature.
 /// - A deterministic `state_root` computed by hashing all protocol constants,
 ///   attestation fields, and genesis account balances, ensuring every node
 ///   arrives at the same state.
@@ -122,7 +122,6 @@ pub fn build_genesis_block(config: &GenesisConfig) -> Block {
     state_hasher.update(&BLOCK_TARGET_TIME_MS.to_be_bytes());
     state_hasher.update(&MIN_DIFFICULTY.to_be_bytes());
     state_hasher.update(&EPOCH.to_be_bytes());
-    state_hasher.update(&POS_FINALITY_BLOCKS.to_be_bytes());
     state_hasher.update(&MIN_BOND_STAKE.to_be_bytes());
     state_hasher.update(&MIN_FEE.to_be_bytes());
     state_hasher.update(&BLOCK_VERSION.to_be_bytes());
@@ -154,7 +153,7 @@ pub fn build_genesis_block(config: &GenesisConfig) -> Block {
             extension_root: None,
             producer: ObjectId(Hash::zero()),
             pow_proof: None,
-            validator_signature: None,
+            refiner_signature: None,
         },
         transactions: vec![],
         slash_evidence: vec![],

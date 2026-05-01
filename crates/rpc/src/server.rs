@@ -5,7 +5,7 @@
 //! # Read Endpoints (query chain state)
 //!
 //! - `opl_getBlockHeight` — current chain height
-//! - `opl_getChainInfo` — chain statistics (height, difficulty, supply, validators)
+//! - `opl_getChainInfo` — chain statistics (height, difficulty, supply, refiners)
 //! - `opl_getNetworkVersion` — protocol version string
 //! - `opl_getBalance` — account balance by ObjectId (params: `[hex_object_id]`)
 //! - `opl_getAccount` — account details by ObjectId (params: `[hex_object_id]`)
@@ -16,7 +16,7 @@
 //! - `opl_getMempoolStatus` — pending transaction count and fee range
 //! - `opl_getSupply` — issued, burned, circulating supply breakdown
 //! - `opl_getDifficulty` — current difficulty + retarget info
-//! - `opl_getValidators` — active validator set with stakes and weights
+//! - `opl_getRefiners` — active refiner set with stakes and weights
 //!
 //! # Write Endpoints (submit to chain)
 //!
@@ -44,10 +44,10 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
 use tower_http::cors::{Any, CorsLayer};
 
-use opolys_core::{FlakeAmount, Block, Transaction, ObjectId, Hash, FLAKES_PER_OPL, EPOCH, MAX_ACTIVE_VALIDATORS};
+use opolys_core::{FlakeAmount, Block, Transaction, ObjectId, Hash, FLAKES_PER_OPL, EPOCH, MAX_ACTIVE_REFINERS};
 use opolys_consensus::account::AccountStore;
 use opolys_consensus::mempool::Mempool;
-use opolys_consensus::pos::ValidatorSet;
+use opolys_consensus::refiner::RefinerSet;
 use opolys_consensus::difficulty::compute_next_difficulty;
 use opolys_consensus::block::compute_block_hash;
 use opolys_storage::BlockchainStore;
@@ -78,8 +78,6 @@ pub struct ChainInfo {
     pub latest_block_hash: Hash,
     /// Blake3-256 hash of the state root after the most recent block.
     pub state_root: Hash,
-    /// Current consensus phase: "ProofOfWork" or "ProofOfStake".
-    pub phase: String,
     /// Rolling window of block timestamps for difficulty retargeting.
     pub block_timestamps: Vec<u64>,
     /// Suggested fee for the next block (Flakes), computed via EMA.
@@ -105,8 +103,8 @@ pub struct RpcState {
     pub chain: Arc<RwLock<ChainInfo>>,
     /// Live account balances and nonces.
     pub accounts: Arc<RwLock<AccountStore>>,
-    /// Live validator set (stake, status).
-    pub validators: Arc<RwLock<ValidatorSet>>,
+    /// Live refiner set (stake, status).
+    pub refiners: Arc<RwLock<RefinerSet>>,
     /// Transaction mempool (for sendTransaction and mempool queries).
     pub mempool: Arc<RwLock<Mempool>>,
     /// Persistent storage (for historical block/tx lookups).
@@ -148,7 +146,7 @@ impl RpcState {
     pub fn new(
         chain: Arc<RwLock<ChainInfo>>,
         accounts: Arc<RwLock<AccountStore>>,
-        validators: Arc<RwLock<ValidatorSet>>,
+        refiners: Arc<RwLock<RefinerSet>>,
         mempool: Arc<RwLock<Mempool>>,
         store: Arc<BlockchainStore>,
         block_sender: tokio::sync::mpsc::Sender<BlockSubmission>,
@@ -156,7 +154,7 @@ impl RpcState {
         api_key: Option<String>,
     ) -> Self {
         RpcState {
-            chain, accounts, validators, mempool, store, block_sender, miner_id,
+            chain, accounts, refiners, mempool, store, block_sender, miner_id,
             rate_limiter: Arc::new(Mutex::new(RateLimiter::new(120))),
             api_key,
         }
@@ -246,7 +244,7 @@ pub async fn handle_jsonrpc(
         "opl_getMempoolStatus" => handle_get_mempool_status(&state).await,
         "opl_getSupply" => handle_get_supply(&state).await,
         "opl_getDifficulty" => handle_get_difficulty(&state).await,
-        "opl_getValidators" => handle_get_validators(&state).await,
+        "opl_getRefiners" => handle_get_refiners(&state).await,
         "opl_getFinalizedHeight" => handle_get_finalized_height(&state).await,
         // ── Write endpoints ──
         "opl_sendTransaction" => handle_send_transaction(&state, &req.params).await,
@@ -289,7 +287,7 @@ async fn handle_get_block_height(state: &RpcState) -> Result<serde_json::Value, 
 
 async fn handle_get_chain_info(state: &RpcState) -> Result<serde_json::Value, JsonRpcError> {
     let chain = state.chain.read().await;
-    let validators = state.validators.read().await;
+    let refiners = state.refiners.read().await;
     let info = ChainInfoResponse {
         height: chain.height,
         difficulty: chain.difficulty,
@@ -299,13 +297,12 @@ async fn handle_get_chain_info(state: &RpcState) -> Result<serde_json::Value, Js
         circulating_supply_opl: format_flake(chain.circulating_supply),
         suggested_fee: chain.suggested_fee,
         suggested_fee_opl: format_flake(chain.suggested_fee),
-        validator_count: validators.validator_count(),
-        active_validators: validators.total_active_validators(),
-        bonding_validators: validators.total_bonding_validators(),
-        waiting_validators: validators.total_waiting_validators(),
-        max_active_validators: MAX_ACTIVE_VALIDATORS,
-        bonded_stake: validators.total_bonded_stake(),
-        phase: chain.phase.clone(),
+        refiner_count: refiners.refiner_count(),
+        active_refiners: refiners.total_active_refiners(),
+        bonding_refiners: refiners.total_bonding_refiners(),
+        waiting_refiners: refiners.total_waiting_refiners(),
+        max_active_refiners: MAX_ACTIVE_REFINERS,
+        bonded_stake: refiners.total_bonded_stake(),
         protocol_version: opolys_core::NETWORK_PROTOCOL_VERSION.to_string(),
         finalized_height: chain.finalized_height,
     };
@@ -451,8 +448,8 @@ async fn handle_get_supply(state: &RpcState) -> Result<serde_json::Value, JsonRp
 
 async fn handle_get_difficulty(state: &RpcState) -> Result<serde_json::Value, JsonRpcError> {
     let chain = state.chain.read().await;
-    let validators = state.validators.read().await;
-    let bonded_stake = validators.total_bonded_stake();
+    let refiners = state.refiners.read().await;
+    let bonded_stake = refiners.total_bonded_stake();
     let diff_target = compute_next_difficulty(
         chain.difficulty, chain.height, &chain.block_timestamps,
         chain.total_issued, bonded_stake,
@@ -467,13 +464,13 @@ async fn handle_get_difficulty(state: &RpcState) -> Result<serde_json::Value, Js
     }).map_err(|e| JsonRpcError::internal_error(&e.to_string()))
 }
 
-async fn handle_get_validators(state: &RpcState) -> Result<serde_json::Value, JsonRpcError> {
-    let validators = state.validators.read().await;
+async fn handle_get_refiners(state: &RpcState) -> Result<serde_json::Value, JsonRpcError> {
+    let refiners = state.refiners.read().await;
     let chain = state.chain.read().await;
     let current_timestamp = chain.block_timestamps.last().copied().unwrap_or(0);
-    let validator_list = validators.all_validators();
+    let refiner_list = refiners.all_refiners();
     let mut result = Vec::new();
-    for v in validator_list {
+    for v in refiner_list {
         let total_stake = v.total_stake();
         let total_weight = v.weight(current_timestamp);
         let entries: Vec<BondEntryResponse> = v.entries.iter().map(|e| BondEntryResponse {
@@ -482,7 +479,7 @@ async fn handle_get_validators(state: &RpcState) -> Result<serde_json::Value, Js
             bonded_at_height: e.bonded_at_height,
             bonded_at_timestamp: e.bonded_at_timestamp,
         }).collect();
-        result.push(ValidatorResponse {
+        result.push(RefinerResponse {
             object_id: v.object_id.to_hex(),
             entries,
             total_stake_flakes: total_stake,
@@ -539,10 +536,10 @@ async fn handle_send_transaction(state: &RpcState, params: &serde_json::Value) -
 
 async fn handle_get_mining_job(state: &RpcState) -> Result<serde_json::Value, JsonRpcError> {
     let chain = state.chain.read().await;
-    let validators = state.validators.read().await;
+    let refiners = state.refiners.read().await;
     let mempool = state.mempool.read().await;
 
-    let bonded_stake = validators.total_bonded_stake();
+    let bonded_stake = refiners.total_bonded_stake();
     let total_issued = chain.total_issued;
 
     let diff_target = compute_next_difficulty(
@@ -576,7 +573,7 @@ async fn handle_get_mining_job(state: &RpcState) -> Result<serde_json::Value, Js
         extension_root: None,
         producer: state.miner_id.clone(),
         pow_proof: None,
-        validator_signature: None,
+        refiner_signature: None,
     };
 
     // Pre-serialize the header for EVO-OMAP mining
@@ -714,10 +711,10 @@ fn format_action(action: &opolys_core::TransactionAction) -> String {
         opolys_core::TransactionAction::Transfer { recipient, amount } => {
             format!("Transfer {} flakes to {}", amount, recipient.to_hex())
         }
-        opolys_core::TransactionAction::ValidatorBond { amount } => {
+        opolys_core::TransactionAction::RefinerBond { amount } => {
             format!("Bond {} flakes ({})", amount, format_flake(*amount))
         }
-        opolys_core::TransactionAction::ValidatorUnbond { amount } => format!("Unbond {} flakes ({})", amount, format_flake(*amount)),
+        opolys_core::TransactionAction::RefinerUnbond { amount } => format!("Unbond {} flakes ({})", amount, format_flake(*amount)),
     }
 }
 
@@ -740,7 +737,7 @@ fn block_to_response(block: &Block, finalized_height: u64) -> BlockResponse {
 
 // ─── Response types ─────────────────────────────────────────────────
 
-/// Full chain info response including supply statistics and validator data.
+/// Full chain info response including supply statistics and refiner data.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChainInfoResponse {
     pub height: u64,
@@ -751,18 +748,17 @@ pub struct ChainInfoResponse {
     pub circulating_supply_opl: String,
     pub suggested_fee: u64,
     pub suggested_fee_opl: String,
-    /// Total validators regardless of status (Active + Bonding + Slashed).
-    pub validator_count: usize,
-    /// Validators currently in Active status (producing blocks, earning rewards).
-    pub active_validators: usize,
-    /// Validators in Bonding status — waiting for epoch maturity before joining Waiting pool.
-    pub bonding_validators: usize,
-    /// Validators in Waiting status — eligible but outside the top-N active set by weight.
-    pub waiting_validators: usize,
-    /// Protocol cap on simultaneously Active validators.
-    pub max_active_validators: usize,
+    /// Total refiners regardless of status (Active + Bonding + Slashed).
+    pub refiner_count: usize,
+    /// Refiners currently in Active status (producing blocks, earning rewards).
+    pub active_refiners: usize,
+    /// Refiners in Bonding status — waiting for epoch maturity before joining Waiting pool.
+    pub bonding_refiners: usize,
+    /// Refiners in Waiting status — eligible but outside the top-N active set by weight.
+    pub waiting_refiners: usize,
+    /// Protocol cap on simultaneously Active refiners.
+    pub max_active_refiners: usize,
     pub bonded_stake: u64,
-    pub phase: String,
     pub protocol_version: String,
     /// Height of the most recently finalized block (cannot be reverted).
     pub finalized_height: u64,
@@ -795,7 +791,7 @@ pub struct BlockResponse {
     pub suggested_fee: u64,
     pub transaction_count: usize,
     pub block_hash: String,
-    /// True if this block cannot be reverted (POS_FINALITY_BLOCKS consecutive PoS blocks follow it).
+    /// True if this block cannot be reverted.
     pub finalized: bool,
 }
 
@@ -837,7 +833,7 @@ pub struct DifficultyResponse {
     pub next_retarget_height: u64,
 }
 
-/// A single bond entry within a validator's stake.
+/// A single bond entry within a refiner's stake.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BondEntryResponse {
     pub stake_flakes: u64,
@@ -846,9 +842,9 @@ pub struct BondEntryResponse {
     pub bonded_at_timestamp: u64,
 }
 
-/// Full validator info response with per-entry bond details.
+/// Full refiner info response with per-entry bond details.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ValidatorResponse {
+pub struct RefinerResponse {
     pub object_id: String,
     pub entries: Vec<BondEntryResponse>,
     pub total_stake_flakes: u64,

@@ -12,7 +12,7 @@
 //!
 //! Opolys ($OPL) is a blockchain built as decentralized digital gold with no hard cap.
 //! Difficulty and rewards emerge from chain state. Fees are market-driven and burned.
-//! Validators earn from block rewards only. Only double-signing gets slashed. There
+//! Refiners earn from block rewards only. Only double-signing gets slashed. There
 //! is no governance, no schedules, and no fixed percentages.
 //!
 //! Hashing: Blake3-256 (32 bytes) everywhere. Signatures: ed25519.
@@ -23,7 +23,7 @@ use opolys_consensus::{
     account::AccountStore,
     emission,
     mempool::Mempool,
-    pos::ValidatorSet,
+    refiner::RefinerSet,
     pow::PowContext,
     genesis::GenesisConfig,
 };
@@ -101,15 +101,15 @@ pub struct Args {
     #[arg(long)]
     pub no_rpc: bool,
 
-    /// Enable validator block production (default: disabled).
+    /// Enable refiner block production (default: disabled).
     ///
     /// When enabled, the node will produce PoS blocks when it is an active
-    /// validator with bonded stake. Requires a wallet key to sign blocks.
+    /// refiner with bonded stake. Requires a wallet key to sign blocks.
     /// This flag is separate from --mine (both can be active simultaneously).
     #[arg(long)]
-    pub validate: bool,
+    pub refine: bool,
 
-    /// Path to the miner/validator key file (32-byte ed25519 seed).
+    /// Path to the miner/refiner key file (32-byte ed25519 seed).
     ///
     /// The ObjectId (Blake3 hash of the public key) derived from this key
     /// is used as the block producer identity. If not provided, the miner_id
@@ -158,8 +158,8 @@ pub struct NodeConfig {
     pub log_level: String,
     pub mine: bool,
     pub no_rpc: bool,
-    pub validate: bool,
-    /// Path to the miner/validator key file (32-byte ed25519 seed).
+    pub refine: bool,
+    /// Path to the miner/refiner key file (32-byte ed25519 seed).
     /// When provided, the node can sign PoS blocks and receive block rewards.
     pub key_file: Option<String>,
     /// IP address the RPC server listens on. Default: "127.0.0.1".
@@ -182,7 +182,7 @@ impl Default for NodeConfig {
             log_level: "info".to_string(),
             mine: false,
             no_rpc: false,
-            validate: false,
+            refine: false,
             key_file: None,
             rpc_listen_addr: "127.0.0.1".to_string(),
             rpc_api_key: None,
@@ -212,13 +212,10 @@ pub struct ChainState {
     pub latest_block_hash: Hash,
     /// Blake3-256 hash of the state root after applying the most recent block.
     pub state_root: Hash,
-    /// Current consensus phase — transitions smoothly from PoW to PoS
-    /// as stake_coverage increases (no governance, no hard switch).
-    pub phase: ConsensusPhase,
     /// Suggested fee for the next block, computed via EMA of previous block's fees.
     /// Starts at MIN_FEE (1 Flake) and adjusts based on network demand.
     pub suggested_fee: FlakeAmount,
-    /// Double-sign detection: tracks (block_hash, validator_signature) per (height, producer).
+    /// Double-sign detection: tracks (block_hash, refiner_signature) per (height, producer).
     /// When a second different hash is seen for the same key, evidence is queued.
     pub producer_signatures: HashMap<(u64, String), (Hash, Vec<u8>)>,
     /// The ceremony-derived block reward for this chain in Flakes.
@@ -226,11 +223,7 @@ pub struct ChainState {
     /// Testnet/dev: the BASE_REWARD constant (332 OPL).
     pub base_reward: FlakeAmount,
     /// Height of the most recently finalized block (cannot be reverted).
-    /// Advances when POS_FINALITY_BLOCKS consecutive PoS blocks follow a block.
     pub finalized_height: u64,
-    /// Consecutive PoS blocks since the last PoW block.
-    /// Used to advance finalized_height; resets on every PoW block.
-    pub consecutive_pos_blocks: u64,
 }
 
 impl ChainState {
@@ -243,27 +236,20 @@ impl ChainState {
         ChainState {
             current_height: 0,
             current_difficulty: genesis_config.initial_difficulty,
-            total_issued: 0,
+total_issued: 0,
             total_burned: 0,
             block_timestamps: vec![genesis.header.timestamp],
             latest_block_hash: genesis_hash,
             state_root: genesis.header.state_root.clone(),
-            phase: ConsensusPhase::ProofOfWork,
             suggested_fee: MIN_FEE,
             producer_signatures: HashMap::new(),
             base_reward: genesis_config.base_reward,
             finalized_height: 0,
-            consecutive_pos_blocks: 0,
         }
     }
 
     /// Create chain state from persisted data (loaded from RocksDB).
-pub fn from_persisted(p: &opolys_storage::PersistedChainState) -> Self {
-        let phase = match p.phase {
-            0 => ConsensusPhase::ProofOfWork,
-            1 => ConsensusPhase::ProofOfStake,
-            _ => ConsensusPhase::ProofOfWork,
-        };
+    pub fn from_persisted(p: &opolys_storage::PersistedChainState) -> Self {
         ChainState {
             current_height: p.current_height,
             current_difficulty: p.current_difficulty,
@@ -272,7 +258,6 @@ pub fn from_persisted(p: &opolys_storage::PersistedChainState) -> Self {
             block_timestamps: p.block_timestamps.clone(),
             latest_block_hash: Hash::from_bytes(p.latest_block_hash),
             state_root: Hash::from_bytes(p.state_root),
-            phase,
             suggested_fee: p.suggested_fee,
             producer_signatures: p.producer_signatures.iter().map(|(h, prod, hash, sig)| {
                 ((*h, prod.clone()), (hash.clone(), sig.clone()))
@@ -280,8 +265,7 @@ pub fn from_persisted(p: &opolys_storage::PersistedChainState) -> Self {
             // Migration: nodes upgraded from pre-ceremony builds get the constant default
             base_reward: if p.base_reward > 0 { p.base_reward } else { BASE_REWARD },
             finalized_height: p.finalized_height,
-            // Reconstructed from block history after a few blocks; safe to start at 0
-            consecutive_pos_blocks: 0,
+            // finalized_height reconstructed from block history; safe to start at 0
         }
     }
 
@@ -295,10 +279,6 @@ pub fn from_persisted(p: &opolys_storage::PersistedChainState) -> Self {
             block_timestamps: self.block_timestamps.clone(),
             latest_block_hash: self.latest_block_hash.0,
             state_root: self.state_root.0,
-            phase: match self.phase {
-                ConsensusPhase::ProofOfWork => 0,
-                ConsensusPhase::ProofOfStake => 1,
-            },
             suggested_fee: self.suggested_fee,
             base_reward: self.base_reward,
             producer_signatures: self.producer_signatures.iter().map(|((h, prod), (hash, sig))| {
@@ -315,9 +295,9 @@ pub fn from_persisted(p: &opolys_storage::PersistedChainState) -> Self {
 
     /// Stake coverage = bonded_stake / total_issued.
     ///
-    /// Requires the actual bonded stake from the validator set — this cannot
+    /// Requires the actual bonded stake from the refiner set — this cannot
     /// be computed from chain state alone since bonded stake lives in
-    /// ValidatorSet, not ChainState. Passing total_issued for both parameters
+    /// RefinerSet, not ChainState. Passing total_issued for both parameters
     /// would always return 1.0, which is the critical bug this method now
     /// avoids by requiring the caller to supply bonded_stake.
     pub fn stake_coverage(&self, bonded_stake: FlakeAmount) -> f64 {
@@ -340,8 +320,8 @@ pub struct OpolysNode {
     pub accounts: Arc<RwLock<AccountStore>>,
     /// Transaction mempool (sorted by fee).
     pub mempool: Arc<RwLock<Mempool>>,
-    /// Live validator set (stake, bonding status).
-    pub validators: Arc<RwLock<ValidatorSet>>,
+    /// Live refiner set (stake, bonding status).
+    pub refiners: Arc<RwLock<RefinerSet>>,
     /// Persistent RocksDB storage (None if running without persistence).
     pub store: Option<Arc<BlockchainStore>>,
     /// Node configuration (ports, data directory, etc.).
@@ -350,7 +330,7 @@ pub struct OpolysNode {
     pow_context: Arc<RwLock<PowContext>>,
     /// The miner's on-chain identity (Blake3 hash of their public key).
     /// For PoW blocks, this identifies who earns the block reward.
-    /// For PoS blocks, this must match an active validator's ObjectId.
+    /// For PoS blocks, this must match an active refiner's ObjectId.
     pub miner_id: ObjectId,
     /// The ed25519 signing key for block production. Set when --key-file is provided.
     /// Used by produce_pos_block() to sign PoS blocks.
@@ -358,9 +338,9 @@ pub struct OpolysNode {
     /// Double-sign evidence detected locally, pending inclusion in the next mined block.
     /// Drained into `Block.slash_evidence` by mine_block() and produce_pos_block().
     pub pending_slash_evidence: Arc<RwLock<Vec<DoubleSignEvidence>>>,
-    /// Peers that have announced an active validator identity via the identify protocol.
+    /// Peers that have announced an active refiner identity via the identify protocol.
     /// Keyed by libp2p PeerId; value is their on-chain ObjectId (used for look-ups).
-    pub validator_peers: Arc<RwLock<HashMap<PeerId, ObjectId>>>,
+    pub refiner_peers: Arc<RwLock<HashMap<PeerId, ObjectId>>>,
     /// Persistent ban list keyed by PeerId string. Loaded from data_dir/banned_peers.json
     /// on startup and saved after every new ban.
     pub banned_peers: Arc<RwLock<HashMap<String, BanRecord>>>,
@@ -383,7 +363,7 @@ impl OpolysNode {
     /// Create a new node, either loading persisted state from disk or
     /// initializing from genesis.
     pub fn new(config: NodeConfig) -> Self {
-        // Load the miner/validator key from the key file (if provided)
+        // Load the miner/refiner key from the key file (if provided)
         let (miner_id, signing_key) = if let Some(ref key_path) = config.key_file {
             match std::fs::read(key_path) {
                 Ok(seed_bytes) if seed_bytes.len() == 32 => {
@@ -392,7 +372,7 @@ impl OpolysNode {
                     let sk = ed25519_dalek::SigningKey::from_bytes(&seed);
                     let vk = sk.verifying_key();
                     let id = opolys_crypto::ed25519_public_key_to_object_id(vk.as_bytes());
-                    tracing::info!(miner_id = %id.to_hex(), "Loaded miner/validator identity from key file");
+                    tracing::info!(miner_id = %id.to_hex(), "Loaded miner/refiner identity from key file");
                     (id, Some(sk))
                 }
                 Ok(bytes) => {
@@ -414,7 +394,7 @@ impl OpolysNode {
         let data_path = std::path::PathBuf::from(&config.data_dir);
         let store_result = BlockchainStore::open(&data_path);
 
-        let (chain_state, accounts, validators, store) = match store_result {
+        let (chain_state, accounts, refiners, store) = match store_result {
             Ok(store) => {
                 let store = Arc::new(store);
                 match store.load_chain_state() {
@@ -430,9 +410,9 @@ impl OpolysNode {
                             tracing::warn!("Failed to load accounts, starting fresh: {}", e);
                             AccountStore::new()
                         });
-                        let vals = store.load_validators().unwrap_or_else(|e| {
-                            tracing::warn!("Failed to load validators, starting fresh: {}", e);
-                            ValidatorSet::new()
+                        let vals = store.load_refiners().unwrap_or_else(|e| {
+                            tracing::warn!("Failed to load refiners, starting fresh: {}", e);
+                            RefinerSet::new()
                         });
                         (chain, accs, vals, Some(store))
                     }
@@ -440,7 +420,7 @@ impl OpolysNode {
                         tracing::info!("No persisted state found, initializing from genesis");
                         let chain = ChainState::new(&genesis_config);
                         let mut accounts = AccountStore::new();
-                        let validators = ValidatorSet::new();
+                        let refiners = RefinerSet::new();
                         // Credit genesis accounts with their initial balances
                         let genesis_issued = opolys_consensus::genesis::apply_genesis_accounts(
                             &genesis_config, &mut accounts,
@@ -448,19 +428,19 @@ impl OpolysNode {
                         // Track genesis issuance in chain state
                         let mut chain = chain;
                         chain.total_issued = chain.total_issued.saturating_add(genesis_issued);
-                        (chain, accounts, validators, Some(store))
+                        (chain, accounts, refiners, Some(store))
                     }
                     Err(e) => {
                         tracing::error!("Failed to load chain state: {}, starting fresh", e);
                         let chain = ChainState::new(&genesis_config);
                         let mut accounts = AccountStore::new();
-                        let validators = ValidatorSet::new();
+                        let refiners = RefinerSet::new();
                         let genesis_issued = opolys_consensus::genesis::apply_genesis_accounts(
                             &genesis_config, &mut accounts,
                         );
                         let mut chain = chain;
                         chain.total_issued = chain.total_issued.saturating_add(genesis_issued);
-                        (chain, accounts, validators, Some(store))
+                        (chain, accounts, refiners, Some(store))
                     }
                 }
             }
@@ -468,13 +448,13 @@ impl OpolysNode {
                 tracing::warn!("Could not open database at {:?}: {}, running without persistence", data_path, e);
                 let chain_state = ChainState::new(&genesis_config);
                 let mut accounts = AccountStore::new();
-                let validators = ValidatorSet::new();
+                let refiners = RefinerSet::new();
                 let genesis_issued = opolys_consensus::genesis::apply_genesis_accounts(
                     &genesis_config, &mut accounts,
                 );
                 let mut chain_state = chain_state;
                 chain_state.total_issued = chain_state.total_issued.saturating_add(genesis_issued);
-                (chain_state, accounts, validators, None)
+                (chain_state, accounts, refiners, None)
             }
         };
 
@@ -484,27 +464,27 @@ impl OpolysNode {
             chain: Arc::new(RwLock::new(chain_state)),
             accounts: Arc::new(RwLock::new(accounts)),
             mempool: Arc::new(RwLock::new(Mempool::new())),
-            validators: Arc::new(RwLock::new(validators)),
+            refiners: Arc::new(RwLock::new(refiners)),
             store,
             config: config.clone(),
             pow_context: Arc::new(RwLock::new(PowContext::new())),
             miner_id: miner_id.clone(),
             signing_key,
             pending_slash_evidence: Arc::new(RwLock::new(Vec::new())),
-            validator_peers: Arc::new(RwLock::new(HashMap::new())),
+            refiner_peers: Arc::new(RwLock::new(HashMap::new())),
             banned_peers: Arc::new(RwLock::new(banned_peers)),
             outbound_peers: Arc::new(RwLock::new(HashSet::new())),
             inbound_peers: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 
-    /// Return true if the given peer has announced itself as an active on-chain validator.
-    pub async fn is_validator_peer(&self, peer_id: &PeerId) -> bool {
-        let validator_peers = self.validator_peers.read().await;
-        if let Some(object_id) = validator_peers.get(peer_id) {
-            let validators = self.validators.read().await;
-            if let Some(v) = validators.get_validator(object_id) {
-                return v.status == ValidatorStatus::Active;
+    /// Return true if the given peer has announced itself as an active on-chain refiner.
+    pub async fn is_refiner_peer(&self, peer_id: &PeerId) -> bool {
+        let refiner_peers = self.refiner_peers.read().await;
+        if let Some(object_id) = refiner_peers.get(peer_id) {
+            let refiners = self.refiners.read().await;
+            if let Some(v) = refiners.get_refiner(object_id) {
+                return v.status == RefinerStatus::Active;
             }
         }
         false
@@ -585,7 +565,7 @@ impl OpolysNode {
     pub async fn mine_block(&self, max_attempts: u64) -> Option<Block> {
         let chain = self.chain.read().await;
         let accounts = self.accounts.read().await;
-        let validators = self.validators.read().await;
+        let refiners = self.refiners.read().await;
 
         let mempool = self.mempool.read().await;
         let transactions: Vec<Transaction> = mempool.get_ordered_transactions()
@@ -595,7 +575,7 @@ impl OpolysNode {
             .collect();
 
         let transaction_root = compute_transaction_root(&transactions);
-        let bonded_stake = validators.total_bonded_stake();
+        let bonded_stake = refiners.total_bonded_stake();
         let total_issued = chain.total_issued;
 
         let diff_target = compute_next_difficulty(
@@ -624,7 +604,7 @@ impl OpolysNode {
             extension_root: None,
             producer: self.miner_id.clone(),
             pow_proof: None,
-            validator_signature: None,
+            refiner_signature: None,
         };
 
         // Drain pending double-sign evidence before mining starts
@@ -635,7 +615,7 @@ impl OpolysNode {
 
         drop(chain);
         drop(accounts);
-        drop(validators);
+        drop(refiners);
         drop(mempool);
 
         let mut ctx = self.pow_context.write().await;
@@ -644,26 +624,26 @@ impl OpolysNode {
         Some(block)
     }
 
-    /// Produce a PoS block as a validator.
+    /// Produce a PoS block as a refiner.
     ///
-    /// When `--validate` is enabled and this node's `miner_id` is the
+    /// When `--refine` is enabled and this node's `miner_id` is the
     /// **selected** block producer (determined by weighted random sampling
     /// seeded from the previous block hash), this method builds and signs a
-    /// block. The block contains no PoW proof; instead, the validator signs
+    /// block. The block contains no PoW proof; instead, the refiner signs
     /// the block hash with their ed25519 key, and the signature is stored in
-    /// `validator_signature`.
+    /// `refiner_signature`.
     ///
-    /// The producer is selected via `ValidatorSet::select_block_producer()`,
+    /// The producer is selected via `RefinerSet::select_block_producer()`,
     /// which uses the previous block hash as entropy for deterministic,
     /// verifiable selection. Any node can verify that the producer was
     /// legitimately chosen by re-running the selection with the same seed.
     ///
     /// Returns `Some(Block)` if this node is the selected producer, or `None`
-    /// if another validator was selected or no signing key is available.
+    /// if another refiner was selected or no signing key is available.
     pub async fn produce_pos_block(&self) -> Option<Block> {
         let signing_key = self.signing_key.as_ref()?;
         let chain = self.chain.read().await;
-        let validators = self.validators.read().await;
+        let refiners = self.refiners.read().await;
         let mempool = self.mempool.read().await;
 
         // Derive deterministic producer selection seed from the previous block hash.
@@ -673,7 +653,7 @@ impl OpolysNode {
         );
 
         // Select the block producer via weighted random sampling
-        let producer = validators.select_block_producer(
+        let producer = refiners.select_block_producer(
             chain.block_timestamps.last().copied().unwrap_or(0),
             seed,
         )?;
@@ -696,7 +676,7 @@ impl OpolysNode {
             .collect();
 
         let transaction_root = compute_transaction_root(&transactions);
-        let bonded_stake = validators.total_bonded_stake();
+        let bonded_stake = refiners.total_bonded_stake();
 
         let diff_target = compute_next_difficulty(
             chain.current_difficulty,
@@ -723,7 +703,7 @@ impl OpolysNode {
             extension_root: None,
             producer: self.miner_id.clone(),
             pow_proof: None,
-            validator_signature: None,
+            refiner_signature: None,
         };
 
         // Drain pending double-sign evidence into this block
@@ -732,14 +712,14 @@ impl OpolysNode {
             std::mem::take(&mut *pending)
         };
 
-        // Compute the block hash and sign it with the validator's ed25519 key
+        // Compute the block hash and sign it with the refiner's ed25519 key
         let block_hash = compute_block_hash(&header);
         let signature: ed25519_dalek::Signature = signing_key.sign(block_hash.0.as_ref());
-        let validator_signature = signature.to_bytes().to_vec();
+        let refiner_signature = signature.to_bytes().to_vec();
 
         let block = Block {
             header: BlockHeader {
-                validator_signature: Some(validator_signature),
+                refiner_signature: Some(refiner_signature),
                 ..header
             },
             transactions,
@@ -792,10 +772,10 @@ impl OpolysNode {
     pub async fn apply_block(&self, block: &Block) -> Result<Hash, String> {
         let mut chain = self.chain.write().await;
         let mut accounts = self.accounts.write().await;
-        let mut validators = self.validators.write().await;
+        let mut refiners = self.refiners.write().await;
         let mut mempool = self.mempool.write().await;
 
-        let bonded_stake = validators.total_bonded_stake();
+        let bonded_stake = refiners.total_bonded_stake();
 
         // Compute expected next difficulty for validation
         let expected_difficulty = compute_next_difficulty(
@@ -841,11 +821,11 @@ impl OpolysNode {
             ));
         }
 
-        // Verify PoS validator signature if present
-        if block.header.validator_signature.is_some() && !block.header.producer.0.is_zero() {
-            if let Some(ref sig_bytes) = block.header.validator_signature {
+        // Verify PoS refiner signature if present
+        if block.header.refiner_signature.is_some() && !block.header.producer.0.is_zero() {
+            if let Some(ref sig_bytes) = block.header.refiner_signature {
                 if sig_bytes.len() != 64 {
-                    return Err("PoS block validator signature must be 64 bytes".to_string());
+                    return Err("PoS block refiner signature must be 64 bytes".to_string());
                 }
                 let block_hash = compute_block_hash(&block.header);
                 let (pk_array, sig_array) = {
@@ -866,17 +846,17 @@ impl OpolysNode {
                     .map_err(|_| "PoS block producer public key is invalid".to_string())?;
                 let signature = ed25519_dalek::Signature::from_bytes(&sig_array);
                 verifying_key.verify(block_hash.0.as_ref(), &signature)
-                    .map_err(|_| "PoS block validator signature verification failed".to_string())?;
+                    .map_err(|_| "PoS block refiner signature verification failed".to_string())?;
             }
         }
 
         // Verify PoS block producer was legitimately selected
-        if block.header.validator_signature.is_some() && !block.header.producer.0.is_zero() {
+        if block.header.refiner_signature.is_some() && !block.header.producer.0.is_zero() {
             let seed = u64::from_be_bytes(
                 chain.latest_block_hash.0[0..8].try_into().unwrap_or([0u8; 8])
             );
             let timestamp = chain.block_timestamps.last().copied().unwrap_or(0);
-            if let Some(expected_producer) = validators.select_block_producer(timestamp, seed) {
+            if let Some(expected_producer) = refiners.select_block_producer(timestamp, seed) {
                 if expected_producer.object_id != block.header.producer {
                     return Err(format!(
                         "PoS block producer mismatch: expected {}, got {}",
@@ -897,14 +877,13 @@ impl OpolysNode {
             }
             if Self::verify_slash_evidence(evidence) {
                 processed_evidence_keys.insert(dedup_key);
-                match validators.graduated_slash(&evidence.producer, block.header.height) {
+                match refiners.slash_refiner(&evidence.producer, block.header.height) {
                     Ok(burned) if burned > 0 => {
                         chain.total_burned = chain.total_burned.saturating_add(burned);
                         tracing::info!(
                             producer = %evidence.producer.to_hex(),
                             burned,
-                            offense = ?validators.get_validator(&evidence.producer).map(|v| v.slash_offense_count),
-                            "Graduated slash applied from block evidence"
+                            "100% slash applied from block evidence"
                         );
                     }
                     Ok(_) => {} // already permanently slashed, no-op
@@ -919,12 +898,12 @@ impl OpolysNode {
             }
         }
 
-        // Detect double-signing locally: if a validator signed a different block at
+        // Detect double-signing locally: if a refiner signed a different block at
         // the same height, build evidence for inclusion in the next mined block.
         let mut new_evidence: Vec<DoubleSignEvidence> = Vec::new();
-        if block.header.validator_signature.is_some() && !block.header.producer.0.is_zero() {
+        if block.header.refiner_signature.is_some() && !block.header.producer.0.is_zero() {
             let block_hash = compute_block_hash(&block.header);
-            let sig_bytes = block.header.validator_signature.as_ref().unwrap().clone();
+            let sig_bytes = block.header.refiner_signature.as_ref().unwrap().clone();
             let key = (block.header.height, block.header.producer.to_hex());
             if let Some((prev_hash, prev_sig)) = chain.producer_signatures.get(&key) {
                 if *prev_hash != block_hash {
@@ -963,7 +942,7 @@ impl OpolysNode {
                 // Lucky hashes (small hash_int) earn higher yield
                 pow::compute_pow_hash_value(&block.header).unwrap_or(0u64)
             } else {
-                // PoS block: validators earn flat base reward with no luck component
+                // PoS block: refiners earn flat base reward with no luck component
                 // Deliberate design: vaults earn steady fees, miners earn variable ore
                 // hash_int = 0 triggers the 1.0x floor in compute_vein_yield()
                 // This is intentional — not a missing feature
@@ -972,9 +951,9 @@ impl OpolysNode {
             emission::compute_block_reward(chain.base_reward, block.header.difficulty, pow_hash_value)
         };
 
-        // Split the block reward between miners and validators based on stake coverage.
-        // pow_share goes to the block producer (miner or selected validator).
-        // pos_share is distributed among all active validators proportional to weight.
+        // Split the block reward between miners and refiners based on stake coverage.
+        // pow_share goes to the block producer (miner or selected refiner).
+        // pos_share is distributed among all active refiners proportional to weight.
         // coverage_milli = (bonded_stake × 1000) / total_issued, avoiding floating point.
         let coverage_milli: u64 = if chain.total_issued > 0 {
             ((bonded_stake as u128 * 1000) / chain.total_issued as u128).min(1000) as u64
@@ -986,7 +965,7 @@ impl OpolysNode {
         let pow_share_amount = ((block_reward as u128 * (1000 - coverage_milli) as u128) / 1000) as FlakeAmount;
         let pos_share_amount = block_reward.saturating_sub(pow_share_amount);
 
-        // Credit the PoW share to the block producer (miner or selected validator).
+        // Credit the PoW share to the block producer (miner or selected refiner).
         // The producer is identified by block.header.producer.
         let producer = &block.header.producer;
         if !producer.0.is_zero() && pow_share_amount > 0 {
@@ -996,13 +975,13 @@ impl OpolysNode {
             accounts.credit(producer, pow_share_amount).ok();
         }
 
-        // Distribute the PoS share among active validators proportional to weight.
-        // Each validator's share = pos_share_amount × (their_weight / total_weight).
+        // Distribute the PoS share among active refiners proportional to weight.
+        // Each refiner's share = pos_share_amount × (their_weight / total_weight).
         if pos_share_amount > 0 {
             let current_timestamp = chain.block_timestamps.last().copied().unwrap_or(0);
-            let total_weight = validators.total_weight(current_timestamp);
+            let total_weight = refiners.total_weight(current_timestamp);
             if total_weight > 0 {
-                for v in validators.active_validators() {
+                for v in refiners.active_refiners() {
                     let v_weight = v.weight(current_timestamp);
                     let v_share = ((pos_share_amount as u128 * v_weight as u128) / total_weight as u128) as FlakeAmount;
                     if v_share > 0 {
@@ -1037,7 +1016,7 @@ impl OpolysNode {
             let result = TransactionDispatcher::apply_transaction(
                 tx,
                 &mut accounts,
-                &mut validators,
+                &mut refiners,
                 block.header.height,
                 block.header.timestamp,
                 expected_chain_id,
@@ -1069,7 +1048,7 @@ impl OpolysNode {
         chain.total_burned = chain.total_burned.saturating_add(total_fees_burned);
 
         // Process matured unbonding entries — return stake to accounts
-        for (account, amount) in validators.process_matured_unbonds(chain.current_height) {
+        for (account, amount) in refiners.process_matured_unbonds(chain.current_height) {
             if accounts.get_account(&account).is_none() {
                 accounts.create_account(account.clone()).ok();
             }
@@ -1081,65 +1060,38 @@ impl OpolysNode {
             );
         }
 
-        // Activate validators that have been bonding for at least one epoch
-        let activated = validators.activate_matured_validators(chain.current_height);
+        // Activate refiners that have been bonding for at least one epoch
+        let activated = refiners.activate_matured_refiners(chain.current_height);
         if !activated.is_empty() {
             tracing::info!(
                 count = activated.len(),
-                "Validators transitioned Bonding→Waiting at epoch boundary"
+                "Refiners transitioned Bonding→Waiting at epoch boundary"
             );
         }
 
-        // At epoch boundaries: rerank validators (Waiting→Active / Active→Waiting)
+        // At epoch boundaries: rerank refiners (Waiting→Active / Active→Waiting)
         if chain.current_height > 0 && chain.current_height % EPOCH == 0 {
             let current_ts = chain.block_timestamps.last().copied().unwrap_or(0);
-            let (newly_activated, newly_demoted) = validators.rerank_validators(current_ts);
+            let (newly_activated, newly_demoted) = refiners.rerank_refiners(current_ts);
             if !newly_activated.is_empty() || !newly_demoted.is_empty() {
                 tracing::info!(
                     activated = newly_activated.len(),
                     demoted = newly_demoted.len(),
                     height = chain.current_height,
-                    "Validator set reranked at epoch boundary"
+                    "Refiner set reranked at epoch boundary"
                 );
             }
         }
 
-        // Track PoS finality: POS_FINALITY_BLOCKS consecutive PoS blocks finalize a block
-        let is_pos_block = block.header.validator_signature.is_some();
-        if is_pos_block {
-            chain.consecutive_pos_blocks = chain.consecutive_pos_blocks.saturating_add(1);
-            if chain.consecutive_pos_blocks >= POS_FINALITY_BLOCKS {
-                // The block POS_FINALITY_BLOCKS behind current is now finalized
-                let newly_finalized = chain.current_height
-                    .saturating_sub(POS_FINALITY_BLOCKS - 1);
-                if newly_finalized > chain.finalized_height {
-                    chain.finalized_height = newly_finalized;
-                    tracing::debug!(
-                        finalized_height = chain.finalized_height,
-                        "Block finalized via PoS"
-                    );
-                }
-            }
-        } else {
-            chain.consecutive_pos_blocks = 0;
-        }
-
-        // Update consensus phase based on stake coverage.
-        // Any bonded stake shifts to PoS — the smooth transition model means
-        // there's no threshold, just a gradual shift as coverage increases.
-        let coverage = chain.stake_coverage(bonded_stake);
-        if bonded_stake > 0 && coverage > 0.0 {
-            chain.phase = ConsensusPhase::ProofOfStake;
-        } else {
-            chain.phase = ConsensusPhase::ProofOfWork;
-        }
+        // No explicit consensus phase — refiners produce blocks when miners don't.
+        // The coverage_milli calculation in reward distribution handles the split.
 
         // This state root goes into the NEXT block's header (block N+1).
         // It reflects all state changes from this block:
-        // rewards, transactions, unbonds, validator activations.
+        // rewards, transactions, unbonds, refiner activations.
         let mut account_hasher = opolys_crypto::Blake3Hasher::new();
         account_hasher.update(accounts.compute_state_root().as_bytes());
-        account_hasher.update(validators.compute_state_root().as_bytes());
+        account_hasher.update(refiners.compute_state_root().as_bytes());
         account_hasher.update(&chain.total_issued.to_be_bytes());
         account_hasher.update(&chain.total_burned.to_be_bytes());
         account_hasher.update(&chain.current_height.to_be_bytes());
@@ -1147,14 +1099,14 @@ impl OpolysNode {
 
         // Persist state to disk
         if let Some(ref store) = self.store {
-            if let Err(e) = Self::persist_state(store, &chain, &accounts, &validators, block) {
+            if let Err(e) = Self::persist_state(store, &chain, &accounts, &refiners, block) {
                 tracing::error!("Failed to persist state: {}", e);
             }
         }
 
         // Release all write locks before accessing pending_slash_evidence
         drop(mempool);
-        drop(validators);
+        drop(refiners);
         drop(accounts);
         drop(chain);
 
@@ -1166,24 +1118,24 @@ impl OpolysNode {
         Ok(block_hash)
     }
 
-    /// Persist all chain state, accounts, validators, and the block to RocksDB.
+    /// Persist all chain state, accounts, refiners, and the block to RocksDB.
     fn persist_state(
         store: &BlockchainStore,
         chain: &ChainState,
         accounts: &AccountStore,
-        validators: &ValidatorSet,
+        refiners: &RefinerSet,
         block: &Block,
     ) -> Result<(), String> {
         store.save_block(block)?;
         store.save_block_indexes(block)?;
         store.save_chain_state(&chain.to_persisted())?;
         store.save_accounts(accounts)?;
-        // At epoch boundaries write full validator set for consistency;
-        // otherwise write only dirty (changed) validators for performance.
+        // At epoch boundaries write full refiner set for consistency;
+        // otherwise write only dirty (changed) refiners for performance.
         if chain.current_height > 0 && chain.current_height % EPOCH == 0 {
-            store.save_validators(validators)?;
-        } else if !validators.dirty_validators.is_empty() {
-            store.save_dirty_validators(validators, &validators.dirty_validators)?;
+            store.save_refiners(refiners)?;
+        } else if !refiners.dirty_refiners.is_empty() {
+            store.save_dirty_refiners(refiners, &refiners.dirty_refiners)?;
         }
         Ok(())
     }
@@ -1210,7 +1162,7 @@ mod tests {
             log_level: "warn".to_string(),
             mine: true,
             no_rpc: true,
-            validate: false,
+            refine: false,
             key_file: None,
             rpc_listen_addr: "127.0.0.1".to_string(),
             rpc_api_key: None,
@@ -1303,10 +1255,10 @@ mod tests {
         let (config, _dir) = test_config();
         let node = OpolysNode::new(config);
 
-        let verify_invariant = |chain: &ChainState, accounts: &opolys_consensus::account::AccountStore, validators: &ValidatorSet| {
+        let verify_invariant = |chain: &ChainState, accounts: &opolys_consensus::account::AccountStore, refiners: &RefinerSet| {
             let account_total: FlakeAmount = accounts.all_accounts().iter().map(|a| a.balance).sum();
-            let bonded_total: FlakeAmount = validators.all_validators().iter().map(|v| v.total_stake()).sum();
-            let unbonding_total: FlakeAmount = validators.unbonding_queue.iter().map(|u| u.amount).sum();
+            let bonded_total: FlakeAmount = refiners.all_refiners().iter().map(|v| v.total_stake()).sum();
+            let unbonding_total: FlakeAmount = refiners.unbonding_queue.iter().map(|u| u.amount).sum();
             let accounted = account_total
                 .saturating_add(bonded_total)
                 .saturating_add(unbonding_total);
@@ -1322,8 +1274,8 @@ mod tests {
         {
             let chain = node.chain.read().await;
             let accounts = node.accounts.read().await;
-            let validators = node.validators.read().await;
-            verify_invariant(&chain, &accounts, &validators);
+            let refiners = node.refiners.read().await;
+            verify_invariant(&chain, &accounts, &refiners);
         }
     }
 }
