@@ -55,7 +55,7 @@ pub struct PersistedChainState {
     /// Survives node restarts so evidence can still be built after a reboot.
     pub producer_signatures: Vec<(u64, String, Hash, Vec<u8>)>,
     /// Height of the latest finalized block.
-    /// 0 means no block is finalized yet.
+    /// 0 means no block is finalized yet. Placeholder until finality via attestations (Pass 2).
     pub finalized_height: u64,
 }
 

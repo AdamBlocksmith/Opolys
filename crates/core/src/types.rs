@@ -229,16 +229,16 @@ pub struct BlockHeader {
     /// Optional Merkle root of extension data (e.g., rollup anchors).
     /// `None` for normal blocks. Reserved for future protocol extensions.
     pub extension_root: Option<Hash>,
-    /// The ObjectId of the block producer — the miner (PoW) or refiner (PoS)
+    /// The ObjectId of the block producer — the miner or refiner
     /// who earns the block reward. Set to `ObjectId::zero()` for the genesis block.
-    /// In PoW mode, this is the miner's address. In PoS mode, this is the
+    /// For mined blocks, this is the miner's address. For refiner blocks, this is the
     /// refiner's on-chain identity.
     pub producer: ObjectId,
-    /// The nonce/solution that satisfies the difficulty target (present in PoW phases).
-    /// `None` for PoS blocks and the genesis block.
+    /// The nonce/solution that satisfies the difficulty target (present in mined blocks).
+    /// `None` for refiner blocks and the genesis block.
     pub pow_proof: Option<Vec<u8>>,
-    /// The refiner's ed25519 signature over the block hash (present in PoS phases).
-    /// `None` for PoW blocks and the genesis block.
+    /// The refiner's ed25519 signature over the block hash (present in refiner blocks).
+    /// `None` for mined blocks and the genesis block.
     pub refiner_signature: Option<Vec<u8>>,
 }
 

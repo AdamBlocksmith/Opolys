@@ -249,7 +249,7 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
         tracing::info!("Mining: disabled (run with --mine to enable block production)");
     }
     if config.refine {
-        tracing::info!("Validation: enabled (producing PoS blocks when refiner is active)");
+        tracing::info!("Validation: enabled (producing refiner blocks when refiner is active)");
     }
     if config.no_rpc {
         tracing::info!("RPC: disabled (run without --no-rpc to enable)");
@@ -462,7 +462,7 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
                     continue;
                 }
 
-                match refining_node.produce_pos_block().await {
+                match refining_node.produce_refiner_block().await {
                     Some(block) => {
                         let height = block.header.height;
                         let tx_count = block.transactions.len();
@@ -779,7 +779,7 @@ async fn handle_network_event(
 
                     // Vein yield pre-check: verify the PoW hash meets the difficulty
                     // target before acquiring the expensive apply_block() write lock.
-                    // PoS blocks (no pow_proof) skip this entirely.
+                    // Refiner blocks (no pow_proof) skip this entirely.
                     if block.header.pow_proof.is_some() {
                         let target = opolys_consensus::difficulty_to_target(block.header.difficulty);
                         // target == 0 means difficulty >= 64; skip and let apply_block handle it.
@@ -791,7 +791,7 @@ async fn handle_network_event(
                                         peer = %source,
                                         hash_val,
                                         target,
-                                        "Fake PoW block — immediate permanent ban"
+                                        "Fake Miner block — immediate permanent ban"
                                     );
                                     node.ban_peer(&source.to_string(), "fake_pow", true).await;
                                     if let Err(e) = net.disconnect_peer(source).await {

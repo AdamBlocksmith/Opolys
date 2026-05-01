@@ -81,7 +81,7 @@ pub fn compute_base_reward(base_reward: FlakeAmount, difficulty: u64) -> FlakeAm
 /// The result is clamped to a minimum of 1000 (1.0x) — every valid block
 /// earns at least the base reward.
 pub fn compute_vein_yield(difficulty: u64, hash_int: u64) -> u64 {
-    // hash_int == 0 means PoS block — returns flat 1.0x yield by design
+    // hash_int == 0 means Refiner block — returns flat 1.0x yield by design
     // PoS refiners earn predictable steady income (BASE_REWARD / difficulty)
     // PoW miners earn variable income based on hash luck (1x to ~10x)
     // This distinction is intentional: vaults earn fees, miners earn ore
@@ -166,20 +166,6 @@ pub fn compute_refiner_weight(stake: FlakeAmount, age_years_milli: u64) -> Flake
     let multiplier_milli = 1000u64.saturating_add(ln_bonus);
     // weight = stake × multiplier / 1000
     ((stake as u128 * multiplier_milli as u128) / 1000) as FlakeAmount
-}
-
-/// Compute the PoW (miner) share of block rewards.
-/// Equals `1.0 - stake_coverage`, so as more $OPL is bonded,
-/// miners receive a smaller share.
-pub fn compute_pow_share(stake_coverage: f64) -> f64 {
-    1.0 - stake_coverage
-}
-
-/// Compute the PoS (refiner) share of block rewards.
-/// Equals `stake_coverage`, so as more $OPL is bonded,
-/// refiners receive a larger share.
-pub fn compute_pos_share(stake_coverage: f64) -> f64 {
-    stake_coverage
 }
 
 /// Compute stake coverage — the ratio of total bonded $OPL to total issued
@@ -372,13 +358,6 @@ mod tests {
     }
 
     #[test]
-    fn pow_pos_transition_continuous() {
-        let coverage = 0.3;
-        assert!((compute_pow_share(coverage) - 0.7).abs() < 0.001);
-        assert!((compute_pos_share(coverage) - 0.3).abs() < 0.001);
-    }
-
-    #[test]
     fn suggested_fee_starts_at_minimum() {
         let fee = compute_suggested_fee(0, 0);
         assert_eq!(fee, 1);
@@ -407,21 +386,6 @@ mod tests {
         let r1 = compute_refiner_reward(reward, 100_000, 1000, 200_000);
         assert!(r1 > 0);
         assert!(r1 < reward);
-    }
-
-    /// Integration test: verify that stake_coverage drives the PoW/PoS reward split.
-    /// With 0% coverage, all rewards go to miners. With 100%, all go to refiners.
-    #[test]
-    fn reward_split_follows_stake_coverage() {
-        // At 0% coverage, miner gets 100%
-        assert!((compute_pow_share(0.0) - 1.0).abs() < 0.001);
-        assert!((compute_pos_share(0.0) - 0.0).abs() < 0.001);
-        // At 100% coverage, refiners get 100%
-        assert!((compute_pow_share(1.0) - 0.0).abs() < 0.001);
-        assert!((compute_pos_share(1.0) - 1.0).abs() < 0.001);
-        // At 30% coverage, split is 70/30
-        assert!((compute_pow_share(0.3) - 0.7).abs() < 0.001);
-        assert!((compute_pos_share(0.3) - 0.3).abs() < 0.001);
     }
 
     /// Verify that vein yield uses the leading-zero-bits difficulty model

@@ -269,7 +269,7 @@ pub fn validate_block(
 
 // 12. Block proof check:
     // - PoW blocks: verify the EVO-OMAP proof-of-work
-    // - PoS blocks: verify the refiner's ed25519 signature over the block hash
+    // - Refiner blocks: verify the refiner's ed25519 signature over the block hash
     //   The producer's public key must be stored on-chain in the AccountStore.
     // - Genesis block (height 0): skip both
     if expected_height > 0 {
@@ -279,7 +279,7 @@ pub fn validate_block(
                 return Err(e);
             }
         } else if block.header.refiner_signature.is_some() {
-            // PoS block — verify the refiner's ed25519 signature
+            // Refiner block — verify the refiner's ed25519 signature
             // 1. The signature must be exactly 64 bytes (ed25519)
             let sig = block.header.refiner_signature.as_ref().unwrap();
             if sig.len() != 64 {
@@ -291,7 +291,7 @@ pub fn validate_block(
             // 2. The producer must not be the zero ObjectId
             if block.header.producer.0.is_zero() {
                 return Err(OpolysError::BlockValidationFailed(
-                    "PoS block producer must be a valid refiner ObjectId".to_string()
+                    "Refiner block producer must be a valid refiner ObjectId".to_string()
                 ));
             }
             // 3. Verify the ed25519 signature over the block hash

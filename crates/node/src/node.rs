@@ -103,7 +103,7 @@ pub struct Args {
 
     /// Enable refiner block production (default: disabled).
     ///
-    /// When enabled, the node will produce PoS blocks when it is an active
+    /// When enabled, the node will produce refiner blocks when it is an active
     /// refiner with bonded stake. Requires a wallet key to sign blocks.
     /// This flag is separate from --mine (both can be active simultaneously).
     #[arg(long)]
@@ -160,7 +160,7 @@ pub struct NodeConfig {
     pub no_rpc: bool,
     pub refine: bool,
     /// Path to the miner/refiner key file (32-byte ed25519 seed).
-    /// When provided, the node can sign PoS blocks and receive block rewards.
+    /// When provided, the node can sign refiner blocks and receive block rewards.
     pub key_file: Option<String>,
     /// IP address the RPC server listens on. Default: "127.0.0.1".
     /// Set to "0.0.0.0" to expose publicly (use with --rpc-api-key).
@@ -223,6 +223,8 @@ pub struct ChainState {
     /// Testnet/dev: the BASE_REWARD constant (332 OPL).
     pub base_reward: FlakeAmount,
     /// Height of the most recently finalized block (cannot be reverted).
+    /// Placeholder: always 0 until finality is implemented via attestations (Pass 2).
+    /// When finalized_height == 0, no block is considered finalized.
     pub finalized_height: u64,
 }
 
@@ -330,13 +332,13 @@ pub struct OpolysNode {
     pow_context: Arc<RwLock<PowContext>>,
     /// The miner's on-chain identity (Blake3 hash of their public key).
     /// For PoW blocks, this identifies who earns the block reward.
-    /// For PoS blocks, this must match an active refiner's ObjectId.
+    /// For refiner blocks, this must match an active refiner's ObjectId.
     pub miner_id: ObjectId,
     /// The ed25519 signing key for block production. Set when --key-file is provided.
-    /// Used by produce_pos_block() to sign PoS blocks.
+/// Used by produce_refiner_block() to sign refiner blocks.
     pub signing_key: Option<ed25519_dalek::SigningKey>,
-    /// Double-sign evidence detected locally, pending inclusion in the next mined block.
-    /// Drained into `Block.slash_evidence` by mine_block() and produce_pos_block().
+    /// Double-sign evidence collected during mining or refiner block production.
+    /// Drained into `Block.slash_evidence` by mine_block() and produce_refiner_block().
     pub pending_slash_evidence: Arc<RwLock<Vec<DoubleSignEvidence>>>,
     /// Peers that have announced an active refiner identity via the identify protocol.
     /// Keyed by libp2p PeerId; value is their on-chain ObjectId (used for look-ups).
@@ -624,7 +626,7 @@ impl OpolysNode {
         Some(block)
     }
 
-    /// Produce a PoS block as a refiner.
+    /// Produce a refiner block (signed by the node's refiner key).
     ///
     /// When `--refine` is enabled and this node's `miner_id` is the
     /// **selected** block producer (determined by weighted random sampling
@@ -640,7 +642,7 @@ impl OpolysNode {
     ///
     /// Returns `Some(Block)` if this node is the selected producer, or `None`
     /// if another refiner was selected or no signing key is available.
-    pub async fn produce_pos_block(&self) -> Option<Block> {
+    pub async fn produce_refiner_block(&self) -> Option<Block> {
         let signing_key = self.signing_key.as_ref()?;
         let chain = self.chain.read().await;
         let refiners = self.refiners.read().await;
@@ -730,7 +732,7 @@ impl OpolysNode {
         tracing::info!(
             height = block.header.height,
             producer = %self.miner_id.to_hex(),
-            "Produced PoS block"
+            "Produced refiner block"
         );
 
         Some(block)
@@ -821,20 +823,20 @@ impl OpolysNode {
             ));
         }
 
-        // Verify PoS refiner signature if present
+        // Verify Refiner signature if present
         if block.header.refiner_signature.is_some() && !block.header.producer.0.is_zero() {
             if let Some(ref sig_bytes) = block.header.refiner_signature {
                 if sig_bytes.len() != 64 {
-                    return Err("PoS block refiner signature must be 64 bytes".to_string());
+                    return Err("Refiner signature must be 64 bytes".to_string());
                 }
                 let block_hash = compute_block_hash(&block.header);
                 let (pk_array, sig_array) = {
                     let account = accounts.get_account(&block.header.producer)
-                        .ok_or_else(|| "PoS block producer account not found".to_string())?;
+                        .ok_or_else(|| "Refiner block producer account not found".to_string())?;
                     let pk_bytes = account.public_key.as_ref()
-                        .ok_or_else(|| "PoS block producer public key not registered".to_string())?;
+                        .ok_or_else(|| "Refiner block producer public key not registered".to_string())?;
                     if pk_bytes.len() != 32 {
-                        return Err("PoS block producer public key must be 32 bytes".to_string());
+                        return Err("Refiner block producer public key must be 32 bytes".to_string());
                     }
                     let mut pk_array = [0u8; 32];
                     pk_array.copy_from_slice(pk_bytes);
@@ -843,14 +845,14 @@ impl OpolysNode {
                     (pk_array, sig_array)
                 };
                 let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&pk_array)
-                    .map_err(|_| "PoS block producer public key is invalid".to_string())?;
+                    .map_err(|_| "Refiner block producer public key is invalid".to_string())?;
                 let signature = ed25519_dalek::Signature::from_bytes(&sig_array);
                 verifying_key.verify(block_hash.0.as_ref(), &signature)
-                    .map_err(|_| "PoS block refiner signature verification failed".to_string())?;
+                    .map_err(|_| "Refiner signature verification failed".to_string())?;
             }
         }
 
-        // Verify PoS block producer was legitimately selected
+        // Verify Refiner block producer was legitimately selected
         if block.header.refiner_signature.is_some() && !block.header.producer.0.is_zero() {
             let seed = u64::from_be_bytes(
                 chain.latest_block_hash.0[0..8].try_into().unwrap_or([0u8; 8])
@@ -859,7 +861,7 @@ impl OpolysNode {
             if let Some(expected_producer) = refiners.select_block_producer(timestamp, seed) {
                 if expected_producer.object_id != block.header.producer {
                     return Err(format!(
-                        "PoS block producer mismatch: expected {}, got {}",
+                        "Refiner block producer mismatch: expected {}, got {}",
                         expected_producer.object_id.to_hex(),
                         block.header.producer.to_hex()
                     ));
@@ -942,7 +944,7 @@ impl OpolysNode {
                 // Lucky hashes (small hash_int) earn higher yield
                 pow::compute_pow_hash_value(&block.header).unwrap_or(0u64)
             } else {
-                // PoS block: refiners earn flat base reward with no luck component
+                // Refiner block: refiners earn flat base reward with no luck component
                 // Deliberate design: vaults earn steady fees, miners earn variable ore
                 // hash_int = 0 triggers the 1.0x floor in compute_vein_yield()
                 // This is intentional — not a missing feature
@@ -952,38 +954,38 @@ impl OpolysNode {
         };
 
         // Split the block reward between miners and refiners based on stake coverage.
-        // pow_share goes to the block producer (miner or selected refiner).
-        // pos_share is distributed among all active refiners proportional to weight.
+        // miner share goes to the block producer (miner or selected refiner).
+        // refiner share is distributed among all active refiners proportional to weight.
         // coverage_milli = (bonded_stake × 1000) / total_issued, avoiding floating point.
         let coverage_milli: u64 = if chain.total_issued > 0 {
             ((bonded_stake as u128 * 1000) / chain.total_issued as u128).min(1000) as u64
         } else {
             0
         };
-        // pow_share_amount = block_reward × (1000 - coverage_milli) / 1000
-        // pos_share_amount = block_reward - pow_share_amount (avoids rounding drift)
-        let pow_share_amount = ((block_reward as u128 * (1000 - coverage_milli) as u128) / 1000) as FlakeAmount;
-        let pos_share_amount = block_reward.saturating_sub(pow_share_amount);
+        // miner_share_amount = block_reward × (1000 - coverage_milli) / 1000
+        // refiner_share_amount = block_reward - miner_share_amount (avoids rounding drift)
+        let miner_share_amount = ((block_reward as u128 * (1000 - coverage_milli) as u128) / 1000) as FlakeAmount;
+        let refiner_share_amount = block_reward.saturating_sub(miner_share_amount);
 
         // Credit the PoW share to the block producer (miner or selected refiner).
         // The producer is identified by block.header.producer.
         let producer = &block.header.producer;
-        if !producer.0.is_zero() && pow_share_amount > 0 {
+        if !producer.0.is_zero() && miner_share_amount > 0 {
             if accounts.get_account(producer).is_none() {
                 accounts.create_account(producer.clone()).ok();
             }
-            accounts.credit(producer, pow_share_amount).ok();
+            accounts.credit(producer, miner_share_amount).ok();
         }
 
-        // Distribute the PoS share among active refiners proportional to weight.
-        // Each refiner's share = pos_share_amount × (their_weight / total_weight).
-        if pos_share_amount > 0 {
+        // Distribute the refiner share among active refiners proportional to weight.
+        // Each refiner's share = refiner_share_amount × (their_weight / total_weight).
+        if refiner_share_amount > 0 {
             let current_timestamp = chain.block_timestamps.last().copied().unwrap_or(0);
             let total_weight = refiners.total_weight(current_timestamp);
             if total_weight > 0 {
                 for v in refiners.active_refiners() {
                     let v_weight = v.weight(current_timestamp);
-                    let v_share = ((pos_share_amount as u128 * v_weight as u128) / total_weight as u128) as FlakeAmount;
+                    let v_share = ((refiner_share_amount as u128 * v_weight as u128) / total_weight as u128) as FlakeAmount;
                     if v_share > 0 {
                         if accounts.get_account(&v.object_id).is_none() {
                             accounts.create_account(v.object_id.clone()).ok();
