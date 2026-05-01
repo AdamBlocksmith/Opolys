@@ -940,32 +940,64 @@ impl OpolysNode {
             0
         } else {
             let pow_hash_value = if block.header.pow_proof.is_some() {
-                // PoW block: use actual hash value for vein yield calculation
+                // Miner block: use actual hash value for vein yield calculation
                 // Lucky hashes (small hash_int) earn higher yield
                 pow::compute_pow_hash_value(&block.header).unwrap_or(0u64)
             } else {
                 // Refiner block: refiners earn flat base reward with no luck component
                 // Deliberate design: vaults earn steady fees, miners earn variable ore
                 // hash_int = 0 triggers the 1.0x floor in compute_vein_yield()
-                // This is intentional — not a missing feature
                 0u64
             };
             emission::compute_block_reward(chain.base_reward, block.header.difficulty, pow_hash_value)
         };
 
-        // Split the block reward between miners and refiners based on stake coverage.
-        // miner share goes to the block producer (miner or selected refiner).
-        // refiner share is distributed among all active refiners proportional to weight.
+        // Split the block reward into base and vein bonus components.
+        // The coverage split (miner vs refiner) applies to base_reward ONLY.
+        // The vein bonus (luck component) goes 100% to the block producer.
+        // This mirrors gold: refineries charge per ounce, not per grade.
+        // A rich vein doesn't increase the refinery's cut.
+        let base_reward_amount = if block.header.height == 0 {
+            0
+        } else {
+            chain.base_reward / block.header.difficulty.max(MIN_DIFFICULTY)
+        };
+        let yield_milli = if block.header.height == 0 {
+            1000
+        } else {
+            let pow_hash_value = if block.header.pow_proof.is_some() {
+                pow::compute_pow_hash_value(&block.header).unwrap_or(0u64)
+            } else {
+                0u64
+            };
+            emission::compute_vein_yield(block.header.difficulty, pow_hash_value)
+        };
+        // vein_bonus = base_reward × (yield_milli - 1000) / 1000
+        // For refiner blocks: yield_milli = 1000, so vein_bonus = 0
+        // For miner blocks: yield_milli > 1000, vein_bonus > 0
+        let vein_bonus = ((base_reward_amount as u128 * (yield_milli.saturating_sub(1000) as u128)) / 1000) as FlakeAmount;
+
+        // Mine assay: burn ANNUAL_ATTRITION_PERMILLE / 1000 of block reward at source.
+        // Mirrors gold processing waste — miners lose ~1.5% of what they extract.
+        let mine_assay = if block.header.height == 0 {
+            0
+        } else {
+            ((block_reward as u128 * ANNUAL_ATTRITION_PERMILLE as u128) / 1000) as FlakeAmount
+        };
+        let net_reward = block_reward.saturating_sub(mine_assay);
+
+        // Split the net reward between miners and refiners based on stake coverage.
+        // The split is on base_reward only. Vein bonus goes to the producer.
         // coverage_milli = (bonded_stake × 1000) / total_issued, avoiding floating point.
         let coverage_milli: u64 = if chain.total_issued > 0 {
             ((bonded_stake as u128 * 1000) / chain.total_issued as u128).min(1000) as u64
         } else {
             0
         };
-        // miner_share_amount = block_reward × (1000 - coverage_milli) / 1000
-        // refiner_share_amount = block_reward - miner_share_amount (avoids rounding drift)
-        let miner_share_amount = ((block_reward as u128 * (1000 - coverage_milli) as u128) / 1000) as FlakeAmount;
-        let refiner_share_amount = block_reward.saturating_sub(miner_share_amount);
+        // miner_share = base_reward × (1000 - coverage_milli) / 1000 + vein_bonus
+        // refiner_share = base_reward × coverage_milli / 1000
+        let miner_share_amount = ((base_reward_amount as u128 * (1000 - coverage_milli) as u128) / 1000).saturating_add(vein_bonus as u128) as FlakeAmount;
+        let refiner_share_amount = ((base_reward_amount as u128 * coverage_milli as u128) / 1000) as FlakeAmount;
 
         // Credit the PoW share to the block producer (miner or selected refiner).
         // The producer is identified by block.header.producer.
@@ -998,18 +1030,6 @@ impl OpolysNode {
 
         // Compute the block hash — this is the new chain tip
         let block_hash = compute_block_hash(&block.header);
-
-        // Compute suggested fee for the next block via EMA
-        let total_fees: FlakeAmount = block.transactions.iter().map(|tx| tx.fee).sum();
-        let next_suggested_fee = compute_suggested_fee(total_fees, chain.suggested_fee);
-
-        // Update chain state
-        chain.total_issued = chain.total_issued.saturating_add(block_reward);
-        chain.current_height = block.header.height;
-        chain.current_difficulty = block.header.difficulty;
-        chain.latest_block_hash = block_hash.clone();
-        chain.block_timestamps.push(block.header.timestamp);
-        chain.suggested_fee = next_suggested_fee;
 
         // Execute all transactions in order
         let expected_chain_id = MAINNET_CHAIN_ID;
@@ -1048,6 +1068,22 @@ impl OpolysNode {
         }
 
         chain.total_burned = chain.total_burned.saturating_add(total_fees_burned);
+
+        // Compute suggested fee for the next block via EMA of BURNED fees (not declared).
+        // Fixes H3: previously used total_fees (declared) instead of total_fees_burned (actually burned),
+        // which overstated the fee market signal when transactions failed.
+        let next_suggested_fee = compute_suggested_fee(total_fees_burned, chain.suggested_fee);
+
+        // Update chain state
+        // total_issued increases by net_reward (after mine assay burn)
+        // total_burned increases by mine_assay (burned at source, never enters circulation)
+        chain.total_issued = chain.total_issued.saturating_add(net_reward);
+        chain.total_burned = chain.total_burned.saturating_add(mine_assay);
+        chain.current_height = block.header.height;
+        chain.current_difficulty = block.header.difficulty;
+        chain.latest_block_hash = block_hash.clone();
+        chain.block_timestamps.push(block.header.timestamp);
+        chain.suggested_fee = next_suggested_fee;
 
         // Process matured unbonding entries — return stake to accounts
         for (account, amount) in refiners.process_matured_unbonds(chain.current_height) {

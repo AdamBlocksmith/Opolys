@@ -44,9 +44,10 @@ pub fn difficulty_to_target(difficulty: u64) -> u64 {
 
 /// Compute the total block reward using vein yield.
 ///
-/// Vein yield uses the natural logarithm: `vein_yield = 1 + ln(target / hash_int)`.
-/// This gives a natural distribution where most blocks earn ~1-2x the base,
-/// with diminishing returns for exceptionally lucky hashes.
+/// Vein yield uses the sqrt-compressed natural logarithm: `vein_yield = 1 + sqrt(ln(target / hash_int))`.
+/// The sqrt compression makes rich veins rare — most blocks earn ~1.5-2× the base,
+/// with a 3× block happening every ~50 blocks and a 5× block essentially never.
+/// This mirrors real gold: most ore is low-grade, good veins are weekly, bonanzas are once-in-a-career.
 ///
 /// The target is derived from EVO-OMAP difficulty (leading zero bits):
 /// `target = 2^(64-D) - 1`, so at difficulty 1 the target is u64::MAX
@@ -73,17 +74,23 @@ pub fn compute_base_reward(base_reward: FlakeAmount, difficulty: u64) -> FlakeAm
 /// Compute vein yield in milli (× 1000). Returns an integer where
 /// 1000 = 1.0x yield, 2000 = 2.0x yield, etc.
 ///
-/// Formula: `vein_yield = 1 + ln(target / hash_int)`
+/// vein_yield = 1 + ln(target / hash_int),           in milli
 /// where `target = 2^(64-D) - 1` and D is the EVO-OMAP difficulty
 /// (number of leading zero bits required in the SHA3-256 hash).
+///
+/// Compressed via sqrt: `vein_yield = 1 + sqrt(ln(target / hash_int))`.
+/// The sqrt compression makes rich veins rare — a 3× block happens roughly
+/// once every 50 blocks (~75 minutes), and a 5× block is essentially never
+/// seen in practice. This mirrors real gold: most ore is low-grade, good veins
+/// are weekly, bonanzas are once-in-a-career.
 ///
 /// Uses f64 ratio computation for overflow safety and precision.
 /// The result is clamped to a minimum of 1000 (1.0x) — every valid block
 /// earns at least the base reward.
 pub fn compute_vein_yield(difficulty: u64, hash_int: u64) -> u64 {
     // hash_int == 0 means Refiner block — returns flat 1.0x yield by design
-    // PoS refiners earn predictable steady income (BASE_REWARD / difficulty)
-    // PoW miners earn variable income based on hash luck (1x to ~10x)
+    // Refiners earn predictable steady income (BASE_REWARD / difficulty)
+    // Miners earn variable income based on hash luck (1x to ~4x)
     // This distinction is intentional: vaults earn fees, miners earn ore
     if difficulty == 0 || hash_int == 0 {
         return 1000;
@@ -98,11 +105,12 @@ pub fn compute_vein_yield(difficulty: u64, hash_int: u64) -> u64 {
         // This shouldn't happen for a valid PoW, but handle it safely
         return 1000;
     }
-    // Compute ln(target / hash_int) directly using f64 for overflow safety.
-    // At high target values (low difficulty), target/hash_int can exceed u64 range.
+    // Compute sqrt(ln(target / hash_int)) using f64 for overflow safety.
+    // The sqrt compression makes the yield distribution half-normal:
+    // rare bonanzas, most blocks near the median.
     let ratio = target as f64 / hash_int as f64;
-    let ln_val = ratio.ln() * 1000.0;
-    // vein_yield = 1 + ln(ratio), in milli
+    let ln_val = ratio.ln().sqrt() * 1000.0;
+    // vein_yield = 1 + sqrt(ln(ratio)), in milli
     1000u64.saturating_add(ln_val.round().max(0.0) as u64)
 }
 
@@ -390,17 +398,17 @@ mod tests {
 
     /// Verify that vein yield uses the leading-zero-bits difficulty model
     /// correctly by comparing against manually computed targets.
+    /// With sqrt(ln) compression: yield = 1 + sqrt(ln(target/hash)) in milli.
     #[test]
     fn vein_yield_uses_leading_zero_bits_difficulty() {
         // At difficulty 10, target = 2^54 - 1
-        // A hash of 1 gives: ln(target/1) * 1000 = ln(2^54-1) * 1000
-        // This should be a very large yield bonus
+        // A hash of 1 gives: sqrt(ln(target/1)) * 1000 ≈ sqrt(37.5) * 1000 ≈ 6123
         let yield_val = compute_vein_yield(10, 1);
-        assert!(yield_val > 10000, "difficulty 10 with hash 1 should give large yield, got {}", yield_val);
+        assert!(yield_val > 5000, "difficulty 10 with hash 1 should give significant yield, got {}", yield_val);
 
         // At difficulty 1, target = 2^63 - 1
-        // A hash of 1 gives: ln(2^63 - 1) ≈ ln(2^63) ≈ 43.7
+        // A hash of 1 gives: sqrt(ln(2^63 - 1)) ≈ sqrt(43.7) ≈ 6.61
         let yield_val = compute_vein_yield(1, 1);
-        assert!(yield_val > 40000, "difficulty 1 with hash 1 should give massive yield");
+        assert!(yield_val > 5500, "difficulty 1 with hash 1 should give significant yield, got {}", yield_val);
     }
 }
