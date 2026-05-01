@@ -591,9 +591,9 @@ Opolys/
 | 7: RPC | **DONE** | JSON-RPC 2.0 with mining endpoints, API key auth |
 | 8: Node | **DONE** | Full node with mining loop and block application |
 | 9: Networking | **DONE** | P2P gossip/sync/discovery wired to node |
-| 10: Staking | **DONE** | `--validate`, graduated slash (→ 100% slash in Pass 1), PoS block production |
+| 10: Staking | **DONE** | `--refine`, 100% slash on double-sign, timeout-based refiner block production |
 | 11: Security | **DONE** | Eclipse protection, subnet diversity, DoS limits, memory challenge |
-| 12: Pass 1 | **IN PROGRESS** | Refiner rename, 100% slash, hybrid fix, security fixes |
+| 12: Pass 1 | **IN PROGRESS** | Phase A DONE (ec0df9b). Phase B–E remaining security & protocol fixes |
 | 13: Pass 2 | **PLANNED** | Attestations, reliability score, block confidence |
 | 14: Mainnet | **READY** | Genesis ceremony and launch (after Pass 1+2) |
 
@@ -701,101 +701,338 @@ EVO-OMAP difficulty means **leading zero bits** in the SHA3-256 output, NOT a u6
 
 ## 25. Security Audit & Bug Tracker
 
+Every bug below includes: **What it is**, **Why it matters**, and **How to fix it**.
+
 ### CRITICAL (4)
 
-| # | Issue | Location | Status |
-|---|---|---|---|
-| C1 | Testnet/mainnet shared data directory | `node.rs:433-498` | **OPEN** |
-| C2 | Mnemonic passed as CLI argument | `wallet/main.rs` | **OPEN** |
-| C3 | No memory zeroing for private keys | `wallet/bip39.rs:47, key.rs:60` | **OPEN** |
-| C4 | RPC write/mining endpoints unauthenticated by default | `rpc/server.rs:169-175` | **OPEN** |
+#### C1: Testnet/mainnet shared data directory
+**Location:** `node.rs:395-458`
+**Status:** OPEN
+
+**What it is:** The node uses a single `data_dir` (default `./data`) regardless of chain. If a user runs with `--testnet` (which loads testnet genesis), then restarts without `--testnet`, the mainnet node loads the testnet balances and refiner set from the same RocksDB database. The genesis accounts, chain state, and refiners from the testnet run are accepted as valid mainnet state.
+
+**Why it matters:** An attacker could inflate balances on testnet, then switch to mainnet mode and spend those inflated balances on mainnet. This is a chain-splitting vulnerability — different nodes with different histories would disagree on account balances.
+
+**How to fix:** Add a `chain_id` field to `PersistedChainState`. On load, compare it against `MAINNET_CHAIN_ID`. If they don't match, refuse to load and start fresh with a warning. Also partition the data directory: use `data_dir/mainnet/` vs `data_dir/testnet/` subdirectories.
+
+---
+
+#### C2: Mnemonic passed as CLI argument
+**Location:** `wallet/main.rs:41-118`
+**Status:** OPEN
+
+**What it is:** The wallet CLI accepts the 24-word mnemonic as a positional argument (e.g., `opl transfer "word1 word2 ... word24" ...`). This means the seed phrase is visible in `ps aux`, shell history (`~/.bash_history`, `~/.zsh_history`), and `/proc/<pid>/cmdline` on Linux. Anyone with shell access can recover the private key.
+
+**Why it matters:** The mnemonic is the master seed — possessing it gives full control of all derived accounts. Shell history is often backed up, shared, or logged. Process arguments are visible to all users on multi-user systems.
+
+**How to fix:** Replace positional mnemonic arguments with `OPOLYS_MNEMONIC` environment variable or interactive stdin prompt via `rpassword::read_password()`. The `Address`, `Transfer`, `Bond`, `Unbond` subcommands should accept `--from-env` (reads `OPOLYS_MNEMONIC`) or `--from-stdin` (reads interactively). Mnemonic is never a CLI arg.
+
+---
+
+#### C3: No memory zeroing for private keys
+**Location:** `wallet/bip39.rs:94` (`DerivedSeed`), `wallet/key.rs:60` (`KeyPair`)
+**Status:** OPEN
+
+**What it is:** `DerivedSeed` and `KeyPair` both derive `Debug`, meaning their fields can be printed to logs. Neither type implements `Zeroize` — when they go out of scope, private key material remains in memory until the allocator reuses those pages. Stack temporaries (like `seed` at `key.rs:75`) are also not zeroed.
+
+**Why it matters:** Private key material persists in RAM after use. A core dump, debugger attach, or memory scan can extract keys. The `#[derive(Debug)]` on both types means `{:?}` formatting will print the raw seed bytes to any log stream.
+
+**How to fix:** (1) Remove `#[derive(Debug)]` from both `DerivedSeed` and `KeyPair`. Implement manual `Debug` impls that print `"DerivedSeed([REDACTED])"` and `"KeyPair { signing_key: [REDACTED], ... }"`. (2) Add `impl Zeroize` for both types using the `zeroize` crate. In `Drop`, call `self.zeroize()`. (3) Zero the `seed` array in `KeyPair::generate()` after constructing the `SigningKey`.
+
+---
+
+#### C4: RPC write/mining endpoints unauthenticated by default
+**Location:** `rpc/server.rs:169-190, 221-222`
+**Status:** OPEN
+
+**What it is:** The RPC server has an optional `api_key` configuration, but it defaults to `None`. When `api_key` is `None`, write endpoints (`opl_sendTransaction`, `opl_getMiningJob`, `opl_submitSolution`) are accessible without any authentication. Additionally, at lines 180 and 185, the key comparison uses `==` on strings, which short-circuits on the first mismatching byte, enabling timing attacks.
+
+**Why it matters:** Anyone on the network can submit arbitrary transactions, waste mining jobs, or submit invalid blocks. The timing attack allows recovering the API key byte-by-byte in O(256 × key_length) requests.
+
+**How to fix:** (1) Default to a randomly-generated API key printed at startup. Only allow `None` (no auth) via explicit `--no-rpc-auth` flag. (2) Replace `==` with constant-time comparison via `subtle::ConstantTimeEq`.
+
+---
 
 ### HIGH (9)
 
-| # | Issue | Location | Status |
-|---|---|---|---|
-| H1 | No hash domain separation | `crypto/hash.rs`, multiple | **OPEN** |
-| H2 | No signing domain separation | `wallet/signing.rs:46, node.rs:737` | **OPEN** |
-| H3 | Suggested fee from declared fees, not burned | `node.rs:1022` | **OPEN** |
-| H4 | Unbond fee bypass — fee skipped if balance < fee | `dispatcher.rs:270-284` | **OPEN** |
-| H5 | RocksDB non-atomic cross-CF writes | `store.rs:103,110` | **OPEN** |
-| H6 | No sync response size limit | `network.rs:204-207` | **OPEN** |
-| H7 | request_timeout_secs never applied | `network.rs:204-207` | **OPEN** |
-| H8 | Block indexes saved separately from block data | `store.rs:155 vs 95` | **OPEN** |
-| H9 | No integrity checksums on persisted data | `store.rs` throughout | **OPEN** |
+#### H1: No hash domain separation
+**Location:** `crypto/hash.rs`, `wallet/signing.rs:145`, `node.rs:754`, multiple
+**Status:** OPEN
 
-### HIGH — P2P & Storage (included above)
+**What it is:** All Blake3-256 hashes are computed over raw domain data with no prefix tag. The same hash function is used for: transaction IDs, block hashes, ObjectIds, state roots, Merkle roots, and refiner signatures. A hash collision in one domain could be confused with a hash in another.
 
-### MEDIUM (18 — 5 already fixed)
+**Why it matters:** Without domain separation, a chosen-prefix collision attack on Blake3 (if ever found) would apply across all domains simultaneously. A hash output from one context could be misinterpreted in another.
 
-| # | Issue | Location | Status |
-|---|---|---|---|
-| M1 | Graduated slashing contradicts THE_PLAN (should be 100% burn) | `pos.rs:500-553` | **OPEN** |
-| M2 | Slash reset window 10,240 blocks undocumented | `pos.rs:518-520` | **OPEN** |
-| M3 | PoS sig verification runs on PoW blocks | `node.rs:845-871` | **OPEN** |
-| M4 | PoW/PoS mutual exclusivity not checked | `block.rs:270-308` | **OPEN** |
-| M5 | Producer not validated for PoW blocks | `node.rs:991-997` | **OPEN** |
-| M6 | Zero-miner-id phantom issuance | `node.rs:991 vs 1043` | **OPEN** |
-| M7 | API key timing attack | `rpc/server.rs:178-190` | **OPEN** |
-| M8 | CORS allows all origins | `rpc/server.rs:903-907` | **OPEN** |
-| M9 | No request body size limit | `rpc/server.rs:486-489` | **OPEN** |
-| M10 | Key file world-readable | `wallet/key.rs:192` | **OPEN** |
-| ~~M11~~ | ~~Mempool expiry not enforced~~ | `mempool.rs` | **FIXED** |
-| ~~M12~~ | ~~Mempool doesn't check minimum fee~~ | `mempool.rs` | **FIXED** |
-| M13 | Ephemeral P2P keypair | `network.rs:167` | **OPEN** |
-| M14 | TOCTOU race — height check vs apply_block | `main.rs:683 vs 738` | **OPEN** |
-| M15 | Sync start_height unvalidated | `main.rs:1009` | **OPEN** |
-| M16 | No WAL sync mode on RocksDB | `store.rs:74` | **OPEN** |
-| ~~M17~~ | difficulty_to_target(1) = 2^63-1 | `emission.rs:37-42` | **BY DESIGN** |
-| M18 | Integer division bias in retarget | `difficulty.rs:133` | **OPEN** |
-| M19 | Dead code: compute_pow_share/compute_pos_share use f64 | `emission.rs:174-193` | **OPEN** |
-| M20 | chain.base_reward always BASE_REWARD | Throughout | **BY DESIGN** |
-| M21 | Silent Borsh error handling in state root | `account.rs:219, pos.rs:635-648` | **OPEN** |
-| M22 | apply_bond refund discards errors | `dispatcher.rs:217` | **OPEN** |
-| M23 | Wallet HTTP default | `wallet/main.rs:22` | **OPEN** |
+**How to fix:** Add domain tags to every `Blake3Hasher::update()` call. Define constants: `DOMAIN_TX_ID`, `DOMAIN_BLOCK_HASH`, `DOMAIN_OBJECT_ID`, `DOMAIN_STATE_ROOT`, `DOMAIN_TX_ROOT`, `DOMAIN_REFINER_SIG`. Prepend `hasher.update(domain_tag)` before `hasher.update(data)` in every hashing call.
 
-### MEDIUM — Calculations (7)
+---
 
-| # | Issue | Location | Status |
-|---|---|---|---|
-| ~~M17~~ | ~~difficulty_to_target oddity~~ | `emission.rs:37-42` | **BY DESIGN** |
-| M18 | Integer division bias in retarget | `difficulty.rs:133` | **OPEN** |
-| ~~M19~~ | ~~Dead f64 share functions~~ | `emission.rs:174-193` | **OPEN** |
-| ~~M20~~ | ~~chain.base_reward always BASE_REWARD~~ | Throughout | **BY DESIGN** |
-| M21 | Silent Borsh error handling | `account.rs, pos.rs` | **OPEN** |
+#### H2: No signing domain separation
+**Location:** `wallet/signing.rs:46`, `node.rs:754`
+**Status:** OPEN
+
+**What it is:** The same ed25519 key signs both transactions and refiner blocks using the same serialization format. At `signing.rs:46`, the signed data is `borsh(sender, action, fee, nonce, chain_id)`. At `node.rs:754`, the refiner signature signs the raw block hash bytes. A specially crafted transaction could be a valid signature of a block hash, or vice versa.
+
+**How to fix:** Prepend a domain tag to all signed data: Transactions sign `b"OPL_TX_V1" || borsh(...)`; Refiner blocks sign `b"OPL_REF_BLOCK_V1" || block_hash_bytes`.
+
+---
+
+#### H3: Suggested fee computed from declared fees, not burned fees
+**Location:** `node.rs:1001-1002`
+**Status:** OPEN
+
+**What it is:** At line 1001, `total_fees` sums `tx.fee` from all transactions — the *declared* fee. At line 1002, `compute_suggested_fee(total_fees, ...)` uses this to compute the EMA. But failed transactions (insufficient balance, wrong nonce) are included in `total_fees` even though their fees are *not actually burned* (they get rejected at line 1025 with `fee_burned: 0`). This overstates the fee market signal.
+
+**How to fix:** Move `compute_suggested_fee()` to after the transaction execution loop, using `total_fees_burned` instead of `total_fees`.
+
+---
+
+#### H4: Unbond fee bypass — zero-balance accounts unbond for free
+**Location:** `dispatcher.rs:270-284`
+**Status:** OPEN
+
+**What it is:** When processing `RefinerUnbond`, the fee burn at lines 270-276 is conditional: `if account.balance >= fee`. If balance is insufficient, the fee is silently skipped but `ApplyResult::ok(fee)` at line 283 still reports the fee as burned. The nonce still advances (line 280). Accounts with zero balance can unbond without paying fees.
+
+**How to fix:** Replace the conditional fee burn with a requirement check: if `account.balance < fee`, return `ApplyResult::err("Insufficient balance for unbond fee")`.
+
+---
+
+#### H5: RocksDB non-atomic cross-CF writes
+**Location:** `store.rs:103,110, 280,287`
+**Status:** OPEN
+
+**What it is:** Each column family is saved independently. `save_block()` writes the block, then `save_block_indexes()` writes indexes separately. A crash between them leaves the database inconsistent.
+
+**How to fix:** Use RocksDB `WriteBatch` to batch all writes within a single atomic commit per block application.
+
+---
+
+#### H6: No size limit on sync response bodies
+**Location:** `network.rs:204-207`
+**Status:** OPEN
+
+**What it is:** `request_response::Config::default()` places no limit on response body size. A malicious peer can respond with a multi-gigabyte CBOR payload, causing OOM.
+
+**How to fix:** Set `with_max_response_size(10 * 1024 * 1024)` and `with_request_timeout(Duration::from_secs(sync_config.request_timeout_secs))`.
+
+---
+
+#### H7: request_timeout_secs defined but never applied
+**Location:** `network.rs:204-207`, `sync.rs:49`
+**Status:** OPEN
+
+**What it is:** `SyncConfig.request_timeout_secs: 30` is defined but never passed to the `request_response::Config`. The config uses `Config::default()` which ignores it.
+
+**How to fix:** Wire the timeout: `.with_request_timeout(Duration::from_secs(config.sync_config.request_timeout_secs))`.
+
+---
+
+#### H8: Block indexes saved separately from block data
+**Location:** `store.rs:155 vs 95`
+**Status:** OPEN
+
+**What it is:** `save_block()` and `save_block_indexes()` are called separately. A crash between them leaves the block unreachable by hash.
+
+**How to fix:** Merge all block-related writes into a single `WriteBatch` (also addresses H5).
+
+---
+
+#### H9: No integrity checksums on persisted data
+**Location:** `store.rs` throughout
+**Status:** OPEN
+
+**What it is:** RocksDB values are stored without integrity checks. Bit rot or disk corruption causes silent data loss.
+
+**How to fix:** Prepend a 16-byte BLAKE3 checksum to every stored value. Verify on load. Wrap all `save_*` and `load_*` methods.
+
+---
+
+### MEDIUM (23 — 2 fixed, 2 by design)
+
+#### ~~M1: Graduated slashing~~ — **FIXD** (ec0df9b)
+**Location:** ~~`pos.rs:500-553`~~ → `refiner.rs:488`
+Replaced 10%/33%/100% graduated slash with 100% burn on any double-sign. No offense counter, no reset window.
+
+#### ~~M2: Slash reset window~~ — **FIXED** (ec0df9b)
+`slash_offense_count` and `last_slash_height` fields deleted from `RefinerInfo`. The 10,240-block reset window has been removed entirely.
+
+#### M3: PoS signature verification runs on PoW blocks
+**Location:** `node.rs:825-854`
+**Status:** OPEN
+**What it is:** At line 825, `if block.header.refiner_signature.is_some()` runs the ed25519 verification path for any block that has a `refiner_signature` field, even if it also has `pow_proof`. A PoW block with a fake `refiner_signature` would enter the sig verification path and could be rejected even if the PoW proof is valid.
+**How to fix:** Check mutual exclusivity before verification. Only verify refiner signature if `pow_proof.is_none() && refiner_signature.is_some()`.
+
+#### M4: PoW/PoS mutual exclusivity not checked
+**Location:** `block.rs:270-308`
+**Status:** OPEN
+**What it is:** `validate_block()` doesn't reject blocks that have both `pow_proof` and `refiner_signature`. A block with both would be accepted.
+**How to fix:** Add explicit check: reject if both are `Some()`.
+
+#### M5: Producer field not validated for PoW blocks
+**Location:** `node.rs:971`
+**Status:** OPEN
+**What it is:** Any ObjectId can be set as producer and will receive block rewards, even without a registered account.
+**How to fix:** Require that the producer has a registered account with a public key.
+
+#### M6: Zero-miner-id phantom issuance
+**Location:** `node.rs:971` vs `node.rs:1005`
+**Status:** OPEN
+**What it is:** If `block.header.producer` is the zero ObjectId, PoW share is skipped but `total_issued` still increments. OPL is "issued" to nobody — phantom inflation.
+**How to fix:** Reject blocks with zero producer at height > 0 in `validate_block()`.
+
+#### M7: API key timing attack
+**Location:** `rpc/server.rs:178-190`
+**Status:** OPEN
+**What it is:** `check_api_key()` uses `==` on strings, which short-circuits on first mismatching byte. Enables byte-by-byte key recovery via timing.
+**How to fix:** Use `subtle::ConstantTimeEq`: `bool::from(provided.as_bytes().ct_eq(required.as_bytes()))`.
+
+#### M8: CORS allows all origins
+**Location:** `rpc/server.rs:926-927`
+**Status:** OPEN
+**What it is:** `CorsLayer::new().allow_origin(Any)` allows any website to make RPC requests.
+**How to fix:** Restrict to `["http://localhost:4171", "http://127.0.0.1:4171"]`.
+
+#### M9: No request body size limit
+**Location:** `rpc/server.rs:486-499`
+**Status:** OPEN
+**What it is:** No limit on JSON-RPC request body size. Multi-gigabyte hex strings cause OOM.
+**How to fix:** Use Axum's `DefaultBodyLimit::max(1_048_576)` (1 MiB).
+
+#### M10: Key file world-readable
+**Location:** `wallet/key.rs:190-193`
+**Status:** OPEN
+**What it is:** `fs::write(&key_path, &key_bytes)` writes the raw 32-byte ed25519 seed with default permissions (often 644).
+**How to fix:** Set permissions to 0600 after writing. (Pass 2: encrypt with passphrase.)
+
+#### ~~M11: Mempool expiry not enforced~~ — **FIXED**
+#### ~~M12: Mempool doesn't check minimum fee~~ — **FIXED**
+
+#### M13: Ephemeral P2P keypair
+**Location:** `network.rs:167`
+**Status:** OPEN
+**What it is:** `libp2p::identity::Keypair::generate_ed25519()` creates a new keypair on every restart, giving a new PeerId. Breaks DHT routing, bypasses bans, wastes bandwidth.
+**How to fix:** Persist keypair to `$DATA_DIR/network_keypair.ed25519`. Load on restart.
+
+#### M14: TOCTOU race — height check vs apply_block
+**Location:** `main.rs:760` (gossip), `main.rs:395` (mining)
+**Status:** OPEN
+**What it is:** Height is read under a read lock, then `apply_block()` acquires a write lock later. Between the two, another thread could apply a block at the same height.
+**How to fix:** Acquire write lock first, do height check inside the write lock.
+
+#### M15: Sync start_height unvalidated
+**Location:** `main.rs:963-993`
+**Status:** OPEN
+**What it is:** Sync handler doesn't validate `start_height` is within `[0, current_height]`. Malicious peers can request the entire chain repeatedly.
+**How to fix:** Clamp `start_height` to `[0, current_height]` and limit to `max_blocks_per_request` blocks.
+
+#### M16: No WAL sync mode on RocksDB
+**Location:** `store.rs:74`
+**Status:** OPEN
+**What it is:** Default RocksDB options don't fsync the WAL after writes. Data may be lost on power failure.
+**How to fix:** Use `WriteOptions::set_sync(true)` on critical writes (block saves, state saves).
+
+#### ~~M17: difficulty_to_target(1) = 2^63-1~~ — **BY DESIGN**
+Difficulty 1 means "1 leading zero bit", so ~50% of random hashes pass. Correct for the leading-zero-bits interpretation.
+
+#### M18: Integer division bias in retarget
+**Location:** `difficulty.rs:133`
+**Status:** OPEN
+**What it is:** `old_difficulty * expected_time / actual_time` truncates toward zero, creating systematic downward bias over many epochs.
+**How to fix:** Use rounding division: `((numerator + actual/2) / actual)`.
+
+#### M19: Dead code: compute_pow_share/compute_pos_share use f64
+**Location:** `emission.rs:174-193`
+**Status:** OPEN
+**What it is:** These f64 functions are never called from production code. The actual reward split uses integer `coverage_milli` in `node.rs:958-966`.
+**How to fix:** Delete both functions and their tests.
+
+#### ~~M20: chain.base_reward always BASE_REWARD~~ — **BY DESIGN**
+
+#### M21: Silent Borsh error handling in state root
+**Location:** `account.rs:219`, `refiner.rs`
+**Status:** OPEN
+**What it is:** `if let Ok(bytes) = borsh::to_vec(account)` silently excludes failed serializations from the state root, causing chain divergence.
+**How to fix:** Replace with `expect("Account serialization must not fail — this is a consensus bug")`.
+
+#### M22: apply_bond refund discards errors
+**Location:** `dispatcher.rs:218`
+**Status:** OPEN
+**What it is:** `if let Ok(()) = accounts.credit(sender, refund)` silently discards credit errors.
+**How to fix:** Propagate: `accounts.credit(sender, refund).map_err(|e| format!("Bond refund failed: {}", e))?;`
+
+#### M23: Wallet HTTP default
+**Location:** `wallet/main.rs:22`
+**Status:** OPEN
+**What it is:** Default RPC URL is `http://localhost:4171` — signed transactions traverse network in plaintext.
+**How to fix:** Change default to `https://localhost:4171` and warn on `http://` URLs.
+
+---
 
 ### LOW (9)
 
-| # | Issue | Location | Status |
-|---|---|---|---|
-| L1 | Debug derives on Bip39Mnemonic and KeyPair | `bip39.rs:39, key.rs:60` | **OPEN** |
-| L2 | Mnemonic printed to stdout on opl new | `wallet/main.rs:168-169` | **OPEN** |
-| L3 | Early-return timing in verify_ed25519 | `crypto/signing.rs:57-74` | **OPEN** |
-| L4 | Dual serialization for tx_id vs signed data | `wallet/signing.rs:46,138-151` | **OPEN** |
-| L5 | Hex-encoded sender in tx_id | `wallet/signing.rs:145` | **OPEN** |
-| L6 | No SLIP-0010 reference test vectors | `wallet/bip39.rs:199-277` | **OPEN** |
-| L7 | Gossip max message (5 MiB) vs block max (10 MiB) | `gossip.rs:27 vs constants.rs:207` | **OPEN** |
-| L8 | Challenge protocol doesn't bind to PeerId | `challenge.rs` | **OPEN** |
-| L9 | Bip39Mnemonic::generate() panics on entropy failure | `wallet/bip39.rs:47-48` | **OPEN** |
+#### L1: Debug derives on Bip39Mnemonic and KeyPair
+**Location:** `bip39.rs:39`, `key.rs:60`
+**Status:** OPEN
+`#[derive(Debug)]` on both types leaks secrets to any `{:?}` formatting. Replace with manual `Debug` impls that redact secrets.
+
+#### L2: Mnemonic printed to stdout on opl new
+**Location:** `wallet/main.rs:168-169`
+**Status:** OPEN
+Print to stderr instead of stdout: `eprintln!("{}", mnemonic.phrase())`.
+
+#### L3: Early-return timing in verify_ed25519
+**Location:** `crypto/signing.rs:57-74`
+**Status:** OPEN
+Different latencies for wrong key length, invalid curve point, and bad signature. Use `subtle::ConstantTimeEq` for all comparison checks. Low priority since ed25519 verification is the dominant cost.
+
+#### L4: Dual serialization for tx_id vs signed data
+**Location:** `wallet/signing.rs:46,138-151`
+**Status:** OPEN (deferred — breaking change)
+tx_id uses hex-encoded sender; signature uses raw-byte sender. Two different serialization formats increase attack surface. Unify to use Borsh for both. Schedule for mainnet launch.
+
+#### L5: Hex-encoded sender in tx_id
+**Location:** `wallet/signing.rs:145`
+**Status:** OPEN (deferred — breaking change)
+`sender.0.to_hex().as_bytes()` converts 32 bytes to 64 bytes before hashing. Inconsistent with raw-byte hashing elsewhere. Replace with `sender.0.as_bytes()`. Breaking change — schedule for mainnet.
+
+#### L6: No SLIP-0010 reference test vectors
+**Location:** `wallet/bip39.rs:199-277`
+**Status:** OPEN
+Add official SLIP-0010 ed25519 test vectors as test cases. Verify derived keys match expected public keys.
+
+#### L7: Gossip max message (5 MiB) vs block max (10 MiB)
+**Location:** `gossip.rs:27` vs `constants.rs:207`
+**Status:** OPEN
+A valid block >5 MiB cannot be gossiped. Set `gossip_max_message_size` to match `MAX_BLOCK_SIZE_BYTES` (10 MiB).
+
+#### L8: Challenge protocol doesn't bind to PeerId
+**Location:** `challenge.rs`, `main.rs:996-1022`
+**Status:** OPEN
+Challenge hash doesn't include PeerId, allowing precomputed answers. Fix: `blake3(format!("{}:{}", peer_id, nonce))`.
+
+#### L9: Bip39Mnemonic::generate() panics on entropy failure
+**Location:** `wallet/bip39.rs:47-48`
+**Status:** OPEN
+`.expect()` on OsRng can panic. Change return type to `Result<Self, WalletError>`.
 
 ---
 
 ## 26. Implementation Plan — Pass 1
 
-### Phase A: Rename (touches everything, do first)
+### Phase A: Rename — ✓ DONE (commit ec0df9b)
 
-1. Full validator → refiner rename across all crates, RPC, CLI, docs
-2. `ConsensusPhase` enum → **delete entirely** (implicit phase)
-3. `--validate` → `--refine` CLI flag
-4. `validator_signature` → `refiner_signature`
-5. `ValidatorBond/Unbond` → `RefinerBond/Unbond`
-6. `ValidatorInfo/Set/Status` → `RefinerInfo/Set/Status`
-7. `graduated_slash()` → `slash_refiner()` (100% burn)
-8. Delete `slash_offense_count` and `last_slash_height` from `RefinerInfo`
-9. `pos.rs` → `refiner.rs`
-10. All variable names: `validators` → `refiners`, `validator_id` → `refiner_id`, etc.
-11. Update all tests with refiner terminology
-12. Verify all tests pass after rename
+1. ✓ Full validator → refiner rename across all crates, RPC, CLI, docs
+2. ✓ `ConsensusPhase` enum deleted entirely (implicit phase)
+3. ✓ `--validate` → `--refine` CLI flag
+4. ✓ `validator_signature` → `refiner_signature`
+5. ✓ `ValidatorBond/Unbond` → `RefinerBond/Unbond`
+6. ✓ `ValidatorInfo/Set/Status` → `RefinerInfo/Set/Status`
+7. ✓ `graduated_slash()` → `slash_refiner()` (100% burn on any double-sign)
+8. ✓ `slash_offense_count` and `last_slash_height` deleted from `RefinerInfo`
+9. ✓ `pos.rs` → `refiner.rs`, all module references updated
+10. ✓ All variable names: `validators` → `refiners`, `validator_id` → `refiner_id`, etc.
+11. ✓ All tests updated with refiner terminology (97 consensus tests passing)
+12. ✓ Clean build, no stale references. All workspace tests passing.
 
 ### Phase B: Security Fixes (CRITICAL)
 
@@ -806,11 +1043,11 @@ EVO-OMAP difficulty means **leading zero bits** in the SHA3-256 output, NOT a u6
 
 ### Phase C: Protocol Fixes (consensus behavior changes)
 
-17. Delete `ConsensusPhase` from `ChainState` and `PersistedChainState`
-18. Refiner loop: produce after `BLOCK_TARGET_TIME_MS` (90,000ms) with no miner block
+17. ✓ Delete `ConsensusPhase` from `ChainState` and `PersistedChainState` (done in ec0df9b)
+18. ✓ Refiner loop: produce after `BLOCK_TARGET_TIME_MS` (90,000ms) with no miner block (done in ec0df9b)
 19. M3/M4: Mutual exclusivity check in `validate_block()`
-20. M1/M2: Replace `graduated_slash` with 100% burn on any double-sign
-21. M6: Zero-miner-id — skip PoW share crediting when `miner_id` is zero
+20. ✓ M1/M2: Replace `graduated_slash` with 100% burn on any double-sign (done in ec0df9b, merged with Phase A)
+21. M6: Zero-miner-id — reject blocks with zero producer at height > 0
 22. H4: Unbond fee — reject if `balance < fee`, don't skip burn
 23. H3: Suggested fee — compute from `total_fees_burned`, not `total_fees`
 24. M5: Validate producer field on PoW blocks (reject zero-id producer)
@@ -838,22 +1075,45 @@ EVO-OMAP difficulty means **leading zero bits** in the SHA3-256 output, NOT a u6
 
 ### Phase F: Low / Cleanup
 
-40. L3: Constant-time `verify_ed25519` via `subtle`
-41. L4/L5: Unify tx_id serialization (deferred — breaking change)
-42. L6: Add SLIP-0010 reference test vectors
-43. L7: Raise gossip max message to match `MAX_BLOCK_SIZE_BYTES`
-44. L8: Challenge protocol bind to PeerId
-45. L9: `Bip39Mnemonic::generate()` → return `Result`
+40. L1: Remove `#[derive(Debug)]` from `Bip39Mnemonic` and `KeyPair`; manual `Debug` impls that redact
+41. L3: Constant-time `verify_ed25519` via `subtle`
+42. L4/L5: Unify tx_id serialization (deferred — breaking change, schedule for mainnet)
+43. L6: Add SLIP-0010 reference test vectors
+44. L7: Raise gossip max message to match `MAX_BLOCK_SIZE_BYTES`
+45. L8: Challenge protocol bind to PeerId
+46. L9: `Bip39Mnemonic::generate()` → return `Result`
 
 ### Phase G: Pass 2 (After Pass 1 is tested and working)
 
-46. Attestation struct and `opolys/attestation/v1` P2P topic
-47. Attestation collection in block builder
-48. Attestation verification in `apply_block`
-49. Reliability score: `consecutive_correct_attestations` in `RefinerInfo`
-50. Attestation weight in reward distribution
-51. Block confidence score derived on-chain
-52. `opl_getBlockConfidence` RPC endpoint
+47. Attestation struct and `opolys/attestation/v1` P2P topic
+48. Attestation collection in block builder
+49. Attestation verification in `apply_block`
+50. Reliability score: `consecutive_correct_attestations` in `RefinerInfo`
+51. Attestation weight in reward distribution
+52. Block confidence score derived on-chain
+53. `opl_getBlockConfidence` RPC endpoint
+
+---
+
+## 27. Recent Changes
+
+### ec0df9b — Refiner Rename & Protocol Simplification (Phase A)
+
+**Completed Phase A of Pass 1.** All 12 items done, all 97 consensus tests passing, all workspace tests passing.
+
+**What changed:**
+
+1. **ConsensusPhase deleted** — There is no explicit PoW/PoS phase switch. Refiners produce blocks only after `BLOCK_TARGET_TIME_MS` (90 seconds) passes with no miner block. The reward split is continuous via `coverage_milli`; no threshold, no governance. Removed from: `types.rs`, `ChainState`, `PersistedChainState`, `ChainInfo` (RPC), `ChainInfoResponse` (RPC), genesis state hash, and all references.
+
+2. **100% slashing** — Any double-sign burns 100% of stake immediately. No graduated penalties (10%/33%/100%), no offense counter (`slash_offense_count`), no reset window (`last_slash_height`). The old `graduated_slash()` function replaced by `slash_refiner()`. Deleted `scale_entries()` dead code.
+
+3. **Timeout-based refiner block production** — The refiner loop in `main.rs` now checks whether chain height advanced during the sleep window. If a miner (or peer) produced a block, the refiner skips. This replaces the old phase-check logic that required `ConsensusPhase::ProofOfStake`.
+
+4. **Refiner rename complete** — All validator references renamed throughout: types, variables, CLI flags (`--refine`), RPC endpoints (`opl_getRefiners`), module file (`pos.rs` → `refiner.rs`), comments, and tests.
+
+5. **POS_FINALITY_BLOCKS and consecutive_pos_blocks deleted** — No finality tracking until attestations are implemented in Pass 2.
+
+6. **Remaining cleanup** — `produce_pos_block()` in `node.rs:643` and `main.rs:465` should be renamed to `produce_refiner_block()` as a naming artifact from the incomplete sed pass. Not a protocol change.
 
 ---
 
