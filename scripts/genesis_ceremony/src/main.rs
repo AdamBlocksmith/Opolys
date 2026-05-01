@@ -221,7 +221,7 @@ struct SourceResult {
     status: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct GenesisAttestation {
     /// Unix milliseconds when the ceremony started (first fetch dispatched).
     ceremony_start_ms: u64,
@@ -1094,5 +1094,275 @@ async fn main() {
         eprintln!("║  Abort and restart the ceremony from the top.    ║");
         eprintln!("╚══════════════════════════════════════════════════╝");
         std::process::exit(2);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trimmed_median_odd_count() {
+        assert_eq!(trimmed_median(vec![3700.0, 3630.0, 3620.0, 3635.0, 3640.0, 3600.0, 3650.0]), 3635.0);
+    }
+
+    #[test]
+    fn trimmed_median_even_count() {
+        assert_eq!(trimmed_median(vec![3700.0, 3630.0, 3620.0, 3635.0, 3640.0, 3600.0]), 3632.5);
+    }
+
+    #[test]
+    fn trimmed_median_three_values() {
+        assert_eq!(trimmed_median(vec![3600.0, 3630.0, 3700.0]), 3630.0);
+    }
+
+    #[test]
+    fn trimmed_median_two_values() {
+        assert_eq!(trimmed_median(vec![3630.0, 3640.0]), 3635.0);
+    }
+
+    #[test]
+    fn trimmed_median_single_value() {
+        assert_eq!(trimmed_median(vec![3630.0]), 3630.0);
+    }
+
+    #[test]
+    fn trimmed_median_identical_values() {
+        assert_eq!(trimmed_median(vec![3630.0, 3630.0, 3630.0, 3630.0, 3630.0]), 3630.0);
+    }
+
+    #[test]
+    fn outlier_flags_extreme_values() {
+        let median = 3630.0;
+        let mut results = vec![
+            SourceResult { name: "A".into(), url: "".into(), fetched_at_ms: 0, raw_response_hash: "".into(), extracted_value: Some(3630.0), status: "ok".into() },
+            SourceResult { name: "B".into(), url: "".into(), fetched_at_ms: 0, raw_response_hash: "".into(), extracted_value: Some(4500.0), status: "ok".into() },
+            SourceResult { name: "C".into(), url: "".into(), fetched_at_ms: 0, raw_response_hash: "".into(), extracted_value: Some(3000.0), status: "ok".into() },
+            SourceResult { name: "D".into(), url: "".into(), fetched_at_ms: 0, raw_response_hash: "".into(), extracted_value: Some(3640.0), status: "ok".into() },
+        ];
+        apply_outlier_flags(&mut results, median);
+        assert_eq!(results[0].status, "ok");
+        assert_eq!(results[1].status, "outlier");
+        assert_eq!(results[2].status, "outlier");
+        assert_eq!(results[3].status, "ok");
+    }
+
+    #[test]
+    fn outlier_preserves_manual_status() {
+        let median = 3630.0;
+        let mut results = vec![
+            SourceResult { name: "A".into(), url: "".into(), fetched_at_ms: 0, raw_response_hash: "".into(), extracted_value: Some(4500.0), status: "manual".into() },
+        ];
+        apply_outlier_flags(&mut results, median);
+        assert_eq!(results[0].status, "manual-outlier");
+    }
+
+    #[test]
+    fn no_outlier_within_threshold() {
+        let median = 3630.0;
+        let mut results = vec![
+            SourceResult { name: "A".into(), url: "".into(), fetched_at_ms: 0, raw_response_hash: "".into(), extracted_value: Some(3635.0), status: "ok".into() },
+            SourceResult { name: "B".into(), url: "".into(), fetched_at_ms: 0, raw_response_hash: "".into(), extracted_value: Some(3760.0), status: "ok".into() },
+        ];
+        apply_outlier_flags(&mut results, median);
+        assert_eq!(results[0].status, "ok");
+        assert_eq!(results[1].status, "ok");
+    }
+
+    #[test]
+    fn blocks_per_year_is_350640() {
+        assert_eq!(compute_blocks_per_year(), 350_640);
+    }
+
+    #[test]
+    fn dry_run_base_reward_is_332_opl() {
+        let blocks_per_year = compute_blocks_per_year();
+        let annual_oz = DRY_RUN_PROD_TONNES * TROY_OZ_PER_TONNE;
+        let base_reward_opl = (annual_oz / blocks_per_year as f64).floor() as u64;
+        let base_reward_flakes = base_reward_opl * FLAKES_PER_OPL;
+        assert_eq!(base_reward_opl, 332);
+        assert_eq!(base_reward_flakes, 332_000_000);
+    }
+
+    #[test]
+    fn base_reward_with_different_production() {
+        let blocks_per_year = compute_blocks_per_year();
+        let annual_oz = 4000.0 * TROY_OZ_PER_TONNE;
+        let base_reward_opl = (annual_oz / blocks_per_year as f64).floor() as u64;
+        assert!(base_reward_opl > 332);
+        assert_eq!(base_reward_opl, 366); // floor(4000 * 32150.7 / 350640)
+    }
+
+    #[test]
+    fn base_reward_with_lower_production() {
+        let blocks_per_year = compute_blocks_per_year();
+        let annual_oz = 2000.0 * TROY_OZ_PER_TONNE;
+        let base_reward_opl = (annual_oz / blocks_per_year as f64).floor() as u64;
+        assert!(base_reward_opl < 332);
+        assert_eq!(base_reward_opl, 183);
+    }
+
+    #[test]
+    fn troy_oz_per_tonne_constant() {
+        assert_eq!(TROY_OZ_PER_TONNE, 32150.7);
+    }
+
+    #[test]
+    fn sanity_bounds() {
+        assert!(DRY_RUN_PROD_TONNES >= PROD_MIN_TONNES);
+        assert!(DRY_RUN_PROD_TONNES <= PROD_MAX_TONNES);
+        assert!(DRY_RUN_PRICE_USD_OZ >= PRICE_MIN_USD_OZ);
+        assert!(DRY_RUN_PRICE_USD_OZ <= PRICE_MAX_USD_OZ);
+    }
+
+    #[test]
+    fn ceremony_constants() {
+        assert_eq!(CEREMONY_WINDOW_SECS, 300);
+        assert_eq!(FETCH_TIMEOUT_SECS, 30);
+        assert_eq!(MIN_PROD_SOURCES, 5);
+        assert!((OUTLIER_PCT - 0.15).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn price_fetch_spread() {
+        let results = vec![
+            SourceResult { name: "A".into(), url: "".into(), fetched_at_ms: 0, raw_response_hash: "".into(), extracted_value: Some(2386.0), status: "ok".into() },
+        ];
+        assert_eq!(price_fetch_spread_ms(&results), 0);
+        let results = vec![
+            SourceResult { name: "A".into(), url: "".into(), fetched_at_ms: 1000, raw_response_hash: "".into(), extracted_value: Some(2386.0), status: "ok".into() },
+            SourceResult { name: "B".into(), url: "".into(), fetched_at_ms: 5000, raw_response_hash: "".into(), extracted_value: Some(2390.0), status: "ok".into() },
+        ];
+        assert_eq!(price_fetch_spread_ms(&results), 4000);
+    }
+
+    #[test]
+    fn master_hash_deterministic() {
+        let a = GenesisAttestation {
+            ceremony_start_ms: 1000, ceremony_end_ms: 2000, ceremony_timestamp: 1,
+            operator_name: "Test".into(), operator_public_key: "abcd".into(), operator_signature: "".into(),
+            production_data_year: 2024, production_sources: vec![], price_sources: vec![],
+            price_fetch_spread_ms: 0, median_production_tonnes: 3630.0, median_price_usd_cents: 238600,
+            blocks_per_year: 350640, base_reward_opl: 332, base_reward_flakes: 332000000,
+            derivation_steps: vec![], master_hash: "".into(),
+        };
+        assert_eq!(compute_master_hash(&a), compute_master_hash(&a));
+        assert_eq!(compute_master_hash(&a).len(), 64);
+    }
+
+    #[test]
+    fn master_hash_excludes_own_fields() {
+        let base = GenesisAttestation {
+            ceremony_start_ms: 1000, ceremony_end_ms: 2000, ceremony_timestamp: 1,
+            operator_name: "Test".into(), operator_public_key: "abcd".into(), operator_signature: "".into(),
+            production_data_year: 2024, production_sources: vec![], price_sources: vec![],
+            price_fetch_spread_ms: 0, median_production_tonnes: 3630.0, median_price_usd_cents: 238600,
+            blocks_per_year: 350640, base_reward_opl: 332, base_reward_flakes: 332000000,
+            derivation_steps: vec![], master_hash: "".into(),
+        };
+        let mut different_hash = base.clone();
+        different_hash.master_hash = "different".into();
+        assert_eq!(compute_master_hash(&base), compute_master_hash(&different_hash));
+        let mut different_sig = base.clone();
+        different_sig.operator_signature = "sig123".into();
+        assert_eq!(compute_master_hash(&base), compute_master_hash(&different_sig));
+    }
+
+    #[test]
+    fn master_hash_changes_with_data() {
+        let base = GenesisAttestation {
+            ceremony_start_ms: 1000, ceremony_end_ms: 2000, ceremony_timestamp: 1,
+            operator_name: "Test".into(), operator_public_key: "abcd".into(), operator_signature: "".into(),
+            production_data_year: 2024, production_sources: vec![], price_sources: vec![],
+            price_fetch_spread_ms: 0, median_production_tonnes: 3630.0, median_price_usd_cents: 238600,
+            blocks_per_year: 350640, base_reward_opl: 332, base_reward_flakes: 332000000,
+            derivation_steps: vec![], master_hash: "".into(),
+        };
+        let mut different_data = base.clone();
+        different_data.median_production_tonnes = 4000.0;
+        assert_ne!(compute_master_hash(&base), compute_master_hash(&different_data));
+    }
+
+    #[test]
+    fn last_number_in_range_parses() {
+        assert_eq!(last_number_in_range("Gold production: 3630 tonnes", 1000.0, 10000.0), Some(3630.0));
+        assert_eq!(last_number_in_range("No numbers here", 1000.0, 10000.0), None);
+        assert_eq!(last_number_in_range("Production: 50 tonnes", 1000.0, 10000.0), None);
+        assert_eq!(last_number_in_range("Value: 3,630.5 tonnes", 1000.0, 10000.0), Some(3630.5));
+    }
+
+    #[test]
+    fn format_flakes_constant_works() {
+        assert_eq!(format_flakes_constant(332000000), "332_000_000");
+        assert_eq!(format_flakes_constant(1), "1");
+        assert_eq!(format_flakes_constant(1000), "1_000");
+    }
+
+    #[test]
+    fn format_timestamp_epoch() {
+        assert_eq!(format_timestamp(0), "1970-01-01 00:00:00 UTC");
+    }
+
+    #[test]
+    fn is_leap_years() {
+        assert!(is_leap(2024));
+        assert!(!is_leap(2023));
+        assert!(!is_leap(1900));
+        assert!(is_leap(2000));
+    }
+
+    #[test]
+    fn dry_run_key_signs_and_verifies() {
+        let sk = SigningKey::from_bytes(&DRY_RUN_KEY_SEED);
+        let msg = b"test message";
+        let sig = sk.sign(msg);
+        sk.verifying_key().verify_strict(msg, &sig).unwrap();
+        assert!(sk.verifying_key().verify_strict(b"wrong message", &sig).is_err());
+    }
+
+    #[test]
+    fn full_dry_run_produces_valid_attestation() {
+        let blocks_per_year = compute_blocks_per_year();
+        let annual_oz = DRY_RUN_PROD_TONNES * TROY_OZ_PER_TONNE;
+        let base_reward_opl = (annual_oz / blocks_per_year as f64).floor() as u64;
+        let base_reward_flakes = base_reward_opl * FLAKES_PER_OPL;
+        let price_cents = (DRY_RUN_PRICE_USD_OZ * 100.0).round() as u64;
+        let signing_key = SigningKey::from_bytes(&DRY_RUN_KEY_SEED);
+        let pk_hex = hex::encode(signing_key.verifying_key().as_bytes());
+        let make = |_: &SourceDef, val: f64| SourceResult {
+            name: "dry-run".into(), url: "".into(), fetched_at_ms: 0,
+            raw_response_hash: hex::encode(blake3::hash(b"dry-run").as_bytes()),
+            extracted_value: Some(val), status: "dry-run".into(),
+        };
+        let mut attestation = GenesisAttestation {
+            ceremony_start_ms: 1000000, ceremony_end_ms: 1000300, ceremony_timestamp: 1000,
+            operator_name: "Test Operator".into(), operator_public_key: pk_hex.clone(), operator_signature: String::new(),
+            production_data_year: 2024,
+            production_sources: PROD_SOURCES.iter().map(|s| make(s, DRY_RUN_PROD_TONNES)).collect(),
+            price_sources: PRICE_SOURCES.iter().map(|s| make(s, DRY_RUN_PRICE_USD_OZ)).collect(),
+            price_fetch_spread_ms: 0, median_production_tonnes: DRY_RUN_PROD_TONNES,
+            median_price_usd_cents: price_cents, blocks_per_year,
+            base_reward_opl, base_reward_flakes,
+            derivation_steps: build_derivation_steps(DRY_RUN_PROD_TONNES, blocks_per_year, annual_oz, base_reward_opl, base_reward_flakes),
+            master_hash: String::new(),
+        };
+        attestation.master_hash = compute_master_hash(&attestation);
+        attestation.operator_signature = sign_master_hash(&signing_key, &attestation.master_hash);
+
+        assert_eq!(attestation.base_reward_opl, 332);
+        assert_eq!(attestation.base_reward_flakes, 332_000_000);
+        assert_eq!(attestation.blocks_per_year, 350_640);
+        assert_eq!(attestation.master_hash.len(), 64);
+        assert_eq!(attestation.production_sources.len(), PROD_SOURCES.len());
+        assert_eq!(attestation.price_sources.len(), PRICE_SOURCES.len());
+
+        let hash_bytes = hex::decode(&attestation.master_hash).unwrap();
+        let sig_bytes: [u8; 64] = hex::decode(&attestation.operator_signature).unwrap().try_into().unwrap();
+        let signature = ed25519_dalek::Signature::from_bytes(&sig_bytes);
+        assert!(signing_key.verifying_key().verify_strict(&hash_bytes, &signature).is_ok());
+
+        assert!(attestation.derivation_steps.iter().any(|s| s.contains("base_reward_opl")));
+        assert!(attestation.derivation_steps.iter().any(|s| s.contains("blocks_per_year")));
+        assert!(attestation.derivation_steps.iter().any(|s| s.contains("median_production")));
     }
 }
