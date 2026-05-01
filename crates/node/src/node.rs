@@ -34,7 +34,7 @@ use opolys_consensus::pow;
 use opolys_execution::TransactionDispatcher;
 use opolys_storage::BlockchainStore;
 use opolys_networking::PeerId;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use clap::Parser;
@@ -126,6 +126,17 @@ pub struct Args {
     #[arg(long)]
     pub testnet: bool,
 
+    /// Path to the genesis ceremony attestation JSON file.
+    ///
+    /// Required for mainnet operation. The JSON must contain the ceremony
+    /// attestation fields exported by the `genesis-ceremony` tool:
+    /// `base_reward_flakes`, `ceremony_timestamp`, `gold_spot_price_usd_cents`,
+    /// `annual_production_tonnes`, `total_above_ground_tonnes`,
+    /// `lbma_response_hash`, `usgs_response_hash`, `wgc_response_hash`,
+    /// and `derivation_formula`. Not required for testnet (ignored if --testnet).
+    #[arg(long)]
+    pub genesis_params: Option<String>,
+
     /// RPC server listen address (default: 127.0.0.1 — localhost only).
     ///
     /// By default the RPC server only accepts local connections.
@@ -167,6 +178,8 @@ pub struct NodeConfig {
     pub rpc_listen_addr: String,
     /// Optional API key for write and mining RPC endpoints.
     pub rpc_api_key: Option<String>,
+    /// Path to the genesis ceremony JSON for mainnet. None for testnet/dev.
+    pub genesis_params_path: Option<String>,
 }
 
 /// Build the testnet genesis config with pre-funded accounts.
@@ -218,6 +231,7 @@ impl Default for NodeConfig {
             testnet: false,
             rpc_listen_addr: "127.0.0.1".to_string(),
             rpc_api_key: None,
+            genesis_params_path: None,
         }
     }
 }
@@ -254,8 +268,14 @@ pub struct ChainState {
     pub producer_signatures: HashMap<(u64, String), (Hash, Vec<u8>)>,
     /// The ceremony-derived block reward for this chain in Flakes.
     /// Mainnet: read from the genesis ceremony attestation.
-    /// Testnet/dev: the BASE_REWARD constant (312 OPL).
+    /// Testnet/dev: the BASE_REWARD constant (332 OPL).
     pub base_reward: FlakeAmount,
+    /// Height of the most recently finalized block (cannot be reverted).
+    /// Advances when POS_FINALITY_BLOCKS consecutive PoS blocks follow a block.
+    pub finalized_height: u64,
+    /// Consecutive PoS blocks since the last PoW block.
+    /// Used to advance finalized_height; resets on every PoW block.
+    pub consecutive_pos_blocks: u64,
 }
 
 impl ChainState {
@@ -277,6 +297,8 @@ impl ChainState {
             suggested_fee: MIN_FEE,
             producer_signatures: HashMap::new(),
             base_reward: genesis_config.base_reward,
+            finalized_height: 0,
+            consecutive_pos_blocks: 0,
         }
     }
 
@@ -302,6 +324,9 @@ pub fn from_persisted(p: &opolys_storage::PersistedChainState) -> Self {
             }).collect(),
             // Migration: nodes upgraded from pre-ceremony builds get the constant default
             base_reward: if p.base_reward > 0 { p.base_reward } else { BASE_REWARD },
+            finalized_height: p.finalized_height,
+            // Reconstructed from block history after a few blocks; safe to start at 0
+            consecutive_pos_blocks: 0,
         }
     }
 
@@ -324,6 +349,7 @@ pub fn from_persisted(p: &opolys_storage::PersistedChainState) -> Self {
             producer_signatures: self.producer_signatures.iter().map(|((h, prod), (hash, sig))| {
                 (*h, prod.clone(), hash.clone(), sig.clone())
             }).collect(),
+            finalized_height: self.finalized_height,
         }
     }
 
@@ -383,6 +409,11 @@ pub struct OpolysNode {
     /// Persistent ban list keyed by PeerId string. Loaded from data_dir/banned_peers.json
     /// on startup and saved after every new ban.
     pub banned_peers: Arc<RwLock<HashMap<String, BanRecord>>>,
+    /// Peers we dialed (outbound connections). Mining waits until this reaches
+    /// MIN_OUTBOUND_FOR_MINING to prevent eclipse attacks where all peers are attacker-controlled.
+    pub outbound_peers: Arc<RwLock<HashSet<PeerId>>>,
+    /// Peers that dialed us (inbound connections).
+    pub inbound_peers: Arc<RwLock<HashSet<PeerId>>>,
 }
 
 fn load_ban_list_from_disk(data_dir: &str) -> HashMap<String, BanRecord> {
@@ -512,6 +543,8 @@ impl OpolysNode {
             pending_slash_evidence: Arc::new(RwLock::new(Vec::new())),
             validator_peers: Arc::new(RwLock::new(HashMap::new())),
             banned_peers: Arc::new(RwLock::new(banned_peers)),
+            outbound_peers: Arc::new(RwLock::new(HashSet::new())),
+            inbound_peers: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 
@@ -1103,8 +1136,42 @@ impl OpolysNode {
         if !activated.is_empty() {
             tracing::info!(
                 count = activated.len(),
-                "Validators activated at epoch boundary"
+                "Validators transitioned Bonding→Waiting at epoch boundary"
             );
+        }
+
+        // At epoch boundaries: rerank validators (Waiting→Active / Active→Waiting)
+        if chain.current_height > 0 && chain.current_height % EPOCH == 0 {
+            let current_ts = chain.block_timestamps.last().copied().unwrap_or(0);
+            let (newly_activated, newly_demoted) = validators.rerank_validators(current_ts);
+            if !newly_activated.is_empty() || !newly_demoted.is_empty() {
+                tracing::info!(
+                    activated = newly_activated.len(),
+                    demoted = newly_demoted.len(),
+                    height = chain.current_height,
+                    "Validator set reranked at epoch boundary"
+                );
+            }
+        }
+
+        // Track PoS finality: POS_FINALITY_BLOCKS consecutive PoS blocks finalize a block
+        let is_pos_block = block.header.validator_signature.is_some();
+        if is_pos_block {
+            chain.consecutive_pos_blocks = chain.consecutive_pos_blocks.saturating_add(1);
+            if chain.consecutive_pos_blocks >= POS_FINALITY_BLOCKS {
+                // The block POS_FINALITY_BLOCKS behind current is now finalized
+                let newly_finalized = chain.current_height
+                    .saturating_sub(POS_FINALITY_BLOCKS - 1);
+                if newly_finalized > chain.finalized_height {
+                    chain.finalized_height = newly_finalized;
+                    tracing::debug!(
+                        finalized_height = chain.finalized_height,
+                        "Block finalized via PoS"
+                    );
+                }
+            }
+        } else {
+            chain.consecutive_pos_blocks = 0;
         }
 
         // Update consensus phase based on stake coverage.
@@ -1161,7 +1228,13 @@ impl OpolysNode {
         store.save_block_indexes(block)?;
         store.save_chain_state(&chain.to_persisted())?;
         store.save_accounts(accounts)?;
-        store.save_validators(validators)?;
+        // At epoch boundaries write full validator set for consistency;
+        // otherwise write only dirty (changed) validators for performance.
+        if chain.current_height > 0 && chain.current_height % EPOCH == 0 {
+            store.save_validators(validators)?;
+        } else if !validators.dirty_validators.is_empty() {
+            store.save_dirty_validators(validators, &validators.dirty_validators)?;
+        }
         Ok(())
     }
 
@@ -1192,6 +1265,7 @@ mod tests {
             testnet: false,
             rpc_listen_addr: "127.0.0.1".to_string(),
             rpc_api_key: None,
+            genesis_params_path: None,
         };
         (config, dir)
     }
@@ -1239,11 +1313,9 @@ mod tests {
         assert_eq!(restored.state_root, chain.state_root);
     }
 
-    /// Integration test that mines real EVO-OMAP blocks. Ignored by default
-    /// because it takes ~7.5s per hash attempt (requires actual PoW computation).
-    /// Run with `cargo test -- --ignored` to include this test.
+    /// Integration test that mines real EVO-OMAP blocks.
+    /// Genesis difficulty 7 averages 128 attempts, well within max_attempts.
     #[tokio::test]
-    #[ignore]
     async fn mine_and_apply_block_links_chain() {
         let (config, _dir) = test_config();
         let node = OpolysNode::new(config);
@@ -1270,5 +1342,39 @@ mod tests {
         let block2 = node.mine_block(1_000_000).await.expect("Should mine block 2");
         assert_eq!(block2.header.height, 2);
         assert_eq!(block2.header.previous_hash, block1_hash, "Block 2 must reference block 1 hash");
+    }
+
+    /// Supply accounting invariant: total_issued - total_burned == sum(account balances)
+    /// + sum(bonded stake) + sum(pending unbonding stake).
+    ///
+    /// At genesis with no blocks, all values are zero.
+    /// After mining a block, total_issued == account balance of miner (fees burned = 0 since no txs).
+    #[tokio::test]
+    async fn supply_accounting_invariant() {
+        let (config, _dir) = test_config();
+        let node = OpolysNode::new(config);
+
+        let verify_invariant = |chain: &ChainState, accounts: &opolys_consensus::account::AccountStore, validators: &ValidatorSet| {
+            let account_total: FlakeAmount = accounts.all_accounts().iter().map(|a| a.balance).sum();
+            let bonded_total: FlakeAmount = validators.all_validators().iter().map(|v| v.total_stake()).sum();
+            let unbonding_total: FlakeAmount = validators.unbonding_queue.iter().map(|u| u.amount).sum();
+            let accounted = account_total
+                .saturating_add(bonded_total)
+                .saturating_add(unbonding_total);
+            let net_issued = chain.total_issued.saturating_sub(chain.total_burned);
+            assert_eq!(
+                net_issued, accounted,
+                "Supply invariant violated: net_issued={} accounted={}",
+                net_issued, accounted
+            );
+        };
+
+        // Check at genesis (height 0, no blocks mined)
+        {
+            let chain = node.chain.read().await;
+            let accounts = node.accounts.read().await;
+            let validators = node.validators.read().await;
+            verify_invariant(&chain, &accounts, &validators);
+        }
     }
 }

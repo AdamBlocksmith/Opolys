@@ -37,6 +37,14 @@ const FEE_MULTIPLIER_HIGH: u64 = 10;
 /// the current suggested_fee. All valid txs still enter the local mempool immediately.
 const DELAY_LOW_FEE_MS: u64 = 5_000;
 
+/// Minimum outbound peer connections required before the mining loop starts.
+/// Prevents eclipse attacks where all of a miner's peers are attacker-controlled.
+const MIN_OUTBOUND_FOR_MINING: usize = 3;
+
+/// Maximum peers sharing the same /24 IPv4 subnet. More than this suggests
+/// the operator is being eclipsed by a single network vantage point.
+const MAX_PEERS_PER_SUBNET: usize = 3;
+
 /// Path to the peer address cache file within the node's data directory.
 const KNOWN_PEERS_FILE: &str = "known_peers.txt";
 
@@ -70,6 +78,25 @@ fn save_peer_to_cache(data_dir: &str, addr: &str) {
     }
 }
 
+/// Extract the /24 subnet prefix from a multiaddr string (e.g. `/ip4/1.2.3.4/tcp/...`).
+/// Returns `None` for non-IPv4 addresses (IPv6, /dns4, etc.).
+fn extract_subnet_24(addr_str: &str) -> Option<[u8; 3]> {
+    let parts: Vec<&str> = addr_str.split('/').collect();
+    for i in 0..parts.len() {
+        if parts[i] == "ip4" {
+            if let Some(ip_str) = parts.get(i + 1) {
+                let octets: Vec<u8> = ip_str.split('.')
+                    .filter_map(|o| o.parse::<u8>().ok())
+                    .collect();
+                if octets.len() == 4 {
+                    return Some([octets[0], octets[1], octets[2]]);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Convert live `ChainState` into an RPC-friendly `ChainInfo` snapshot.
 fn chain_state_to_info(chain: &ChainState) -> ChainInfo {
     ChainInfo {
@@ -83,6 +110,7 @@ fn chain_state_to_info(chain: &ChainState) -> ChainInfo {
         phase: format!("{:?}", chain.phase),
         block_timestamps: chain.block_timestamps.clone(),
         suggested_fee: chain.suggested_fee,
+        finalized_height: chain.finalized_height,
     }
 }
 
@@ -100,6 +128,15 @@ async fn main() {
         .init();
 
     // Construct node configuration from CLI arguments
+    // Mainnet requires --genesis-params to anchor the supply model to real gold data
+    if !args.testnet && args.genesis_params.is_none() {
+        tracing::error!(
+            "Mainnet requires --genesis-params <path>. \
+             Generate the file with the genesis-ceremony tool, or use --testnet for testing."
+        );
+        std::process::exit(1);
+    }
+
     let config = NodeConfig {
         listen_port: args.port,
         rpc_port: args.rpc_port.unwrap_or(args.port + 1),
@@ -114,6 +151,7 @@ async fn main() {
         testnet: args.testnet,
         rpc_listen_addr: args.rpc_listen_addr,
         rpc_api_key: args.rpc_api_key,
+        genesis_params_path: args.genesis_params,
     };
 
     tracing::info!(
@@ -335,6 +373,22 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
             const MAX_ATTEMPTS: u64 = 10_000_000;
 
             loop {
+                // Eclipse attack protection: require minimum outbound peer connections.
+                // If all peers are attacker-controlled, a miner could be fed a fake chain.
+                {
+                    let outbound_count = mining_node.outbound_peers.read().await.len();
+                    if outbound_count < MIN_OUTBOUND_FOR_MINING {
+                        tracing::warn!(
+                            outbound = outbound_count,
+                            needed = MIN_OUTBOUND_FOR_MINING,
+                            "Waiting for {} outbound peers before mining",
+                            MIN_OUTBOUND_FOR_MINING
+                        );
+                        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                        continue;
+                    }
+                }
+
                 // Scale attempts with difficulty: at difficulty 1, use BASE_ATTEMPTS;
                 // at difficulty 10, use BASE_ATTEMPTS * 10, etc. Capped at MAX_ATTEMPTS.
                 let difficulty = mining_node.chain.read().await.current_difficulty;
@@ -492,6 +546,9 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
             let mut verified_peers: std::collections::HashSet<PeerId> = std::collections::HashSet::new();
             // FIX 7: (expected_hash, sent_at) for pending outbound challenges
             let mut pending_challenges: std::collections::HashMap<PeerId, (u64, std::time::Instant)> = std::collections::HashMap::new();
+            // Subnet diversity: count of peers per /24 prefix and reverse map for cleanup
+            let mut subnet_counts: std::collections::HashMap<[u8; 3], usize> = std::collections::HashMap::new();
+            let mut peer_subnets: std::collections::HashMap<PeerId, [u8; 3]> = std::collections::HashMap::new();
             let mut low_fee_drain_interval =
                 tokio::time::interval(std::time::Duration::from_millis(1_000));
             // Check for timed-out challenges every 5 seconds
@@ -519,6 +576,8 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
                                     &mut pending_low_fee_txs,
                                     &mut verified_peers,
                                     &mut pending_challenges,
+                                    &mut subnet_counts,
+                                    &mut peer_subnets,
                                 ).await;
                             }
                             None => {
@@ -655,6 +714,8 @@ async fn handle_network_event(
     pending_low_fee_txs: &mut Vec<(Vec<u8>, std::time::Instant)>,
     verified_peers: &mut std::collections::HashSet<PeerId>,
     pending_challenges: &mut std::collections::HashMap<PeerId, (u64, std::time::Instant)>,
+    subnet_counts: &mut std::collections::HashMap<[u8; 3], usize>,
+    peer_subnets: &mut std::collections::HashMap<PeerId, [u8; 3]>,
 ) {
     match event {
         opolys_networking::OpolysNetworkEvent::GossipBlock { data, source } => {
@@ -908,9 +969,34 @@ async fn handle_network_event(
                 return;
             }
 
-            // Cache the dialable address so future startups can reconnect without bootstrap.
-            if let Some(multiaddr) = addr {
-                save_peer_to_cache(data_dir, &multiaddr.to_string());
+            // Subnet diversity: refuse if > MAX_PEERS_PER_SUBNET share the same /24.
+            // addr is Some when we dialed them (outbound), None when they dialed us (inbound).
+            match &addr {
+                Some(multiaddr) => {
+                    let addr_str = multiaddr.to_string();
+                    if let Some(subnet) = extract_subnet_24(&addr_str) {
+                        let count = subnet_counts.get(&subnet).copied().unwrap_or(0);
+                        if count >= MAX_PEERS_PER_SUBNET {
+                            tracing::warn!(
+                                peer = %peer_id,
+                                subnet = format!("{}.{}.{}.0/24", subnet[0], subnet[1], subnet[2]),
+                                count,
+                                "Refusing connection: /24 subnet peer limit reached"
+                            );
+                            let _ = net.disconnect_peer(peer_id).await;
+                            return;
+                        }
+                        *subnet_counts.entry(subnet).or_insert(0) += 1;
+                        peer_subnets.insert(peer_id, subnet);
+                    }
+                    // Outbound: we know their address because we dialed them
+                    node.outbound_peers.write().await.insert(peer_id);
+                    save_peer_to_cache(data_dir, &addr_str);
+                }
+                None => {
+                    // Inbound: they initiated the connection to us
+                    node.inbound_peers.write().await.insert(peer_id);
+                }
             }
 
             // FIX 7: send memory-fingerprinting challenge before accepting gossip
@@ -978,6 +1064,17 @@ async fn handle_network_event(
             // FIX 7: clean up challenge state
             verified_peers.remove(&peer_id);
             pending_challenges.remove(&peer_id);
+            // Eclipse protection: remove from direction tracking and free subnet slot
+            node.outbound_peers.write().await.remove(&peer_id);
+            node.inbound_peers.write().await.remove(&peer_id);
+            if let Some(subnet) = peer_subnets.remove(&peer_id) {
+                if let Some(count) = subnet_counts.get_mut(&subnet) {
+                    *count = count.saturating_sub(1);
+                    if *count == 0 {
+                        subnet_counts.remove(&subnet);
+                    }
+                }
+            }
         }
         opolys_networking::OpolysNetworkEvent::SyncRequestReceived { peer_id, request_id, request } => {
             tracing::info!(
