@@ -133,8 +133,9 @@ impl TransactionSigner {
         }
     }
 
-    /// Deterministic transaction ID derived from sender, action, fee, nonce, and chain_id
-    /// via Blake3-256. Including chain_id prevents cross-chain replay attacks.
+    /// Deterministic transaction ID derived from a canonical Borsh tuple:
+    /// `(sender, action, fee, nonce, chain_id)`. Including chain_id prevents
+    /// cross-chain replay attacks.
     fn compute_tx_id(
         sender: &ObjectId,
         action: &TransactionAction,
@@ -142,13 +143,8 @@ impl TransactionSigner {
         nonce: u64,
         chain_id: u64,
     ) -> ObjectId {
-        let mut data = sender.0.to_hex().as_bytes().to_vec();
-        let action_bytes =
-            borsh::to_vec(action).expect("Transaction action serialization must not fail");
-        data.extend_from_slice(&action_bytes);
-        data.extend_from_slice(&fee.to_be_bytes());
-        data.extend_from_slice(&nonce.to_be_bytes());
-        data.extend_from_slice(&chain_id.to_be_bytes());
+        let data = borsh::to_vec(&(sender.clone(), action, fee, nonce, chain_id))
+            .expect("Transaction ID serialization must not fail");
         hash_to_object_id_with_domain(DOMAIN_TX_ID, &data)
     }
 }

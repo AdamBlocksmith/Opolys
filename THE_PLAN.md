@@ -1220,19 +1220,19 @@ Deleted. The actual reward split uses integer `coverage_milli` in `node.rs`. The
 Print to stderr instead of stdout: `eprintln!("{}", mnemonic.phrase())`.
 
 #### L3: Early-return timing in verify_ed25519
-**Location:** `crypto/signing.rs:57-74`
-**Status:** OPEN
-Different latencies for wrong key length, invalid curve point, and bad signature. Use `subtle::ConstantTimeEq` for all comparison checks. Low priority since ed25519 verification is the dominant cost.
+**Location:** `crypto/signing.rs`
+**Status:** **FIXED**
+`verify_ed25519` now pads malformed inputs into fixed-size buffers, checks public-key and signature lengths with `subtle::ConstantTimeEq`, and returns `false` without panicking. Invalid curve points still fail closed through dalek validation.
 
 #### L4: Dual serialization for tx_id vs signed data
-**Location:** `wallet/signing.rs:46,138-151`
-**Status:** OPEN (deferred — breaking change)
-tx_id uses hex-encoded sender; signature uses raw-byte sender. Two different serialization formats increase attack surface. Unify to use Borsh for both. Schedule for mainnet launch.
+**Location:** `wallet/signing.rs`, `execution/dispatcher.rs`
+**Status:** **FIXED**
+`tx_id` now hashes the canonical Borsh tuple `(sender, action, fee, nonce, chain_id)` on both the wallet and execution verifier paths. This removes the old pre-mainnet mismatch where transaction IDs used a custom byte layout while signatures used Borsh.
 
 #### L5: Hex-encoded sender in tx_id
-**Location:** `wallet/signing.rs:145`
-**Status:** OPEN (deferred — breaking change)
-`sender.0.to_hex().as_bytes()` converts 32 bytes to 64 bytes before hashing. Inconsistent with raw-byte hashing elsewhere. Replace with `sender.0.as_bytes()`. Breaking change — schedule for mainnet.
+**Location:** `wallet/signing.rs`, `execution/dispatcher.rs`
+**Status:** **FIXED**
+The hex-encoded sender preimage was removed from transaction ID computation before launch. Sender bytes now enter through canonical Borsh serialization, matching the signed payload structure.
 
 #### L6: No SLIP-0010 reference test vectors
 **Location:** `wallet/bip39.rs:199-277`
@@ -1321,8 +1321,8 @@ All comments updated from "1,024 blocks/epoch" to "960 blocks/epoch". Test param
 ### Phase F: Low / Cleanup
 
 40. ✓ L1: Remove `#[derive(Debug)]` from `Bip39Mnemonic` and `KeyPair`; manual `Debug` impls that redact
-41. L3: Constant-time `verify_ed25519` via `subtle`
-42. L4/L5: Unify tx_id serialization (deferred — breaking change, schedule for mainnet)
+41. DONE L3: Constant-time `verify_ed25519` via `subtle`
+42. DONE L4/L5: Unify tx_id serialization before mainnet
 43. L6: Add SLIP-0010 reference test vectors
 44. L7: Raise gossip max message to match `MAX_BLOCK_SIZE_BYTES`
 45. L8: Challenge protocol bind to PeerId

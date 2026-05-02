@@ -31,6 +31,7 @@ use opolys_core::{
     SIGNATURE_TYPE_ED25519, Transaction, TransactionAction,
 };
 use opolys_crypto::{DOMAIN_TX_ID, hash_to_object_id_with_domain, transaction_signing_payload};
+use subtle::ConstantTimeEq;
 
 /// Result of applying a transaction to the chain state.
 ///
@@ -436,7 +437,7 @@ pub fn verify_transaction(tx: &Transaction, expected_chain_id: u64) -> Result<()
         }
     };
     let derived_object_id = opolys_crypto::ed25519_public_key_to_object_id(&pk_bytes);
-    if tx.sender != derived_object_id {
+    if !bool::from(tx.sender.as_bytes().ct_eq(derived_object_id.as_bytes())) {
         return Err(OpolysError::InvalidTransaction(format!(
             "Public key does not match sender: Blake3(pk)={}, sender={}",
             derived_object_id.to_hex(),
@@ -458,7 +459,7 @@ pub fn verify_transaction(tx: &Transaction, expected_chain_id: u64) -> Result<()
 /// Compute the expected transaction ID from the transaction fields.
 ///
 /// Matches the wallet's `TransactionSigner::compute_tx_id` function exactly:
-/// Blake3-256(sender_hex || borsh(action) || fee_bytes || nonce_bytes || chain_id_bytes)
+/// Blake3-256(domain || borsh(sender, action, fee, nonce, chain_id)).
 fn compute_tx_id(
     sender: &ObjectId,
     action: &TransactionAction,
@@ -466,13 +467,8 @@ fn compute_tx_id(
     nonce: u64,
     chain_id: u64,
 ) -> ObjectId {
-    let mut data = sender.0.to_hex().as_bytes().to_vec();
-    let action_bytes =
-        borsh::to_vec(action).expect("Transaction action serialization must not fail");
-    data.extend_from_slice(&action_bytes);
-    data.extend_from_slice(&fee.to_be_bytes());
-    data.extend_from_slice(&nonce.to_be_bytes());
-    data.extend_from_slice(&chain_id.to_be_bytes());
+    let data = borsh::to_vec(&(sender.clone(), action, fee, nonce, chain_id))
+        .expect("Transaction ID serialization must not fail");
     hash_to_object_id_with_domain(DOMAIN_TX_ID, &data)
 }
 
