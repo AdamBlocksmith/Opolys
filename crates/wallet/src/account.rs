@@ -4,7 +4,7 @@
 //! object ID or human-readable name), and `format_flake_as_opl` for converting
 //! raw flake amounts to human-readable OPL notation (1 OPL = 1,000,000 flakes).
 
-use opolys_core::{ObjectId, FLAKES_PER_OPL};
+use opolys_core::{FLAKES_PER_OPL, ObjectId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

@@ -18,27 +18,30 @@
 //! Hashing: Blake3-256 (32 bytes) everywhere. Signatures: ed25519.
 //! Key derivation: BIP-39 24-word mnemonics, SLIP-0010 ed25519.
 
-use opolys_core::*;
+use clap::Parser;
+use ed25519_dalek::{Signer, Verifier};
+use opolys_consensus::block::{compute_block_hash, compute_transaction_root};
+use opolys_consensus::difficulty::compute_next_difficulty;
+use opolys_consensus::emission::compute_suggested_fee;
+use opolys_consensus::pow;
 use opolys_consensus::{
     account::AccountStore,
     emission,
+    genesis::{GenesisAttestation as ConsensusGenesisAttestation, GenesisConfig},
     mempool::Mempool,
-    refiner::RefinerSet,
     pow::PowContext,
-    genesis::GenesisConfig,
+    refiner::RefinerSet,
 };
-use opolys_consensus::difficulty::compute_next_difficulty;
-use opolys_consensus::block::{compute_transaction_root, compute_block_hash};
-use opolys_consensus::emission::compute_suggested_fee;
-use opolys_consensus::pow;
+use opolys_core::*;
+use opolys_crypto::{DOMAIN_STATE_ROOT, refiner_block_signing_payload};
 use opolys_execution::TransactionDispatcher;
-use opolys_storage::BlockchainStore;
 use opolys_networking::PeerId;
+use opolys_storage::BlockchainStore;
 use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use clap::Parser;
-use ed25519_dalek::{Signer, Verifier};
 
 /// A record of a banned peer, persisted across restarts.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
@@ -133,17 +136,25 @@ pub struct Args {
     ///
     /// By default the RPC server only accepts local connections.
     /// To expose the RPC to external clients pass --rpc-listen-addr 0.0.0.0.
-    /// WARNING: exposing the RPC publicly without --rpc-api-key is a security risk.
+    /// WARNING: exposing the RPC publicly without authentication is a security risk.
     #[arg(long, default_value = "127.0.0.1")]
     pub rpc_listen_addr: String,
 
-    /// Optional API key for write and mining RPC methods.
+    /// API key for write and mining RPC methods.
     ///
     /// If set, opl_sendTransaction, opl_getMiningJob, and opl_submitSolution
     /// require Authorization: Bearer <key> or X-Api-Key: <key> header.
     /// All read methods (balance, blocks, chain info, etc.) remain public.
-    #[arg(long)]
+    /// If omitted, the node generates a random key at startup.
+    #[arg(long, conflicts_with = "no_rpc_auth")]
     pub rpc_api_key: Option<String>,
+
+    /// Disable API-key auth for write and mining RPC methods.
+    ///
+    /// Mainnet operators should avoid this unless the RPC server is fully
+    /// isolated behind another authenticated service.
+    #[arg(long)]
+    pub no_rpc_auth: bool,
 }
 
 /// Configuration for an Opolys node, derived from CLI arguments or defaults.
@@ -191,6 +202,30 @@ impl Default for NodeConfig {
     }
 }
 
+impl NodeConfig {
+    /// Chain id for this node configuration.
+    ///
+    /// Opolys is mainnet-only. Keeping this explicit makes persisted state
+    /// fail closed if a database was created with any other chain id.
+    pub fn chain_id(&self) -> u64 {
+        MAINNET_CHAIN_ID
+    }
+
+    /// Mainnet data directory.
+    ///
+    /// Persistent node files live below `<data_dir>/mainnet`, making the
+    /// on-disk layout explicit for the only supported network.
+    pub fn chain_data_dir(&self) -> PathBuf {
+        chain_data_dir(&self.data_dir, self.chain_id())
+    }
+}
+
+/// Return the mainnet storage directory for a base data directory.
+pub fn chain_data_dir(data_dir: &str, chain_id: u64) -> PathBuf {
+    assert_eq!(chain_id, MAINNET_CHAIN_ID, "Opolys supports mainnet only");
+    Path::new(data_dir).join("mainnet")
+}
+
 /// Canonical chain state tracking height, difficulty, supply, and consensus phase.
 ///
 /// Difficulty and block rewards emerge from chain state — there are no
@@ -208,6 +243,8 @@ pub struct ChainState {
     pub total_burned: FlakeAmount,
     /// Rolling window of block timestamps used for difficulty retargeting.
     pub block_timestamps: Vec<u64>,
+    /// Blake3-256 hash of the genesis block header for this chain.
+    pub genesis_hash: Hash,
     /// Blake3-256 hash of the most recent block header.
     pub latest_block_hash: Hash,
     /// Blake3-256 hash of the state root after applying the most recent block.
@@ -220,7 +257,7 @@ pub struct ChainState {
     pub producer_signatures: HashMap<(u64, String), (Hash, Vec<u8>)>,
     /// The ceremony-derived block reward for this chain in Flakes.
     /// Mainnet: read from the genesis ceremony attestation.
-    /// Testnet/dev: the BASE_REWARD constant (332 OPL).
+    /// Pre-ceremony development builds fall back to the BASE_REWARD constant (332 OPL).
     pub base_reward: FlakeAmount,
     /// Height of the most recently finalized block (cannot be reverted).
     /// Placeholder: always 0 until finality is implemented via attestations (Pass 2).
@@ -238,9 +275,10 @@ impl ChainState {
         ChainState {
             current_height: 0,
             current_difficulty: genesis_config.initial_difficulty,
-total_issued: 0,
+            total_issued: 0,
             total_burned: 0,
             block_timestamps: vec![genesis.header.timestamp],
+            genesis_hash: genesis_hash.clone(),
             latest_block_hash: genesis_hash,
             state_root: genesis.header.state_root.clone(),
             suggested_fee: MIN_FEE,
@@ -258,14 +296,21 @@ total_issued: 0,
             total_issued: p.total_issued,
             total_burned: p.total_burned,
             block_timestamps: p.block_timestamps.clone(),
+            genesis_hash: Hash::from_bytes(p.genesis_hash),
             latest_block_hash: Hash::from_bytes(p.latest_block_hash),
             state_root: Hash::from_bytes(p.state_root),
             suggested_fee: p.suggested_fee,
-            producer_signatures: p.producer_signatures.iter().map(|(h, prod, hash, sig)| {
-                ((*h, prod.clone()), (hash.clone(), sig.clone()))
-            }).collect(),
+            producer_signatures: p
+                .producer_signatures
+                .iter()
+                .map(|(h, prod, hash, sig)| ((*h, prod.clone()), (hash.clone(), sig.clone())))
+                .collect(),
             // Migration: nodes upgraded from pre-ceremony builds get the constant default
-            base_reward: if p.base_reward > 0 { p.base_reward } else { BASE_REWARD },
+            base_reward: if p.base_reward > 0 {
+                p.base_reward
+            } else {
+                BASE_REWARD
+            },
             finalized_height: p.finalized_height,
             // finalized_height reconstructed from block history; safe to start at 0
         }
@@ -274,6 +319,8 @@ total_issued: 0,
     /// Convert chain state to the persisted format for storage.
     pub fn to_persisted(&self) -> opolys_storage::PersistedChainState {
         opolys_storage::PersistedChainState {
+            chain_id: MAINNET_CHAIN_ID,
+            genesis_hash: self.genesis_hash.0,
             current_height: self.current_height,
             current_difficulty: self.current_difficulty,
             total_issued: self.total_issued,
@@ -283,9 +330,11 @@ total_issued: 0,
             state_root: self.state_root.0,
             suggested_fee: self.suggested_fee,
             base_reward: self.base_reward,
-            producer_signatures: self.producer_signatures.iter().map(|((h, prod), (hash, sig))| {
-                (*h, prod.clone(), hash.clone(), sig.clone())
-            }).collect(),
+            producer_signatures: self
+                .producer_signatures
+                .iter()
+                .map(|((h, prod), (hash, sig))| (*h, prod.clone(), hash.clone(), sig.clone()))
+                .collect(),
             finalized_height: self.finalized_height,
         }
     }
@@ -303,10 +352,7 @@ total_issued: 0,
     /// would always return 1.0, which is the critical bug this method now
     /// avoids by requiring the caller to supply bonded_stake.
     pub fn stake_coverage(&self, bonded_stake: FlakeAmount) -> f64 {
-        emission::compute_stake_coverage(
-            bonded_stake,
-            self.total_issued,
-        )
+        emission::compute_stake_coverage(bonded_stake, self.total_issued)
     }
 }
 
@@ -335,7 +381,7 @@ pub struct OpolysNode {
     /// For refiner blocks, this must match an active refiner's ObjectId.
     pub miner_id: ObjectId,
     /// The ed25519 signing key for block production. Set when --key-file is provided.
-/// Used by produce_refiner_block() to sign refiner blocks.
+    /// Used by produce_refiner_block() to sign refiner blocks.
     pub signing_key: Option<ed25519_dalek::SigningKey>,
     /// Double-sign evidence collected during mining or refiner block production.
     /// Drained into `Block.slash_evidence` by mine_block() and produce_refiner_block().
@@ -361,6 +407,134 @@ fn load_ban_list_from_disk(data_dir: &str) -> HashMap<String, BanRecord> {
     }
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct CeremonySourceResult {
+    name: String,
+    raw_response_hash: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct CeremonyAttestationFile {
+    ceremony_timestamp: u64,
+    operator_public_key: String,
+    operator_signature: String,
+    production_sources: Vec<CeremonySourceResult>,
+    price_sources: Vec<CeremonySourceResult>,
+    median_production_tonnes: f64,
+    median_price_usd_cents: u64,
+    blocks_per_year: u64,
+    base_reward_flakes: u64,
+    derivation_steps: Vec<String>,
+    master_hash: String,
+}
+
+fn decode_hex_array<const N: usize>(field: &str, value: &str) -> Result<[u8; N], String> {
+    let bytes = hex::decode(value).map_err(|e| format!("{} must be hex: {}", field, e))?;
+    bytes
+        .try_into()
+        .map_err(|bytes: Vec<u8>| format!("{} must be {} bytes, got {}", field, N, bytes.len()))
+}
+
+fn source_hash(sources: &[CeremonySourceResult], needle: &str) -> [u8; 32] {
+    sources
+        .iter()
+        .find(|source| source.name.to_ascii_lowercase().contains(needle))
+        .and_then(|source| decode_hex_array::<32>(&source.name, &source.raw_response_hash).ok())
+        .unwrap_or([0u8; 32])
+}
+
+fn compute_ceremony_master_hash(attestation_json: &str) -> Result<[u8; 32], String> {
+    let mut value: serde_json::Value = serde_json::from_str(attestation_json)
+        .map_err(|e| format!("Genesis ceremony JSON parse failed: {}", e))?;
+    value["master_hash"] = serde_json::Value::String(String::new());
+    value["operator_signature"] = serde_json::Value::String(String::new());
+    let canonical = serde_json::to_string(&value)
+        .map_err(|e| format!("Genesis ceremony canonicalization failed: {}", e))?;
+    Ok(*blake3::hash(canonical.as_bytes()).as_bytes())
+}
+
+fn load_genesis_config_from_attestation(path: &str) -> Result<GenesisConfig, String> {
+    let contents = fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read genesis ceremony file {}: {}", path, e))?;
+    let attestation: CeremonyAttestationFile = serde_json::from_str(&contents)
+        .map_err(|e| format!("Failed to parse genesis ceremony file {}: {}", path, e))?;
+
+    if attestation.base_reward_flakes == 0 {
+        return Err("Genesis ceremony base_reward_flakes must be non-zero".to_string());
+    }
+    if attestation.blocks_per_year == 0 {
+        return Err("Genesis ceremony blocks_per_year must be non-zero".to_string());
+    }
+
+    let computed_master_hash = compute_ceremony_master_hash(&contents)?;
+    let stated_master_hash = decode_hex_array::<32>("master_hash", &attestation.master_hash)?;
+    if computed_master_hash != stated_master_hash {
+        return Err("Genesis ceremony master_hash does not match attestation contents".to_string());
+    }
+
+    let operator_public_key =
+        decode_hex_array::<32>("operator_public_key", &attestation.operator_public_key)?;
+    let operator_signature =
+        decode_hex_array::<64>("operator_signature", &attestation.operator_signature)?;
+    let verifying_key =
+        ed25519_dalek::VerifyingKey::from_bytes(&operator_public_key).map_err(|_| {
+            "Genesis ceremony operator_public_key is not a valid ed25519 key".to_string()
+        })?;
+    let signature = ed25519_dalek::Signature::from_bytes(&operator_signature);
+    verifying_key
+        .verify_strict(&stated_master_hash, &signature)
+        .map_err(|_| "Genesis ceremony operator_signature verification failed".to_string())?;
+
+    let production_tonnes_milli = (attestation.median_production_tonnes * 1000.0).round() as u64;
+    let derivation_formula = attestation.derivation_steps.join("; ");
+    let lbma_hash = source_hash(&attestation.price_sources, "lbma");
+    let usgs_hash = source_hash(&attestation.production_sources, "usgs");
+    let wgc_hash = source_hash(&attestation.production_sources, "world gold council");
+
+    let ceremony_data = GenesisCeremonyData {
+        ceremony_timestamp: attestation.ceremony_timestamp,
+        ceremony_master_hash: stated_master_hash,
+        operator_public_key,
+        operator_signature,
+        base_reward_flakes: attestation.base_reward_flakes,
+        production_tonnes_milli,
+        price_usd_cents: attestation.median_price_usd_cents,
+        blocks_per_year: attestation.blocks_per_year,
+    };
+
+    Ok(GenesisConfig {
+        initial_difficulty: GENESIS_DIFFICULTY,
+        protocol_version: NETWORK_PROTOCOL_VERSION.to_string(),
+        attestation: ConsensusGenesisAttestation {
+            ceremony_timestamp: attestation.ceremony_timestamp,
+            gold_spot_price_usd_cents: attestation.median_price_usd_cents,
+            annual_production_tonnes: attestation.median_production_tonnes.round() as u64,
+            total_above_ground_tonnes: 0,
+            lbma_response_hash: lbma_hash,
+            usgs_response_hash: usgs_hash,
+            wgc_response_hash: wgc_hash,
+            derivation_formula,
+        },
+        genesis_accounts: vec![],
+        base_reward: attestation.base_reward_flakes,
+        ceremony_data: Some(ceremony_data),
+    })
+}
+
+fn genesis_config_for_node(config: &NodeConfig) -> GenesisConfig {
+    match config.genesis_params_path.as_deref() {
+        Some(path) => load_genesis_config_from_attestation(path).unwrap_or_else(|e| {
+            panic!("Invalid genesis ceremony file: {}", e);
+        }),
+        None => {
+            tracing::warn!(
+                "No genesis ceremony file configured; using default development genesis"
+            );
+            GenesisConfig::default()
+        }
+    }
+}
+
 impl OpolysNode {
     /// Create a new node, either loading persisted state from disk or
     /// initializing from genesis.
@@ -382,7 +556,11 @@ impl OpolysNode {
                     (ObjectId(Hash::zero()), None)
                 }
                 Err(e) => {
-                    tracing::warn!("Failed to read key file {:?}: {}. Using zero miner_id.", key_path, e);
+                    tracing::warn!(
+                        "Failed to read key file {:?}: {}. Using zero miner_id.",
+                        key_path,
+                        e
+                    );
                     (ObjectId(Hash::zero()), None)
                 }
             }
@@ -390,10 +568,12 @@ impl OpolysNode {
             (ObjectId(Hash::zero()), None)
         };
 
-        let genesis_config = opolys_consensus::GenesisConfig::default();
+        let genesis_config = genesis_config_for_node(&config);
+        let expected_genesis_hash = ChainState::new(&genesis_config).genesis_hash;
+        let chain_id = config.chain_id();
 
         // Try to open the database and load existing state
-        let data_path = std::path::PathBuf::from(&config.data_dir);
+        let data_path = config.chain_data_dir();
         let store_result = BlockchainStore::open(&data_path);
 
         let (chain_state, accounts, refiners, store) = match store_result {
@@ -401,22 +581,58 @@ impl OpolysNode {
                 let store = Arc::new(store);
                 match store.load_chain_state() {
                     Ok(Some(persisted)) => {
-                        tracing::info!(
-                            height = persisted.current_height,
-                            difficulty = persisted.current_difficulty,
-                            issued = persisted.total_issued,
-                            "Loaded persisted chain state from disk"
-                        );
-                        let chain = ChainState::from_persisted(&persisted);
-                        let accs = store.load_accounts().unwrap_or_else(|e| {
-                            tracing::warn!("Failed to load accounts, starting fresh: {}", e);
-                            AccountStore::new()
-                        });
-                        let vals = store.load_refiners().unwrap_or_else(|e| {
-                            tracing::warn!("Failed to load refiners, starting fresh: {}", e);
-                            RefinerSet::new()
-                        });
-                        (chain, accs, vals, Some(store))
+                        if persisted.chain_id != chain_id {
+                            tracing::warn!(
+                                persisted_chain_id = persisted.chain_id,
+                                expected_chain_id = chain_id,
+                                "Ignoring persisted chain state for a non-mainnet chain id"
+                            );
+                            let chain = ChainState::new(&genesis_config);
+                            let mut accounts = AccountStore::new();
+                            let refiners = RefinerSet::new();
+                            let genesis_issued = opolys_consensus::genesis::apply_genesis_accounts(
+                                &genesis_config,
+                                &mut accounts,
+                            );
+                            let mut chain = chain;
+                            chain.total_issued = chain.total_issued.saturating_add(genesis_issued);
+                            (chain, accounts, refiners, Some(store))
+                        } else if Hash::from_bytes(persisted.genesis_hash) != expected_genesis_hash
+                        {
+                            tracing::warn!(
+                                persisted_genesis = %Hash::from_bytes(persisted.genesis_hash).to_hex(),
+                                expected_genesis = %expected_genesis_hash.to_hex(),
+                                "Ignoring persisted chain state for a different genesis ceremony"
+                            );
+                            let chain = ChainState::new(&genesis_config);
+                            let mut accounts = AccountStore::new();
+                            let refiners = RefinerSet::new();
+                            let genesis_issued = opolys_consensus::genesis::apply_genesis_accounts(
+                                &genesis_config,
+                                &mut accounts,
+                            );
+                            let mut chain = chain;
+                            chain.total_issued = chain.total_issued.saturating_add(genesis_issued);
+                            (chain, accounts, refiners, Some(store))
+                        } else {
+                            tracing::info!(
+                                height = persisted.current_height,
+                                difficulty = persisted.current_difficulty,
+                                issued = persisted.total_issued,
+                                chain_id = persisted.chain_id,
+                                "Loaded persisted chain state from disk"
+                            );
+                            let chain = ChainState::from_persisted(&persisted);
+                            let accs = store.load_accounts().unwrap_or_else(|e| {
+                                tracing::warn!("Failed to load accounts, starting fresh: {}", e);
+                                AccountStore::new()
+                            });
+                            let vals = store.load_refiners().unwrap_or_else(|e| {
+                                tracing::warn!("Failed to load refiners, starting fresh: {}", e);
+                                RefinerSet::new()
+                            });
+                            (chain, accs, vals, Some(store))
+                        }
                     }
                     Ok(None) => {
                         tracing::info!("No persisted state found, initializing from genesis");
@@ -425,7 +641,8 @@ impl OpolysNode {
                         let refiners = RefinerSet::new();
                         // Credit genesis accounts with their initial balances
                         let genesis_issued = opolys_consensus::genesis::apply_genesis_accounts(
-                            &genesis_config, &mut accounts,
+                            &genesis_config,
+                            &mut accounts,
                         );
                         // Track genesis issuance in chain state
                         let mut chain = chain;
@@ -438,7 +655,8 @@ impl OpolysNode {
                         let mut accounts = AccountStore::new();
                         let refiners = RefinerSet::new();
                         let genesis_issued = opolys_consensus::genesis::apply_genesis_accounts(
-                            &genesis_config, &mut accounts,
+                            &genesis_config,
+                            &mut accounts,
                         );
                         let mut chain = chain;
                         chain.total_issued = chain.total_issued.saturating_add(genesis_issued);
@@ -447,12 +665,17 @@ impl OpolysNode {
                 }
             }
             Err(e) => {
-                tracing::warn!("Could not open database at {:?}: {}, running without persistence", data_path, e);
+                tracing::warn!(
+                    "Could not open database at {:?}: {}, running without persistence",
+                    data_path,
+                    e
+                );
                 let chain_state = ChainState::new(&genesis_config);
                 let mut accounts = AccountStore::new();
                 let refiners = RefinerSet::new();
                 let genesis_issued = opolys_consensus::genesis::apply_genesis_accounts(
-                    &genesis_config, &mut accounts,
+                    &genesis_config,
+                    &mut accounts,
                 );
                 let mut chain_state = chain_state;
                 chain_state.total_issued = chain_state.total_issued.saturating_add(genesis_issued);
@@ -460,7 +683,7 @@ impl OpolysNode {
             }
         };
 
-        let banned_peers = load_ban_list_from_disk(&config.data_dir);
+        let banned_peers = load_ban_list_from_disk(&data_path.to_string_lossy());
 
         OpolysNode {
             chain: Arc::new(RwLock::new(chain_state)),
@@ -504,9 +727,9 @@ impl OpolysNode {
                 return true;
             }
             let duration_secs: u64 = match record.ban_count {
-                1 => 3_600,        // 1 hour
-                2 => 86_400,       // 24 hours
-                3 => 604_800,      // 7 days
+                1 => 3_600,   // 1 hour
+                2 => 86_400,  // 24 hours
+                3 => 604_800, // 7 days
                 _ => u64::MAX,
             };
             return now < record.banned_at.saturating_add(duration_secs);
@@ -527,12 +750,15 @@ impl OpolysNode {
         let is_permanent = permanent || ban_count >= 4;
         {
             let mut banned = self.banned_peers.write().await;
-            banned.insert(peer_id_str.to_string(), BanRecord {
-                reason: reason.to_string(),
-                banned_at: now,
-                ban_count,
-                permanent: is_permanent,
-            });
+            banned.insert(
+                peer_id_str.to_string(),
+                BanRecord {
+                    reason: reason.to_string(),
+                    banned_at: now,
+                    ban_count,
+                    permanent: is_permanent,
+                },
+            );
         }
         tracing::warn!(
             peer = peer_id_str,
@@ -545,7 +771,7 @@ impl OpolysNode {
     }
 
     async fn save_ban_list(&self) {
-        let path = std::path::Path::new(&self.config.data_dir).join("banned_peers.json");
+        let path = self.config.chain_data_dir().join("banned_peers.json");
         let banned = self.banned_peers.read().await;
         match serde_json::to_string_pretty(&*banned) {
             Ok(json) => {
@@ -570,7 +796,8 @@ impl OpolysNode {
         let refiners = self.refiners.read().await;
 
         let mempool = self.mempool.read().await;
-        let transactions: Vec<Transaction> = mempool.get_ordered_transactions()
+        let transactions: Vec<Transaction> = mempool
+            .get_ordered_transactions()
             .into_iter()
             .take(MAX_TRANSACTIONS_PER_BLOCK)
             .cloned()
@@ -651,14 +878,14 @@ impl OpolysNode {
         // Derive deterministic producer selection seed from the previous block hash.
         // This ensures every node computes the same producer for the same height.
         let seed = u64::from_be_bytes(
-            chain.latest_block_hash.0[0..8].try_into().unwrap_or([0u8; 8])
+            chain.latest_block_hash.0[0..8]
+                .try_into()
+                .unwrap_or([0u8; 8]),
         );
 
         // Select the block producer via weighted random sampling
-        let producer = refiners.select_block_producer(
-            chain.block_timestamps.last().copied().unwrap_or(0),
-            seed,
-        )?;
+        let producer = refiners
+            .select_block_producer(chain.block_timestamps.last().copied().unwrap_or(0), seed)?;
 
         // Only produce if this node is the selected producer
         if producer.object_id != self.miner_id {
@@ -671,7 +898,8 @@ impl OpolysNode {
         }
 
         // Build block from mempool transactions
-        let transactions: Vec<Transaction> = mempool.get_ordered_transactions()
+        let transactions: Vec<Transaction> = mempool
+            .get_ordered_transactions()
             .into_iter()
             .take(MAX_TRANSACTIONS_PER_BLOCK)
             .cloned()
@@ -716,7 +944,8 @@ impl OpolysNode {
 
         // Compute the block hash and sign it with the refiner's ed25519 key
         let block_hash = compute_block_hash(&header);
-        let signature: ed25519_dalek::Signature = signing_key.sign(block_hash.0.as_ref());
+        let signing_payload = refiner_block_signing_payload(&block_hash);
+        let signature: ed25519_dalek::Signature = signing_key.sign(&signing_payload);
         let refiner_signature = signature.to_bytes().to_vec();
 
         let block = Block {
@@ -757,8 +986,14 @@ impl OpolysNode {
         if expected_id != evidence.producer {
             return false;
         }
-        opolys_crypto::verify_ed25519(&evidence.producer_pubkey, evidence.hash_a.0.as_ref(), &evidence.signature_a)
-            && opolys_crypto::verify_ed25519(&evidence.producer_pubkey, evidence.hash_b.0.as_ref(), &evidence.signature_b)
+        let payload_a = refiner_block_signing_payload(&evidence.hash_a);
+        let payload_b = refiner_block_signing_payload(&evidence.hash_b);
+        opolys_crypto::verify_ed25519(&evidence.producer_pubkey, &payload_a, &evidence.signature_a)
+            && opolys_crypto::verify_ed25519(
+                &evidence.producer_pubkey,
+                &payload_b,
+                &evidence.signature_b,
+            )
     }
 
     /// Apply a mined or received block to the chain state.
@@ -786,7 +1021,8 @@ impl OpolysNode {
             &chain.block_timestamps,
             chain.total_issued,
             bonded_stake,
-        ).effective_difficulty();
+        )
+        .effective_difficulty();
 
         // Compute parent timestamp (0 for genesis)
         let parent_timestamp = chain.block_timestamps.last().copied().unwrap_or(0);
@@ -804,7 +1040,8 @@ impl OpolysNode {
             parent_timestamp,
             expected_difficulty,
             now_secs,
-        ).map_err(|e| format!("Block validation failed: {}", e))?;
+        )
+        .map_err(|e| format!("Block validation failed: {}", e))?;
 
         // STATE ROOT CONVENTION (Ethereum-style parent-state-root):
         // block.header.state_root = state root computed at end of block N-1
@@ -831,12 +1068,16 @@ impl OpolysNode {
                 }
                 let block_hash = compute_block_hash(&block.header);
                 let (pk_array, sig_array) = {
-                    let account = accounts.get_account(&block.header.producer)
+                    let account = accounts
+                        .get_account(&block.header.producer)
                         .ok_or_else(|| "Refiner block producer account not found".to_string())?;
-                    let pk_bytes = account.public_key.as_ref()
-                        .ok_or_else(|| "Refiner block producer public key not registered".to_string())?;
+                    let pk_bytes = account.public_key.as_ref().ok_or_else(|| {
+                        "Refiner block producer public key not registered".to_string()
+                    })?;
                     if pk_bytes.len() != 32 {
-                        return Err("Refiner block producer public key must be 32 bytes".to_string());
+                        return Err(
+                            "Refiner block producer public key must be 32 bytes".to_string()
+                        );
                     }
                     let mut pk_array = [0u8; 32];
                     pk_array.copy_from_slice(pk_bytes);
@@ -847,15 +1088,33 @@ impl OpolysNode {
                 let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&pk_array)
                     .map_err(|_| "Refiner block producer public key is invalid".to_string())?;
                 let signature = ed25519_dalek::Signature::from_bytes(&sig_array);
-                verifying_key.verify(block_hash.0.as_ref(), &signature)
+                let signing_payload = refiner_block_signing_payload(&block_hash);
+                verifying_key
+                    .verify(&signing_payload, &signature)
                     .map_err(|_| "Refiner signature verification failed".to_string())?;
+            }
+        }
+
+        // PoW rewards can only be credited to a registered account whose
+        // public key is known on-chain. This prevents arbitrary reward routing
+        // to unregistered ObjectIds.
+        if block.header.pow_proof.is_some() {
+            let account = accounts
+                .get_account(&block.header.producer)
+                .ok_or_else(|| "PoW block producer account not found".to_string())?;
+            match account.public_key.as_ref() {
+                Some(pk) if pk.len() == 32 => {}
+                Some(_) => return Err("PoW block producer public key must be 32 bytes".to_string()),
+                None => return Err("PoW block producer public key not registered".to_string()),
             }
         }
 
         // Verify Refiner block producer was legitimately selected
         if block.header.refiner_signature.is_some() && !block.header.producer.0.is_zero() {
             let seed = u64::from_be_bytes(
-                chain.latest_block_hash.0[0..8].try_into().unwrap_or([0u8; 8])
+                chain.latest_block_hash.0[0..8]
+                    .try_into()
+                    .unwrap_or([0u8; 8]),
             );
             let timestamp = chain.block_timestamps.last().copied().unwrap_or(0);
             if let Some(expected_producer) = refiners.select_block_producer(timestamp, seed) {
@@ -871,7 +1130,8 @@ impl OpolysNode {
 
         // Process double-sign evidence embedded in this block.
         // Each item is verified independently; duplicates within the block are skipped.
-        let mut processed_evidence_keys: std::collections::HashSet<(String, u64)> = std::collections::HashSet::new();
+        let mut processed_evidence_keys: std::collections::HashSet<(String, u64)> =
+            std::collections::HashSet::new();
         for evidence in &block.slash_evidence {
             let dedup_key = (evidence.producer.to_hex(), evidence.height);
             if processed_evidence_keys.contains(&dedup_key) {
@@ -914,7 +1174,8 @@ impl OpolysNode {
                         height = block.header.height,
                         "Double-sign detected locally — queuing evidence for next block"
                     );
-                    let pubkey = accounts.get_account(&block.header.producer)
+                    let pubkey = accounts
+                        .get_account(&block.header.producer)
                         .and_then(|a| a.public_key.clone())
                         .unwrap_or_default();
                     new_evidence.push(DoubleSignEvidence {
@@ -928,7 +1189,9 @@ impl OpolysNode {
                     });
                 }
             } else {
-                chain.producer_signatures.insert(key, (block_hash, sig_bytes));
+                chain
+                    .producer_signatures
+                    .insert(key, (block_hash, sig_bytes));
             }
         }
 
@@ -949,7 +1212,11 @@ impl OpolysNode {
                 // hash_int = 0 triggers the 1.0x floor in compute_vein_yield()
                 0u64
             };
-            emission::compute_block_reward(chain.base_reward, block.header.difficulty, pow_hash_value)
+            emission::compute_block_reward(
+                chain.base_reward,
+                block.header.difficulty,
+                pow_hash_value,
+            )
         };
 
         // Split the block reward into base and vein bonus components.
@@ -975,7 +1242,8 @@ impl OpolysNode {
         // vein_bonus = base_reward × (yield_milli - 1000) / 1000
         // For refiner blocks: yield_milli = 1000, so vein_bonus = 0
         // For miner blocks: yield_milli > 1000, vein_bonus > 0
-        let vein_bonus = ((base_reward_amount as u128 * (yield_milli.saturating_sub(1000) as u128)) / 1000) as FlakeAmount;
+        let vein_bonus = ((base_reward_amount as u128 * (yield_milli.saturating_sub(1000) as u128))
+            / 1000) as FlakeAmount;
 
         // Mine assay: burn ANNUAL_ATTRITION_PERMILLE / 1000 of block reward at source.
         // Mirrors gold processing waste — miners lose ~1.5% of what they extract.
@@ -996,8 +1264,11 @@ impl OpolysNode {
         };
         // miner_share = base_reward × (1000 - coverage_milli) / 1000 + vein_bonus
         // refiner_share = base_reward × coverage_milli / 1000
-        let miner_share_amount = ((base_reward_amount as u128 * (1000 - coverage_milli) as u128) / 1000).saturating_add(vein_bonus as u128) as FlakeAmount;
-        let refiner_share_amount = ((base_reward_amount as u128 * coverage_milli as u128) / 1000) as FlakeAmount;
+        let miner_share_amount = ((base_reward_amount as u128 * (1000 - coverage_milli) as u128)
+            / 1000)
+            .saturating_add(vein_bonus as u128) as FlakeAmount;
+        let refiner_share_amount =
+            ((base_reward_amount as u128 * coverage_milli as u128) / 1000) as FlakeAmount;
 
         // Credit the PoW share to the block producer (miner or selected refiner).
         // The producer is identified by block.header.producer.
@@ -1017,7 +1288,8 @@ impl OpolysNode {
             if total_weight > 0 {
                 for v in refiners.active_refiners() {
                     let v_weight = v.weight(current_timestamp);
-                    let v_share = ((refiner_share_amount as u128 * v_weight as u128) / total_weight as u128) as FlakeAmount;
+                    let v_share = ((refiner_share_amount as u128 * v_weight as u128)
+                        / total_weight as u128) as FlakeAmount;
                     if v_share > 0 {
                         if accounts.get_account(&v.object_id).is_none() {
                             accounts.create_account(v.object_id.clone()).ok();
@@ -1140,6 +1412,8 @@ impl OpolysNode {
         // It reflects all state changes from this block:
         // rewards, transactions, unbonds, refiner activations.
         let mut account_hasher = opolys_crypto::Blake3Hasher::new();
+        account_hasher.update(DOMAIN_STATE_ROOT);
+        account_hasher.update(b"chain");
         account_hasher.update(accounts.compute_state_root().as_bytes());
         account_hasher.update(refiners.compute_state_root().as_bytes());
         account_hasher.update(&chain.total_issued.to_be_bytes());
@@ -1162,7 +1436,10 @@ impl OpolysNode {
 
         // Queue newly detected evidence for inclusion in the next mined block
         if !new_evidence.is_empty() {
-            self.pending_slash_evidence.write().await.extend(new_evidence);
+            self.pending_slash_evidence
+                .write()
+                .await
+                .extend(new_evidence);
         }
 
         Ok(block_hash)
@@ -1176,18 +1453,7 @@ impl OpolysNode {
         refiners: &RefinerSet,
         block: &Block,
     ) -> Result<(), String> {
-        store.save_block(block)?;
-        store.save_block_indexes(block)?;
-        store.save_chain_state(&chain.to_persisted())?;
-        store.save_accounts(accounts)?;
-        // At epoch boundaries write full refiner set for consistency;
-        // otherwise write only dirty (changed) refiners for performance.
-        if chain.current_height > 0 && chain.current_height % EPOCH == 0 {
-            store.save_refiners(refiners)?;
-        } else if !refiners.dirty_refiners.is_empty() {
-            store.save_dirty_refiners(refiners, &refiners.dirty_refiners)?;
-        }
-        Ok(())
+        store.save_applied_block_atomic(block, &chain.to_persisted(), accounts, refiners)
     }
 
     /// Retrieve a block from storage by height.
@@ -1199,10 +1465,13 @@ impl OpolysNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::Signer;
 
     /// Helper: create a NodeConfig that uses a temporary directory.
     fn test_config() -> (NodeConfig, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let key_path = dir.path().join("miner.key");
+        fs::write(&key_path, [11u8; 32]).expect("Failed to write test miner key");
         let config = NodeConfig {
             listen_port: 0,
             rpc_port: 0,
@@ -1213,7 +1482,7 @@ mod tests {
             mine: true,
             no_rpc: true,
             refine: false,
-            key_file: None,
+            key_file: Some(key_path.to_string_lossy().to_string()),
             rpc_listen_addr: "127.0.0.1".to_string(),
             rpc_api_key: None,
             genesis_params_path: None,
@@ -1221,11 +1490,173 @@ mod tests {
         (config, dir)
     }
 
+    async fn register_test_miner_account(node: &OpolysNode) {
+        let signing_key = node.signing_key.as_ref().expect("test node has key");
+        let public_key = signing_key.verifying_key().as_bytes().to_vec();
+        let mut accounts = node.accounts.write().await;
+        if accounts.get_account(&node.miner_id).is_none() {
+            accounts.create_account(node.miner_id.clone()).unwrap();
+        }
+        accounts.get_account_mut(&node.miner_id).unwrap().public_key = Some(public_key);
+    }
+
+    fn write_test_genesis_attestation(dir: &tempfile::TempDir, base_reward_flakes: u64) -> String {
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let operator_public_key = hex::encode(signing_key.verifying_key().as_bytes());
+        let hash_hex = hex::encode([9u8; 32]);
+        let mut attestation = serde_json::json!({
+            "ceremony_start_ms": 1_000_000u64,
+            "ceremony_end_ms": 1_001_000u64,
+            "ceremony_timestamp": 1_700_000_000u64,
+            "operator_name": "Test Operator",
+            "operator_public_key": operator_public_key,
+            "operator_signature": "",
+            "production_data_year": 2025u32,
+            "production_sources": [
+                {
+                    "name": "USGS",
+                    "url": "https://example.invalid/usgs",
+                    "fetched_at_ms": 1_000_100u64,
+                    "raw_response_hash": hash_hex,
+                    "extracted_value": 3672.0,
+                    "status": "ok"
+                },
+                {
+                    "name": "World Gold Council",
+                    "url": "https://example.invalid/wgc",
+                    "fetched_at_ms": 1_000_200u64,
+                    "raw_response_hash": hex::encode([8u8; 32]),
+                    "extracted_value": 3672.0,
+                    "status": "ok"
+                }
+            ],
+            "price_sources": [
+                {
+                    "name": "LBMA Live Price",
+                    "url": "https://example.invalid/lbma",
+                    "fetched_at_ms": 1_000_300u64,
+                    "raw_response_hash": hex::encode([6u8; 32]),
+                    "extracted_value": 2386.0,
+                    "status": "ok"
+                }
+            ],
+            "price_fetch_spread_ms": 0u64,
+            "median_production_tonnes": 3672.0,
+            "median_price_usd_cents": 238600u64,
+            "blocks_per_year": 350640u64,
+            "base_reward_opl": base_reward_flakes / FLAKES_PER_OPL,
+            "base_reward_flakes": base_reward_flakes,
+            "derivation_steps": [
+                "median_production = 3672.0",
+                "blocks_per_year = 350640"
+            ],
+            "master_hash": ""
+        });
+        let unsigned = serde_json::to_string_pretty(&attestation).unwrap();
+        let master_hash = compute_ceremony_master_hash(&unsigned).unwrap();
+        let signature = signing_key.sign(&master_hash);
+        attestation["master_hash"] = serde_json::Value::String(hex::encode(master_hash));
+        attestation["operator_signature"] =
+            serde_json::Value::String(hex::encode(signature.to_bytes()));
+
+        let path = dir.path().join("genesis_attestation.json");
+        fs::write(&path, serde_json::to_string_pretty(&attestation).unwrap()).unwrap();
+        path.to_string_lossy().to_string()
+    }
+
     #[test]
     fn node_initialization() {
         let (config, _dir) = test_config();
         let node = OpolysNode::new(config);
         assert_eq!(node.chain.blocking_read().current_height, 0);
+    }
+
+    #[test]
+    fn node_config_uses_mainnet_data_subdir() {
+        let (config, _dir) = test_config();
+        assert!(config.chain_data_dir().ends_with("mainnet"));
+        assert_eq!(config.chain_id(), MAINNET_CHAIN_ID);
+    }
+
+    #[test]
+    fn genesis_attestation_loads_and_verifies() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_test_genesis_attestation(&dir, 333 * FLAKES_PER_OPL);
+        let config = load_genesis_config_from_attestation(&path).unwrap();
+
+        assert_eq!(config.base_reward, 333 * FLAKES_PER_OPL);
+        assert_eq!(config.attestation.annual_production_tonnes, 3672);
+        assert!(config.ceremony_data.is_some());
+    }
+
+    #[test]
+    fn node_uses_ceremony_base_reward_at_genesis() {
+        let (mut config, _node_dir) = test_config();
+        let ceremony_dir = tempfile::tempdir().unwrap();
+        config.genesis_params_path = Some(write_test_genesis_attestation(
+            &ceremony_dir,
+            333 * FLAKES_PER_OPL,
+        ));
+        let node = OpolysNode::new(config);
+
+        assert_eq!(node.chain.blocking_read().base_reward, 333 * FLAKES_PER_OPL);
+    }
+
+    #[test]
+    fn node_rejects_persisted_state_from_different_genesis() {
+        let (mut config, _node_dir) = test_config();
+        let ceremony_a = tempfile::tempdir().unwrap();
+        let ceremony_b = tempfile::tempdir().unwrap();
+        config.genesis_params_path = Some(write_test_genesis_attestation(
+            &ceremony_a,
+            333 * FLAKES_PER_OPL,
+        ));
+
+        {
+            let node = OpolysNode::new(config.clone());
+            let persisted = node.chain.blocking_read().to_persisted();
+            node.store
+                .as_ref()
+                .unwrap()
+                .save_chain_state(&persisted)
+                .unwrap();
+        }
+
+        config.genesis_params_path = Some(write_test_genesis_attestation(
+            &ceremony_b,
+            334 * FLAKES_PER_OPL,
+        ));
+        let node = OpolysNode::new(config);
+        let chain = node.chain.blocking_read();
+
+        assert_eq!(chain.base_reward, 334 * FLAKES_PER_OPL);
+        assert_eq!(chain.current_height, 0);
+    }
+
+    #[test]
+    fn rpc_api_key_conflicts_with_no_rpc_auth() {
+        let parsed = Args::try_parse_from([
+            "opolys",
+            "--genesis-params",
+            "genesis.json",
+            "--rpc-api-key",
+            "secret",
+            "--no-rpc-auth",
+        ]);
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn no_rpc_auth_flag_parses_explicitly() {
+        let parsed = Args::try_parse_from([
+            "opolys",
+            "--genesis-params",
+            "genesis.json",
+            "--no-rpc-auth",
+        ])
+        .unwrap();
+        assert!(parsed.no_rpc_auth);
+        assert!(parsed.rpc_api_key.is_none());
     }
 
     #[test]
@@ -1260,6 +1691,7 @@ mod tests {
         assert_eq!(restored.current_difficulty, chain.current_difficulty);
         assert_eq!(restored.total_issued, chain.total_issued);
         assert_eq!(restored.total_burned, chain.total_burned);
+        assert_eq!(restored.genesis_hash, chain.genesis_hash);
         assert_eq!(restored.latest_block_hash, chain.latest_block_hash);
         assert_eq!(restored.state_root, chain.state_root);
     }
@@ -1270,16 +1702,28 @@ mod tests {
     async fn mine_and_apply_block_links_chain() {
         let (config, _dir) = test_config();
         let node = OpolysNode::new(config);
+        register_test_miner_account(&node).await;
+        node.chain.write().await.current_difficulty = MIN_DIFFICULTY;
 
         // Capture genesis hash before mining
         let genesis_hash = node.chain.read().await.latest_block_hash.clone();
-        assert_ne!(genesis_hash, Hash::zero(), "Genesis hash must be computed, not zero");
+        assert_ne!(
+            genesis_hash,
+            Hash::zero(),
+            "Genesis hash must be computed, not zero"
+        );
 
         // Mine block 1
-        let block = node.mine_block(1_000_000).await.expect("Should mine block 1");
+        let block = node
+            .mine_block(1_000_000)
+            .await
+            .expect("Should mine block 1");
         assert_eq!(block.header.height, 1);
         assert_eq!(block.header.version, BLOCK_VERSION);
-        assert_eq!(block.header.previous_hash, genesis_hash, "Block 1 must reference genesis hash");
+        assert_eq!(
+            block.header.previous_hash, genesis_hash,
+            "Block 1 must reference genesis hash"
+        );
 
         // Apply block 1
         let result = node.apply_block(&block).await;
@@ -1290,9 +1734,15 @@ mod tests {
         assert_eq!(block1_hash, node.chain.read().await.latest_block_hash);
 
         // Mine block 2, should reference block 1
-        let block2 = node.mine_block(1_000_000).await.expect("Should mine block 2");
+        let block2 = node
+            .mine_block(1_000_000)
+            .await
+            .expect("Should mine block 2");
         assert_eq!(block2.header.height, 2);
-        assert_eq!(block2.header.previous_hash, block1_hash, "Block 2 must reference block 1 hash");
+        assert_eq!(
+            block2.header.previous_hash, block1_hash,
+            "Block 2 must reference block 1 hash"
+        );
     }
 
     /// Supply accounting invariant: total_issued - total_burned == sum(account balances)
@@ -1304,11 +1754,20 @@ mod tests {
     async fn supply_accounting_invariant() {
         let (config, _dir) = test_config();
         let node = OpolysNode::new(config);
+        register_test_miner_account(&node).await;
 
-        let verify_invariant = |chain: &ChainState, accounts: &opolys_consensus::account::AccountStore, refiners: &RefinerSet| {
-            let account_total: FlakeAmount = accounts.all_accounts().iter().map(|a| a.balance).sum();
-            let bonded_total: FlakeAmount = refiners.all_refiners().iter().map(|v| v.total_stake()).sum();
-            let unbonding_total: FlakeAmount = refiners.unbonding_queue.iter().map(|u| u.amount).sum();
+        let verify_invariant = |chain: &ChainState,
+                                accounts: &opolys_consensus::account::AccountStore,
+                                refiners: &RefinerSet| {
+            let account_total: FlakeAmount =
+                accounts.all_accounts().iter().map(|a| a.balance).sum();
+            let bonded_total: FlakeAmount = refiners
+                .all_refiners()
+                .iter()
+                .map(|v| v.total_stake())
+                .sum();
+            let unbonding_total: FlakeAmount =
+                refiners.unbonding_queue.iter().map(|u| u.amount).sum();
             let accounted = account_total
                 .saturating_add(bonded_total)
                 .saturating_add(unbonding_total);

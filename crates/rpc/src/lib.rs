@@ -10,8 +10,8 @@
 //! The `BlockSubmission` channel allows external miners to submit blocks
 //! through `opl_submitSolution` for validation and application to the chain.
 
-pub mod server;
 pub mod jsonrpc;
+pub mod server;
 
-pub use server::*;
 pub use jsonrpc::*;
+pub use server::*;

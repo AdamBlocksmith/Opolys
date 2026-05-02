@@ -19,11 +19,15 @@
 //! Refiners earn from block rewards only.
 
 use clap::Parser;
-use opolys_node::{Args, NodeConfig, OpolysNode, ChainState};
+use opolys_networking::{
+    MAINNET_DNS_SEEDS, MAX_SYNC_BLOCKS, NetworkConfig, OpolysNetwork, PeerId, SyncRequest,
+    SyncResponse, resolve_dns_seeds,
+};
+use opolys_node::{Args, ChainState, NodeConfig, OpolysNode};
 use opolys_rpc::RpcState;
-use opolys_rpc::server::{ChainInfo, BlockSubmission, BlockSubmissionResult};
-use opolys_networking::{OpolysNetwork, NetworkConfig, SyncResponse, SyncRequest, MAX_SYNC_BLOCKS,
-    resolve_dns_seeds, MAINNET_DNS_SEEDS, PeerId};
+use opolys_rpc::server::{BlockSubmission, BlockSubmissionResult, ChainInfo};
+use rand::TryRngCore;
+use rand::rngs::OsRng;
 
 /// Maximum gossip blocks accepted from a single peer per second.
 const MAX_BLOCKS_PER_PEER_PER_SECOND: u32 = 10;
@@ -48,6 +52,15 @@ const MAX_PEERS_PER_SUBNET: usize = 3;
 /// Path to the peer address cache file within the node's data directory.
 const KNOWN_PEERS_FILE: &str = "known_peers.txt";
 
+/// Generate a random RPC API key for write/mining methods.
+fn generate_rpc_api_key() -> String {
+    let mut key = [0u8; 32];
+    OsRng
+        .try_fill_bytes(&mut key)
+        .expect("OS randomness unavailable for RPC API key generation");
+    hex::encode(key)
+}
+
 /// Load cached peer addresses from a previous session.
 /// Returns an empty Vec if the file does not exist or cannot be read.
 fn load_known_peers(data_dir: &str) -> Vec<String> {
@@ -68,7 +81,11 @@ fn load_known_peers(data_dir: &str) -> Vec<String> {
 fn save_peer_to_cache(data_dir: &str, addr: &str) {
     let path = std::path::Path::new(data_dir).join(KNOWN_PEERS_FILE);
     use std::io::Write;
-    match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         Ok(mut file) => {
             if let Err(e) = writeln!(file, "{}", addr) {
                 tracing::debug!(error = %e, "Failed to write peer to cache");
@@ -85,7 +102,8 @@ fn extract_subnet_24(addr_str: &str) -> Option<[u8; 3]> {
     for i in 0..parts.len() {
         if parts[i] == "ip4" {
             if let Some(ip_str) = parts.get(i + 1) {
-                let octets: Vec<u8> = ip_str.split('.')
+                let octets: Vec<u8> = ip_str
+                    .split('.')
                     .filter_map(|o| o.parse::<u8>().ok())
                     .collect();
                 if octets.len() == 4 {
@@ -113,6 +131,39 @@ fn chain_state_to_info(chain: &ChainState) -> ChainInfo {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sync_range_caps_count_to_protocol_limit() {
+        let (start, count) = clamp_sync_request_range(10, MAX_SYNC_BLOCKS + 100, 10_000);
+        assert_eq!(start, 10);
+        assert_eq!(count, MAX_SYNC_BLOCKS);
+    }
+
+    #[test]
+    fn sync_range_clamps_start_to_current_height() {
+        let (start, count) = clamp_sync_request_range(10_000, 5, 42);
+        assert_eq!(start, 42);
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn sync_range_does_not_run_past_tip() {
+        let (start, count) = clamp_sync_request_range(40, 10, 42);
+        assert_eq!(start, 40);
+        assert_eq!(count, 3);
+    }
+}
+
+fn clamp_sync_request_range(start_height: u64, count: u64, current_height: u64) -> (u64, u64) {
+    let start = start_height.min(current_height);
+    let available = current_height.saturating_sub(start).saturating_add(1);
+    let count = count.min(MAX_SYNC_BLOCKS).min(available);
+    (start, count)
+}
+
 #[tokio::main]
 async fn main() {
     // Parse CLI arguments (port, data directory, log level, --mine, --no-rpc, etc.)
@@ -122,7 +173,7 @@ async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&args.log_level))
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&args.log_level)),
         )
         .init();
 
@@ -133,6 +184,31 @@ async fn main() {
              Generate the file with the genesis-ceremony tool before starting."
         );
         std::process::exit(1);
+    }
+
+    let provided_rpc_api_key = args.rpc_api_key;
+    let generated_rpc_api_key = !args.no_rpc && !args.no_rpc_auth && provided_rpc_api_key.is_none();
+    let rpc_api_key = if args.no_rpc || args.no_rpc_auth {
+        None
+    } else {
+        Some(provided_rpc_api_key.unwrap_or_else(generate_rpc_api_key))
+    };
+
+    if !args.no_rpc && args.no_rpc_auth {
+        tracing::warn!(
+            "RPC write/mining authentication disabled by --no-rpc-auth. \
+             Use only behind trusted local isolation or external auth."
+        );
+    }
+
+    if generated_rpc_api_key {
+        if let Some(key) = &rpc_api_key {
+            tracing::warn!(
+                rpc_api_key = %key,
+                "Generated RPC API key for write/mining endpoints. \
+                 Pass --rpc-api-key to reuse a stable key across restarts."
+            );
+        }
     }
 
     let config = NodeConfig {
@@ -147,14 +223,14 @@ async fn main() {
         refine: args.refine,
         key_file: args.key_file,
         rpc_listen_addr: args.rpc_listen_addr,
-        rpc_api_key: args.rpc_api_key,
+        rpc_api_key,
         genesis_params_path: args.genesis_params,
     };
 
     tracing::info!(
         port = config.listen_port,
         rpc_port = config.rpc_port,
-        data_dir = %config.data_dir,
+        data_dir = %config.chain_data_dir().display(),
         mining = config.mine,
         validating = config.refine,
         rpc = !config.no_rpc,
@@ -167,10 +243,12 @@ async fn main() {
     // 3. User-provided --bootstrap addresses (always included)
     let all_bootstrap_peers = {
         let mut peers: Vec<String> = Vec::new();
+        let chain_data_dir = config.chain_data_dir();
+        let chain_data_dir = chain_data_dir.to_string_lossy();
 
         if !config.no_bootstrap {
             // 1. Peer cache — peers we successfully connected to in a previous session
-            let cached = load_known_peers(&config.data_dir);
+            let cached = load_known_peers(&chain_data_dir);
             if !cached.is_empty() {
                 tracing::info!(count = cached.len(), "Loaded peers from cache");
                 peers.extend(cached);
@@ -190,7 +268,10 @@ async fn main() {
 
         // 3. User-provided --bootstrap addresses — always added regardless of --no-bootstrap
         if !config.bootstrap_peers.is_empty() {
-            tracing::info!(count = config.bootstrap_peers.len(), "Adding user-provided bootstrap peers");
+            tracing::info!(
+                count = config.bootstrap_peers.len(),
+                "Adding user-provided bootstrap peers"
+            );
             peers.extend(config.bootstrap_peers.clone());
         }
 
@@ -201,6 +282,7 @@ async fn main() {
     let net_config = NetworkConfig {
         listen_port: config.listen_port,
         bootstrap_peers: all_bootstrap_peers,
+        keypair_path: Some(config.chain_data_dir().join("network_keypair.ed25519")),
         ..Default::default()
     };
 
@@ -213,7 +295,10 @@ async fn main() {
             Some(network)
         }
         Err(e) => {
-            tracing::warn!("P2P networking failed to start: {}. Running without P2P.", e);
+            tracing::warn!(
+                "P2P networking failed to start: {}. Running without P2P.",
+                e
+            );
             None
         }
     };
@@ -299,7 +384,9 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
     } else if config.no_rpc {
         tracing::info!("RPC: disabled (run without --no-rpc to enable)");
     } else {
-        tracing::warn!("RPC: disabled — no persistence layer available. Run with a data directory to enable RPC.");
+        tracing::warn!(
+            "RPC: disabled — no persistence layer available. Run with a data directory to enable RPC."
+        );
     }
 
     // Spawn a task that processes blocks submitted by external miners.
@@ -387,8 +474,7 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
                 // Scale attempts with difficulty: at difficulty 1, use BASE_ATTEMPTS;
                 // at difficulty 10, use BASE_ATTEMPTS * 10, etc. Capped at MAX_ATTEMPTS.
                 let difficulty = mining_node.chain.read().await.current_difficulty;
-                let attempts = (BASE_ATTEMPTS * difficulty.max(1))
-                    .min(MAX_ATTEMPTS);
+                let attempts = (BASE_ATTEMPTS * difficulty.max(1)).min(MAX_ATTEMPTS);
 
                 match mining_node.mine_block(attempts).await {
                     Some(block) => {
@@ -426,7 +512,8 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
                     None => {
                         // No block found within the attempt limit — sleep briefly
                         // before retrying to avoid spinning the CPU indefinitely
-                        tokio::time::sleep(std::time::Duration::from_millis(RETRY_BACKOFF_MS)).await;
+                        tokio::time::sleep(std::time::Duration::from_millis(RETRY_BACKOFF_MS))
+                            .await;
                     }
                 }
             }
@@ -435,7 +522,9 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
     }
 
     // Optionally start the refiner block production loop
-    let _refiner_handle: Option<tokio::task::JoinHandle<()>> = if config.refine && node.signing_key.is_some() {
+    let _refiner_handle: Option<tokio::task::JoinHandle<()>> = if config.refine
+        && node.signing_key.is_some()
+    {
         let refining_node = node.clone();
         let refining_broadcast = block_broadcast_tx.clone();
         let refining_chain_info = chain_info.clone();
@@ -449,7 +538,10 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
                 };
 
                 // Wait for the target block time
-                tokio::time::sleep(std::time::Duration::from_millis(opolys_core::BLOCK_TARGET_TIME_MS)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    opolys_core::BLOCK_TARGET_TIME_MS,
+                ))
+                .await;
 
                 // Check if a miner block arrived while we waited
                 let height_after = {
@@ -515,7 +607,7 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
     let network_handle: Option<tokio::task::JoinHandle<()>> = if let Some(mut net) = network {
         let net_node = node.clone();
         let net_chain_info = chain_info.clone();
-        let net_data_dir = config.data_dir.clone();
+        let net_data_dir = config.chain_data_dir().to_string_lossy().to_string();
 
         // A Notify fired when the first peer connects. A background task uses this to
         // print a helpful error message if no peers connect within 30 seconds.
@@ -526,7 +618,8 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
                 let connected = tokio::time::timeout(
                     std::time::Duration::from_secs(30),
                     checker_notify.notified(),
-                ).await;
+                )
+                .await;
                 if connected.is_err() {
                     tracing::warn!(
                         "Could not connect to any peers. \
@@ -540,18 +633,26 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
             tracing::info!("P2P network event loop started");
             let mut first_peer_seen = false;
             // Per-peer strike counts (accumulated from bad blocks)
-            let mut peer_strikes: std::collections::HashMap<PeerId, u32> = std::collections::HashMap::new();
+            let mut peer_strikes: std::collections::HashMap<PeerId, u32> =
+                std::collections::HashMap::new();
             // Per-peer gossip rate limit state (rolling 1-second window)
-            let mut peer_rate_limits: std::collections::HashMap<PeerId, PeerRateLimit> = std::collections::HashMap::new();
+            let mut peer_rate_limits: std::collections::HashMap<PeerId, PeerRateLimit> =
+                std::collections::HashMap::new();
             // Low-fee tx queue: (raw bytes, time enqueued). Drained after DELAY_LOW_FEE_MS.
             let mut pending_low_fee_txs: Vec<(Vec<u8>, std::time::Instant)> = Vec::new();
             // FIX 7: peers that have passed the memory-fingerprinting challenge
-            let mut verified_peers: std::collections::HashSet<PeerId> = std::collections::HashSet::new();
+            let mut verified_peers: std::collections::HashSet<PeerId> =
+                std::collections::HashSet::new();
             // FIX 7: (expected_hash, sent_at) for pending outbound challenges
-            let mut pending_challenges: std::collections::HashMap<PeerId, (u64, std::time::Instant)> = std::collections::HashMap::new();
+            let mut pending_challenges: std::collections::HashMap<
+                PeerId,
+                (u64, std::time::Instant),
+            > = std::collections::HashMap::new();
             // Subnet diversity: count of peers per /24 prefix and reverse map for cleanup
-            let mut subnet_counts: std::collections::HashMap<[u8; 3], usize> = std::collections::HashMap::new();
-            let mut peer_subnets: std::collections::HashMap<PeerId, [u8; 3]> = std::collections::HashMap::new();
+            let mut subnet_counts: std::collections::HashMap<[u8; 3], usize> =
+                std::collections::HashMap::new();
+            let mut peer_subnets: std::collections::HashMap<PeerId, [u8; 3]> =
+                std::collections::HashMap::new();
             let mut low_fee_drain_interval =
                 tokio::time::interval(std::time::Duration::from_millis(1_000));
             // Check for timed-out challenges every 5 seconds
@@ -686,7 +787,11 @@ struct PeerRateLimit {
 
 impl PeerRateLimit {
     fn new() -> Self {
-        PeerRateLimit { block_count: 0, tx_count: 0, window_start: std::time::Instant::now() }
+        PeerRateLimit {
+            block_count: 0,
+            tx_count: 0,
+            window_start: std::time::Instant::now(),
+        }
     }
 
     /// Reset counters if the 1-second window has elapsed.
@@ -738,7 +843,9 @@ async fn handle_network_event(
 
             // Per-peer gossip rate limiting
             {
-                let rl = peer_rate_limits.entry(source).or_insert_with(PeerRateLimit::new);
+                let rl = peer_rate_limits
+                    .entry(source)
+                    .or_insert_with(PeerRateLimit::new);
                 rl.maybe_reset();
                 rl.block_count += 1;
                 if rl.block_count > block_limit {
@@ -781,7 +888,8 @@ async fn handle_network_event(
                     // target before acquiring the expensive apply_block() write lock.
                     // Refiner blocks (no pow_proof) skip this entirely.
                     if block.header.pow_proof.is_some() {
-                        let target = opolys_consensus::difficulty_to_target(block.header.difficulty);
+                        let target =
+                            opolys_consensus::difficulty_to_target(block.header.difficulty);
                         // target == 0 means difficulty >= 64; skip and let apply_block handle it.
                         if target > 0 {
                             match opolys_consensus::compute_pow_hash_value(&block.header) {
@@ -837,7 +945,8 @@ async fn handle_network_event(
                             *strikes += 1;
                             if *strikes >= max_strikes {
                                 tracing::warn!(peer = %source, strikes = *strikes, "Banning peer after repeated invalid blocks");
-                                node.ban_peer(&source.to_string(), "invalid_block", false).await;
+                                node.ban_peer(&source.to_string(), "invalid_block", false)
+                                    .await;
                                 if let Err(e) = net.disconnect_peer(source).await {
                                     tracing::debug!(peer = %source, error = %e, "Failed to disconnect peer");
                                 }
@@ -870,7 +979,9 @@ async fn handle_network_event(
 
             // FIX 1: Per-peer gossip rate limiting
             {
-                let rl = peer_rate_limits.entry(source).or_insert_with(PeerRateLimit::new);
+                let rl = peer_rate_limits
+                    .entry(source)
+                    .or_insert_with(PeerRateLimit::new);
                 rl.maybe_reset();
                 rl.tx_count += 1;
                 if rl.tx_count > tx_limit {
@@ -894,14 +1005,16 @@ async fn handle_network_event(
                         if matches!(e, opolys_core::OpolysError::InvalidSignature) {
                             // FIX 5: invalid ed25519 signature — immediate permanent ban
                             tracing::warn!(peer = %source, "Invalid signature: immediate permanent ban");
-                            node.ban_peer(&source.to_string(), "invalid_signature", true).await;
+                            node.ban_peer(&source.to_string(), "invalid_signature", true)
+                                .await;
                             let _ = net.disconnect_peer(source).await;
                             verified_peers.remove(&source);
                             pending_challenges.remove(&source);
                         } else if e.to_string().contains("chain_id") {
                             // FIX 6: wrong chain_id — 24h ban
                             tracing::warn!(peer = %source, error = %e, "Wrong chain_id: 24h ban");
-                            node.ban_peer(&source.to_string(), "wrong_chain_id", false).await;
+                            node.ban_peer(&source.to_string(), "wrong_chain_id", false)
+                                .await;
                             let _ = net.disconnect_peer(source).await;
                             verified_peers.remove(&source);
                             pending_challenges.remove(&source);
@@ -919,7 +1032,10 @@ async fn handle_network_event(
                         .unwrap_or_default()
                         .as_secs();
                     // Look up confirmed account nonce and suggested fee before taking the mempool lock.
-                    let account_nonce = node.accounts.read().await
+                    let account_nonce = node
+                        .accounts
+                        .read()
+                        .await
                         .get_account(&tx.sender)
                         .map(|a| a.nonce)
                         .unwrap_or(0);
@@ -927,7 +1043,13 @@ async fn handle_network_event(
                     {
                         // All valid txs enter the mempool immediately regardless of fee tier.
                         let mut mempool = node.mempool.write().await;
-                        match mempool.add_transaction(tx, priority, now, account_nonce, suggested_fee) {
+                        match mempool.add_transaction(
+                            tx,
+                            priority,
+                            now,
+                            account_nonce,
+                            suggested_fee,
+                        ) {
                             Ok(()) => {
                                 tracing::debug!("Added gossiped transaction to mempool");
                             }
@@ -948,13 +1070,22 @@ async fn handle_network_event(
                             tracing::debug!("Failed to relay high-fee tx: {}", e);
                         }
                     } else if tx_fee >= suggested_fee {
-                        tracing::debug!(tx_fee, suggested_fee, "Normal-fee tx: relaying immediately");
+                        tracing::debug!(
+                            tx_fee,
+                            suggested_fee,
+                            "Normal-fee tx: relaying immediately"
+                        );
                         if let Err(e) = net.broadcast_transaction(tx_data_for_rebroadcast).await {
                             tracing::debug!("Failed to relay normal-fee tx: {}", e);
                         }
                     } else {
-                        tracing::debug!(tx_fee, suggested_fee, "Low-fee tx: queued for delayed relay");
-                        pending_low_fee_txs.push((tx_data_for_rebroadcast, std::time::Instant::now()));
+                        tracing::debug!(
+                            tx_fee,
+                            suggested_fee,
+                            "Low-fee tx: queued for delayed relay"
+                        );
+                        pending_low_fee_txs
+                            .push((tx_data_for_rebroadcast, std::time::Instant::now()));
                     }
                 }
                 Err(e) => {
@@ -1021,7 +1152,10 @@ async fn handle_network_event(
                 tracing::debug!(peer = %peer_id, error = %e, "Failed to request sync blocks from peer");
             }
         }
-        opolys_networking::OpolysNetworkEvent::PeerIdentified { peer_id, agent_version } => {
+        opolys_networking::OpolysNetworkEvent::PeerIdentified {
+            peer_id,
+            agent_version,
+        } => {
             // FIX 7: non-opolys peers (wallets, light clients) don't have the dataset;
             // skip the challenge and add them to verified immediately.
             if !agent_version.contains("/opolys/") {
@@ -1079,7 +1213,11 @@ async fn handle_network_event(
                 }
             }
         }
-        opolys_networking::OpolysNetworkEvent::SyncRequestReceived { peer_id, request_id, request } => {
+        opolys_networking::OpolysNetworkEvent::SyncRequestReceived {
+            peer_id,
+            request_id,
+            request,
+        } => {
             tracing::info!(
                 peer = %peer_id,
                 start_height = request.start_height,
@@ -1088,9 +1226,11 @@ async fn handle_network_event(
             );
             // Serve blocks from storage
             let mut blocks = Vec::new();
+            let current_height = node.chain.read().await.current_height;
+            let (from_height, count) =
+                clamp_sync_request_range(request.start_height, request.count, current_height);
             if let Some(ref store) = node.store {
-                let count = request.count.min(opolys_networking::MAX_SYNC_BLOCKS);
-                for height in request.start_height..request.start_height + count {
+                for height in from_height..from_height.saturating_add(count) {
                     match store.load_block(height) {
                         Ok(Some(block)) => {
                             if let Ok(block_bytes) = borsh::to_vec(&block) {
@@ -1105,13 +1245,20 @@ async fn handle_network_event(
                     }
                 }
             }
-            let from_height = request.start_height;
-            let response = SyncResponse { blocks, from_height };
+            let response = SyncResponse {
+                blocks,
+                from_height,
+            };
             if let Err(e) = net.respond_sync_request(request_id, response).await {
                 tracing::warn!(peer = %peer_id, error = %e, "Failed to send sync response");
             }
         }
-        opolys_networking::OpolysNetworkEvent::ChallengeRequestReceived { peer_id, request_id, height, nonce } => {
+        opolys_networking::OpolysNetworkEvent::ChallengeRequestReceived {
+            peer_id,
+            request_id,
+            height,
+            nonce,
+        } => {
             // FIX 7: compute EVO-OMAP hash and reply to prove we have the dataset
             let hash_val = opolys_consensus::compute_challenge_hash(height, nonce);
             if let Err(e) = net.respond_challenge(request_id, hash_val).await {
@@ -1128,7 +1275,8 @@ async fn handle_network_event(
                     tracing::info!(peer = %peer_id, "Peer passed memory challenge — verified");
                 } else {
                     tracing::warn!(peer = %peer_id, "Peer failed memory challenge — wrong hash, permanent ban");
-                    node.ban_peer(&peer_id.to_string(), "failed_memory_challenge", true).await;
+                    node.ban_peer(&peer_id.to_string(), "failed_memory_challenge", true)
+                        .await;
                     if let Err(e) = net.disconnect_peer(peer_id).await {
                         tracing::debug!(peer = %peer_id, error = %e, "Failed to disconnect after challenge failure");
                     }

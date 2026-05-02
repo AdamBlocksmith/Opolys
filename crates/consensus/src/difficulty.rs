@@ -17,8 +17,8 @@
 //! the u64-target model (u64::MAX / difficulty). The conversion to a u64 target
 //! for vein yield is handled by `difficulty_to_target()` in emission.rs.
 
-use opolys_core::{MIN_DIFFICULTY, EPOCH, BlockHeight};
 use crate::emission::difficulty_to_target;
+use opolys_core::{BlockHeight, EPOCH, MIN_DIFFICULTY};
 
 /// The computed difficulty target for a given block.
 ///
@@ -90,7 +90,11 @@ pub fn compute_next_difficulty(
 /// There is **no clamp** on adjustments — difficulty adjusts freely based on
 /// observed block times. The only floor is `MIN_DIFFICULTY` (1), which is a
 /// mathematical requirement (difficulty 0 would make all hashes valid).
-fn compute_retarget(current_difficulty: u64, current_height: BlockHeight, block_timestamps: &[u64]) -> u64 {
+fn compute_retarget(
+    current_difficulty: u64,
+    current_height: BlockHeight,
+    block_timestamps: &[u64],
+) -> u64 {
     // Not enough blocks for a retarget epoch yet — hold at current difficulty.
     if current_height < EPOCH {
         return current_difficulty.max(MIN_DIFFICULTY);
@@ -232,7 +236,11 @@ mod tests {
         // 840s per block × 960 blocks = 806,400s actual
         // Expected: 90,000ms × 960 = 86,400,000ms = 86,400s
         // Ratio: 86,400,000 / 806,400,000 ≈ 0.107x, so difficulty drops from 100 to ~11
-        assert!(new_diff < 100, "Difficulty should drop when blocks are too slow: got {}", new_diff);
+        assert!(
+            new_diff < 100,
+            "Difficulty should drop when blocks are too slow: got {}",
+            new_diff
+        );
     }
 
     #[test]

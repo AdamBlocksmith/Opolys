@@ -23,7 +23,6 @@
 
 use opolys_core::{FlakeAmount, MIN_DIFFICULTY};
 
-
 /// Compute the target value for EVO-OMAP difficulty in u64 space.
 ///
 /// EVO-OMAP difficulty D means the 256-bit SHA3-256 hash must have at least
@@ -52,7 +51,11 @@ pub fn difficulty_to_target(difficulty: u64) -> u64 {
 /// The target is derived from EVO-OMAP difficulty (leading zero bits):
 /// `target = 2^(64-D) - 1`, so at difficulty 1 the target is u64::MAX
 /// and at difficulty 20 the target is ~2^44.
-pub fn compute_block_reward(base_reward: FlakeAmount, difficulty: u64, pow_hash_value: u64) -> FlakeAmount {
+pub fn compute_block_reward(
+    base_reward: FlakeAmount,
+    difficulty: u64,
+    pow_hash_value: u64,
+) -> FlakeAmount {
     let effective_difficulty = difficulty.max(MIN_DIFFICULTY);
     let base = base_reward / effective_difficulty;
     let yield_milli = compute_vein_yield(difficulty, pow_hash_value);
@@ -193,7 +196,10 @@ pub fn compute_stake_coverage(total_bonded: FlakeAmount, total_issued: FlakeAmou
 /// moving average with a smoothing factor of 0.1. This provides a market-
 /// driven fee signal without governance — fees are purely between transactors
 /// and block producers.
-pub fn compute_suggested_fee(previous_block_fees: FlakeAmount, previous_suggested_fee: FlakeAmount) -> FlakeAmount {
+pub fn compute_suggested_fee(
+    previous_block_fees: FlakeAmount,
+    previous_suggested_fee: FlakeAmount,
+) -> FlakeAmount {
     // EMA with α = 0.1: new = α × current + (1 - α) × old
     // In integer arithmetic: new = (current + 9 × old) / 10
     let current = previous_block_fees;
@@ -251,7 +257,14 @@ mod tests {
         let mut prev = difficulty_to_target(1);
         for d in 2..=64 {
             let curr = difficulty_to_target(d);
-            assert!(curr <= prev, "target({}) = {} > target({}) = {}", d, curr, d - 1, prev);
+            assert!(
+                curr <= prev,
+                "target({}) = {} > target({}) = {}",
+                d,
+                curr,
+                d - 1,
+                prev
+            );
             prev = curr;
         }
     }
@@ -262,7 +275,10 @@ mod tests {
     fn vein_yield_at_min_difficulty() {
         // At difficulty 1, target = 2^63 - 1. A very low hash gives high yield.
         let yield_val = compute_vein_yield(1, 1);
-        assert!(yield_val > 1000, "yield should exceed 1.0x for a very good hash");
+        assert!(
+            yield_val > 1000,
+            "yield should exceed 1.0x for a very good hash"
+        );
     }
 
     #[test]
@@ -330,10 +346,18 @@ mod tests {
         assert!(ln_milli(1000) < 5);
         // ln(2.0) ≈ 693 milli (i.e., 0.693)
         let ln2 = ln_milli(2000);
-        assert!(ln2 > 680 && ln2 < 710, "ln(2) = {} milli, expected ~693", ln2);
+        assert!(
+            ln2 > 680 && ln2 < 710,
+            "ln(2) = {} milli, expected ~693",
+            ln2
+        );
         // ln(10) ≈ 2303 milli
         let ln10 = ln_milli(10000);
-        assert!(ln10 > 2280 && ln10 < 2330, "ln(10) = {} milli, expected ~2303", ln10);
+        assert!(
+            ln10 > 2280 && ln10 < 2330,
+            "ln(10) = {} milli, expected ~2303",
+            ln10
+        );
     }
 
     #[test]
@@ -404,11 +428,19 @@ mod tests {
         // At difficulty 10, target = 2^54 - 1
         // A hash of 1 gives: sqrt(ln(target/1)) * 1000 ≈ sqrt(37.5) * 1000 ≈ 6123
         let yield_val = compute_vein_yield(10, 1);
-        assert!(yield_val > 5000, "difficulty 10 with hash 1 should give significant yield, got {}", yield_val);
+        assert!(
+            yield_val > 5000,
+            "difficulty 10 with hash 1 should give significant yield, got {}",
+            yield_val
+        );
 
         // At difficulty 1, target = 2^63 - 1
         // A hash of 1 gives: sqrt(ln(2^63 - 1)) ≈ sqrt(43.7) ≈ 6.61
         let yield_val = compute_vein_yield(1, 1);
-        assert!(yield_val > 5500, "difficulty 1 with hash 1 should give significant yield, got {}", yield_val);
+        assert!(
+            yield_val > 5500,
+            "difficulty 1 with hash 1 should give significant yield, got {}",
+            yield_val
+        );
     }
 }

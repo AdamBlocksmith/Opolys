@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 pub const MAX_SYNC_BLOCKS: u64 = SYNC_MAX_BLOCKS_PER_REQUEST;
 /// Maximum number of headers that can be requested in a single sync request.
 pub const MAX_SYNC_HEADERS: u64 = SYNC_MAX_HEADERS_PER_REQUEST;
+/// Maximum decoded sync response payload size in bytes.
+pub const MAX_SYNC_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
 
 /// Request for a range of full blocks from a peer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,6 +30,18 @@ pub struct SyncResponse {
     pub blocks: Vec<Vec<u8>>,
     /// The height of the first block in the response.
     pub from_height: BlockHeight,
+}
+
+impl SyncResponse {
+    /// Total serialized block bytes carried by this response.
+    pub fn payload_size_bytes(&self) -> usize {
+        self.blocks.iter().map(Vec::len).sum()
+    }
+
+    /// Whether the response stays within the mainnet sync payload limit.
+    pub fn is_within_size_limit(&self) -> bool {
+        self.payload_size_bytes() <= MAX_SYNC_RESPONSE_BYTES
+    }
 }
 
 /// Request for a range of block headers (without transactions).
@@ -59,5 +73,29 @@ impl Default for SyncConfig {
             request_timeout_secs: 30,
             parallel_peer_count: 3,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sync_response_size_limit_accepts_small_payloads() {
+        let response = SyncResponse {
+            blocks: vec![vec![0u8; 1024], vec![1u8; 2048]],
+            from_height: 1,
+        };
+        assert_eq!(response.payload_size_bytes(), 3072);
+        assert!(response.is_within_size_limit());
+    }
+
+    #[test]
+    fn sync_response_size_limit_rejects_oversized_payloads() {
+        let response = SyncResponse {
+            blocks: vec![vec![0u8; MAX_SYNC_RESPONSE_BYTES + 1]],
+            from_height: 1,
+        };
+        assert!(!response.is_within_size_limit());
     }
 }

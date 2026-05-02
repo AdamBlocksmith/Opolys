@@ -227,7 +227,7 @@ A block must have **exactly one** of: PoW proof or refiner signature.
 
 The base block reward is determined by the **genesis ceremony** from live gold production data. The ceremony fetches data from 7+ independent sources (USGS, WGC, LBMA, etc.), applies a trimmed median with outlier detection, and produces a cryptographically attested, operator-signed output. The resulting value is stored in `ChainState.base_reward`.
 
-The constant `BASE_REWARD` (332 OPL) in `constants.rs` is a **default fallback** used by testnet and pre-ceremony chains. The actual mainnet value may differ based on the ceremony's gold data.
+The constant `BASE_REWARD` (332 OPL) in `constants.rs` is a **default fallback** used by pre-ceremony development builds. The actual mainnet value may differ based on the ceremony's gold data.
 
 Default derivation (2024 USGS/WGC data):
 
@@ -262,6 +262,8 @@ The genesis ceremony (`scripts/genesis_ceremony/`) determines the mainnet `BASE_
 3. **Computation**: `BASE_REWARD = floor(median_production_tonnes × 32,150.7 / blocks_per_year)`
 4. **Attestation**: The operator signs a Blake3-256 master hash of all source data with ed25519. The attestation, derivation steps, and verification guide are written to `genesis_attestation.json`, `genesis_params.rs`, and `genesis_verification.txt`.
 5. **5-minute window**: The entire ceremony must complete within 5 minutes. Source fetches timeout at 30 seconds. A warning is emitted if price sources are fetched >60 seconds apart.
+
+Node startup consumes `genesis_attestation.json` via `--genesis-params`, verifies the attestation master hash and operator ed25519 signature, then derives `GenesisConfig.base_reward` from `base_reward_flakes`. The generated `genesis_params.rs` remains a human-readable reference artifact, not the runtime input.
 
 The ceremony has three modes:
 - **Default**: Fetch all sources concurrently; fall back to manual prompt for any that fail
@@ -905,21 +907,23 @@ Every bug below includes: **What it is**, **Why it matters**, and **How to fix i
 
 ### CRITICAL (4)
 
-#### C1: Testnet/mainnet shared data directory
+#### C1: Non-mainnet state can be loaded as mainnet
 **Location:** `node.rs:395-458`
-**Status:** OPEN
+**Status:** **FIXED**
 
-**What it is:** The node uses a single `data_dir` (default `./data`) regardless of chain. If a user runs with `--testnet` (which loads testnet genesis), then restarts without `--testnet`, the mainnet node loads the testnet balances and refiner set from the same RocksDB database. The genesis accounts, chain state, and refiners from the testnet run are accepted as valid mainnet state.
+**What it is:** The node used a single `data_dir` (default `./data`) without recording the chain id in persisted state. If any non-mainnet or stale experimental database was opened by a mainnet node, its balances and refiner set could be accepted as mainnet state.
 
-**Why it matters:** An attacker could inflate balances on testnet, then switch to mainnet mode and spend those inflated balances on mainnet. This is a chain-splitting vulnerability — different nodes with different histories would disagree on account balances.
+**Why it matters:** Mainnet must fail closed when disk state does not explicitly identify itself as Opolys mainnet. Otherwise, different nodes with different histories could disagree on account balances.
 
-**How to fix:** Add a `chain_id` field to `PersistedChainState`. On load, compare it against `MAINNET_CHAIN_ID`. If they don't match, refuse to load and start fresh with a warning. Also partition the data directory: use `data_dir/mainnet/` vs `data_dir/testnet/` subdirectories.
+**How to fix:** Add a `chain_id` field to `PersistedChainState`. On load, compare it against `MAINNET_CHAIN_ID`. If it doesn't match, refuse to load and start fresh with a warning. Also make the mainnet data directory explicit: use `data_dir/mainnet/`.
+
+**How fixed:** `PersistedChainState` now stores `chain_id`, `ChainState::to_persisted()` writes `MAINNET_CHAIN_ID`, and node startup ignores persisted state whose `chain_id` does not match the configured network. Runtime persistence, ban lists, and peer caches now use `NodeConfig::chain_data_dir()` (`<data_dir>/mainnet`) instead of the base data directory.
 
 ---
 
 #### C2: Mnemonic passed as CLI argument
 **Location:** `wallet/main.rs:41-118`
-**Status:** OPEN
+**Status:** **FIXED**
 
 **What it is:** The wallet CLI accepts the 24-word mnemonic as a positional argument (e.g., `opl transfer "word1 word2 ... word24" ...`). This means the seed phrase is visible in `ps aux`, shell history (`~/.bash_history`, `~/.zsh_history`), and `/proc/<pid>/cmdline` on Linux. Anyone with shell access can recover the private key.
 
@@ -927,11 +931,13 @@ Every bug below includes: **What it is**, **Why it matters**, and **How to fix i
 
 **How to fix:** Replace positional mnemonic arguments with `OPOLYS_MNEMONIC` environment variable or interactive stdin prompt via `rpassword::read_password()`. The `Address`, `Transfer`, `Bond`, `Unbond` subcommands should accept `--from-env` (reads `OPOLYS_MNEMONIC`) or `--from-stdin` (reads interactively). Mnemonic is never a CLI arg.
 
+**How fixed:** `Address`, `Transfer`, `Bond`, and `Unbond` no longer accept mnemonic positionals. Each command now uses a shared `MnemonicInput` with `--from-env` for `OPOLYS_MNEMONIC` or `--from-stdin` for a hidden prompt via `rpassword`. If neither flag is provided, the command fails before deriving keys.
+
 ---
 
 #### C3: No memory zeroing for private keys
 **Location:** `wallet/bip39.rs:94` (`DerivedSeed`), `wallet/key.rs:60` (`KeyPair`)
-**Status:** OPEN
+**Status:** **FIXED**
 
 **What it is:** `DerivedSeed` and `KeyPair` both derive `Debug`, meaning their fields can be printed to logs. Neither type implements `Zeroize` — when they go out of scope, private key material remains in memory until the allocator reuses those pages. Stack temporaries (like `seed` at `key.rs:75`) are also not zeroed.
 
@@ -939,11 +945,13 @@ Every bug below includes: **What it is**, **Why it matters**, and **How to fix i
 
 **How to fix:** (1) Remove `#[derive(Debug)]` from both `DerivedSeed` and `KeyPair`. Implement manual `Debug` impls that print `"DerivedSeed([REDACTED])"` and `"KeyPair { signing_key: [REDACTED], ... }"`. (2) Add `impl Zeroize` for both types using the `zeroize` crate. In `Drop`, call `self.zeroize()`. (3) Zero the `seed` array in `KeyPair::generate()` after constructing the `SigningKey`.
 
+**How fixed:** `Bip39Mnemonic`, `DerivedSeed`, and `KeyPair` now use manual redacted `Debug` implementations. `DerivedSeed` zeroizes its 64-byte seed on drop. `KeyPair` stores its private seed in `Zeroizing<[u8; 32]>` instead of keeping a long-lived signing key, reconstructing a temporary `SigningKey` only when signing. SLIP-0010 private key, chain code, and HMAC result temporaries are zeroized after use, and persisted key-file byte copies are zeroized after writing.
+
 ---
 
 #### C4: RPC write/mining endpoints unauthenticated by default
 **Location:** `rpc/server.rs:169-190, 221-222`
-**Status:** OPEN
+**Status:** **FIXED**
 
 **What it is:** The RPC server has an optional `api_key` configuration, but it defaults to `None`. When `api_key` is `None`, write endpoints (`opl_sendTransaction`, `opl_getMiningJob`, `opl_submitSolution`) are accessible without any authentication. Additionally, at lines 180 and 185, the key comparison uses `==` on strings, which short-circuits on the first mismatching byte, enabling timing attacks.
 
@@ -951,13 +959,15 @@ Every bug below includes: **What it is**, **Why it matters**, and **How to fix i
 
 **How to fix:** (1) Default to a randomly-generated API key printed at startup. Only allow `None` (no auth) via explicit `--no-rpc-auth` flag. (2) Replace `==` with constant-time comparison via `subtle::ConstantTimeEq`.
 
+**How fixed:** Node startup now generates a random 32-byte hex RPC API key when RPC is enabled and `--rpc-api-key` is omitted, printing it once in startup logs. Unauthenticated write/mining RPC is only reachable through the explicit `--no-rpc-auth` flag. `check_api_key()` now uses `subtle::ConstantTimeEq` for bearer and `X-Api-Key` comparisons.
+
 ---
 
 ### HIGH (9 — H3 and H4 fixed)
 
 #### H1: No hash domain separation
 **Location:** `crypto/hash.rs`, `wallet/signing.rs:145`, `node.rs:754`, multiple
-**Status:** OPEN
+**Status:** **FIXED**
 
 **What it is:** All Blake3-256 hashes are computed over raw domain data with no prefix tag. The same hash function is used for: transaction IDs, block hashes, ObjectIds, state roots, Merkle roots, and refiner signatures. A hash collision in one domain could be confused with a hash in another.
 
@@ -965,15 +975,19 @@ Every bug below includes: **What it is**, **Why it matters**, and **How to fix i
 
 **How to fix:** Add domain tags to every `Blake3Hasher::update()` call. Define constants: `DOMAIN_TX_ID`, `DOMAIN_BLOCK_HASH`, `DOMAIN_OBJECT_ID`, `DOMAIN_STATE_ROOT`, `DOMAIN_TX_ROOT`, `DOMAIN_REFINER_SIG`. Prepend `hasher.update(domain_tag)` before `hasher.update(data)` in every hashing call.
 
+**How fixed:** `opolys-crypto` now defines explicit domains for transaction IDs, block hashes, ObjectIds, state roots, transaction roots, transaction signatures, and refiner block signatures. Wallet/execution transaction IDs use `DOMAIN_TX_ID`; block hashes and transaction roots are tagged in consensus; account/refiner/genesis/chain state roots are tagged; ObjectId derivation is tagged, including the genesis key helper.
+
 ---
 
 #### H2: No signing domain separation
 **Location:** `wallet/signing.rs:46`, `node.rs:754`
-**Status:** OPEN
+**Status:** **FIXED**
 
 **What it is:** The same ed25519 key signs both transactions and refiner blocks using the same serialization format. At `signing.rs:46`, the signed data is `borsh(sender, action, fee, nonce, chain_id)`. At `node.rs:754`, the refiner signature signs the raw block hash bytes. A specially crafted transaction could be a valid signature of a block hash, or vice versa.
 
 **How to fix:** Prepend a domain tag to all signed data: Transactions sign `b"OPL_TX_V1" || borsh(...)`; Refiner blocks sign `b"OPL_REF_BLOCK_V1" || block_hash_bytes`.
+
+**How fixed:** Transaction signing and verification now use `transaction_signing_payload()` (`OPL_TX_V1 || borsh(...)`). Refiner block signing, signature verification, and double-sign evidence verification now use `refiner_block_signing_payload()` (`OPL_REF_BLOCK_V1 || block_hash`).
 
 ---
 
@@ -999,55 +1013,65 @@ Every bug below includes: **What it is**, **Why it matters**, and **How to fix i
 
 #### H5: RocksDB non-atomic cross-CF writes
 **Location:** `store.rs:103,110, 280,287`
-**Status:** OPEN
+**Status:** **FIXED**
 
 **What it is:** Each column family is saved independently. `save_block()` writes the block, then `save_block_indexes()` writes indexes separately. A crash between them leaves the database inconsistent.
 
 **How to fix:** Use RocksDB `WriteBatch` to batch all writes within a single atomic commit per block application.
 
+**How fixed:** `BlockchainStore::save_applied_block_atomic()` now writes the block, block hash index, transaction indexes, latest height, chain state, accounts, and refiner snapshot in one RocksDB `WriteBatch`. Node block persistence now uses this atomic path.
+
 ---
 
 #### H6: No size limit on sync response bodies
 **Location:** `network.rs:204-207`
-**Status:** OPEN
+**Status:** **FIXED**
 
 **What it is:** `request_response::Config::default()` places no limit on response body size. A malicious peer can respond with a multi-gigabyte CBOR payload, causing OOM.
 
 **How to fix:** Set `with_max_response_size(10 * 1024 * 1024)` and `with_request_timeout(Duration::from_secs(sync_config.request_timeout_secs))`.
 
+**How fixed:** The libp2p CBOR codec already caps response reads at 10 MiB; Opolys now also exposes `MAX_SYNC_RESPONSE_BYTES` and drops/refuses decoded sync responses whose serialized block payload exceeds that limit.
+
 ---
 
 #### H7: request_timeout_secs defined but never applied
 **Location:** `network.rs:204-207`, `sync.rs:49`
-**Status:** OPEN
+**Status:** **FIXED**
 
 **What it is:** `SyncConfig.request_timeout_secs: 30` is defined but never passed to the `request_response::Config`. The config uses `Config::default()` which ignores it.
 
 **How to fix:** Wire the timeout: `.with_request_timeout(Duration::from_secs(config.sync_config.request_timeout_secs))`.
 
+**How fixed:** Sync request-response now builds its `request_response::Config` with `config.sync_config.request_timeout_secs`.
+
 ---
 
 #### H8: Block indexes saved separately from block data
 **Location:** `store.rs:155 vs 95`
-**Status:** OPEN
+**Status:** **FIXED**
 
 **What it is:** `save_block()` and `save_block_indexes()` are called separately. A crash between them leaves the block unreachable by hash.
 
 **How to fix:** Merge all block-related writes into a single `WriteBatch` (also addresses H5).
 
+**How fixed:** Block bytes, `hash_<block_hash>` lookup, per-transaction indexes, and latest height are all written in the same atomic batch as chain/account/refiner state.
+
 ---
 
 #### H9: No integrity checksums on persisted data
 **Location:** `store.rs` throughout
-**Status:** OPEN
+**Status:** **FIXED**
 
 **What it is:** RocksDB values are stored without integrity checks. Bit rot or disk corruption causes silent data loss.
 
 **How to fix:** Prepend a 16-byte BLAKE3 checksum to every stored value. Verify on load. Wrap all `save_*` and `load_*` methods.
 
+**How fixed:** Storage values are now written as `checksum || payload`, using a 16-byte BLAKE3-derived checksum domain-tagged for database values. Load paths verify checksums before deserializing blocks, indexes, accounts, refiners, unbonding queues, latest height, and chain state. A corruption regression test flips persisted chain-state bytes and confirms load fails.
+
 ---
 
-### MEDIUM (23 — 2 fixed, 2 by design)
+### MEDIUM (23 — 3 fixed, 2 by design)
 
 #### ~~M1: Graduated slashing~~ — **FIXD** (ec0df9b)
 **Location:** ~~`pos.rs:500-553`~~ → `refiner.rs:488`
@@ -1058,60 +1082,75 @@ Replaced 10%/33%/100% graduated slash with 100% burn on any double-sign. No offe
 
 #### M3: PoS signature verification runs on PoW blocks
 **Location:** `node.rs:825-854`
-**Status:** OPEN
+**Status:** **FIXED**
 **What it is:** At line 825, `if block.header.refiner_signature.is_some()` runs the ed25519 verification path for any block that has a `refiner_signature` field, even if it also has `pow_proof`. A PoW block with a fake `refiner_signature` would enter the sig verification path and could be rejected even if the PoW proof is valid.
 **How to fix:** Check mutual exclusivity before verification. Only verify refiner signature if `pow_proof.is_none() && refiner_signature.is_some()`.
 
+**How fixed:** `validate_block()` now rejects any non-genesis block containing both `pow_proof` and `refiner_signature`, so PoW blocks cannot be diverted into refiner signature validation.
+
 #### M4: PoW/PoS mutual exclusivity not checked
 **Location:** `block.rs:270-308`
-**Status:** OPEN
+**Status:** **FIXED**
 **What it is:** `validate_block()` doesn't reject blocks that have both `pow_proof` and `refiner_signature`. A block with both would be accepted.
 **How to fix:** Add explicit check: reject if both are `Some()`.
 
+**How fixed:** `validate_block()` now rejects blocks with both proof types, rejects blocks with neither proof type, and tests cover the both-proofs rejection.
+
 #### M5: Producer field not validated for PoW blocks
 **Location:** `node.rs:971`
-**Status:** OPEN
+**Status:** **FIXED**
 **What it is:** Any ObjectId can be set as producer and will receive block rewards, even without a registered account.
 **How to fix:** Require that the producer has a registered account with a public key.
 
+**How fixed:** `apply_block()` now requires PoW block producers to have a registered account with a 32-byte public key before rewards can be credited.
+
 #### M6: Zero-miner-id phantom issuance
 **Location:** `node.rs:971` vs `node.rs:1005`
-**Status:** OPEN
+**Status:** **FIXED**
 **What it is:** If `block.header.producer` is the zero ObjectId, PoW share is skipped but `total_issued` still increments. OPL is "issued" to nobody — phantom inflation.
 **How to fix:** Reject blocks with zero producer at height > 0 in `validate_block()`.
 
+**How fixed:** `validate_block()` now rejects every non-genesis block whose producer is the zero ObjectId, with a regression test covering the zero-producer path.
+
 #### M7: API key timing attack
 **Location:** `rpc/server.rs:178-190`
-**Status:** OPEN
+**Status:** **FIXED**
 **What it is:** `check_api_key()` uses `==` on strings, which short-circuits on first mismatching byte. Enables byte-by-byte key recovery via timing.
 **How to fix:** Use `subtle::ConstantTimeEq`: `bool::from(provided.as_bytes().ct_eq(required.as_bytes()))`.
 
 #### M8: CORS allows all origins
 **Location:** `rpc/server.rs:926-927`
-**Status:** OPEN
+**Status:** **FIXED**
 **What it is:** `CorsLayer::new().allow_origin(Any)` allows any website to make RPC requests.
 **How to fix:** Restrict to `["http://localhost:4171", "http://127.0.0.1:4171"]`.
 
+**How fixed:** RPC CORS now allows only the local dashboard origins (`localhost:4171` and `127.0.0.1:4171`) instead of wildcard origins.
+
 #### M9: No request body size limit
 **Location:** `rpc/server.rs:486-499`
-**Status:** OPEN
+**Status:** **FIXED**
 **What it is:** No limit on JSON-RPC request body size. Multi-gigabyte hex strings cause OOM.
 **How to fix:** Use Axum's `DefaultBodyLimit::max(1_048_576)` (1 MiB).
 
+**How fixed:** The JSON-RPC router now applies `DefaultBodyLimit::max(1_048_576)`, capping request bodies to 1 MiB by default.
+
 #### M10: Key file world-readable
 **Location:** `wallet/key.rs:190-193`
-**Status:** OPEN
+**Status:** **FIXED**
 **What it is:** `fs::write(&key_path, &key_bytes)` writes the raw 32-byte ed25519 seed with default permissions (often 644).
 **How to fix:** Set permissions to 0600 after writing. (Pass 2: encrypt with passphrase.)
+
+**How fixed:** Wallet key creation now writes through a private-file helper that uses `create_new(true)` and Unix `0600` permissions, with a regression test for the permission mode.
 
 #### ~~M11: Mempool expiry not enforced~~ — **FIXED**
 #### ~~M12: Mempool doesn't check minimum fee~~ — **FIXED**
 
 #### M13: Ephemeral P2P keypair
 **Location:** `network.rs:167`
-**Status:** OPEN
+**Status:** **FIXED**
 **What it is:** `libp2p::identity::Keypair::generate_ed25519()` creates a new keypair on every restart, giving a new PeerId. Breaks DHT routing, bypasses bans, wastes bandwidth.
 **How to fix:** Persist keypair to `$DATA_DIR/network_keypair.ed25519`. Load on restart.
+**How fixed:** `NetworkConfig` now accepts `keypair_path`; the node passes `<data_dir>/mainnet/network_keypair.ed25519`. Networking loads that protobuf-encoded libp2p keypair on restart or creates it once if absent, using private file permissions on Unix.
 
 #### M14: TOCTOU race — height check vs apply_block
 **Location:** `main.rs:760` (gossip), `main.rs:395` (mining)
@@ -1121,15 +1160,17 @@ Replaced 10%/33%/100% graduated slash with 100% burn on any double-sign. No offe
 
 #### M15: Sync start_height unvalidated
 **Location:** `main.rs:963-993`
-**Status:** OPEN
+**Status:** **FIXED**
 **What it is:** Sync handler doesn't validate `start_height` is within `[0, current_height]`. Malicious peers can request the entire chain repeatedly.
 **How to fix:** Clamp `start_height` to `[0, current_height]` and limit to `max_blocks_per_request` blocks.
+**How fixed:** Sync serving now clamps `start_height` to the local chain tip, caps `count` to `MAX_SYNC_BLOCKS`, and shortens the range so responses never run beyond the current tip.
 
 #### M16: No WAL sync mode on RocksDB
 **Location:** `store.rs:74`
-**Status:** OPEN
+**Status:** **FIXED**
 **What it is:** Default RocksDB options don't fsync the WAL after writes. Data may be lost on power failure.
 **How to fix:** Use `WriteOptions::set_sync(true)` on critical writes (block saves, state saves).
+**How fixed:** The atomic block/state commit now uses `write_opt(..., WriteOptions::set_sync(true))`, so critical chain-state writes request WAL fsync durability.
 
 #### ~~M17: difficulty_to_target(1) = 2^63-1~~ — **BY DESIGN**
 Difficulty 1 means "1 leading zero bit", so ~50% of random hashes pass. Correct for the leading-zero-bits interpretation.
@@ -1148,19 +1189,19 @@ Deleted. The actual reward split uses integer `coverage_milli` in `node.rs`. The
 
 #### M21: Silent Borsh error handling in state root
 **Location:** `account.rs:219`, `refiner.rs`
-**Status:** OPEN
+**Status:** **FIXED**
 **What it is:** `if let Ok(bytes) = borsh::to_vec(account)` silently excludes failed serializations from the state root, causing chain divergence.
 **How to fix:** Replace with `expect("Account serialization must not fail — this is a consensus bug")`.
 
 #### M22: apply_bond refund discards errors
 **Location:** `dispatcher.rs:218`
-**Status:** OPEN
+**Status:** **FIXED**
 **What it is:** `if let Ok(()) = accounts.credit(sender, refund)` silently discards credit errors.
 **How to fix:** Propagate: `accounts.credit(sender, refund).map_err(|e| format!("Bond refund failed: {}", e))?;`
 
 #### M23: Wallet HTTP default
 **Location:** `wallet/main.rs:22`
-**Status:** OPEN
+**Status:** **FIXED**
 **What it is:** Default RPC URL is `http://localhost:4171` — signed transactions traverse network in plaintext.
 **How to fix:** Change default to `https://localhost:4171` and warn on `http://` URLs.
 
@@ -1170,12 +1211,12 @@ Deleted. The actual reward split uses integer `coverage_milli` in `node.rs`. The
 
 #### L1: Debug derives on Bip39Mnemonic and KeyPair
 **Location:** `bip39.rs:39`, `key.rs:60`
-**Status:** OPEN
+**Status:** **FIXED**
 `#[derive(Debug)]` on both types leaks secrets to any `{:?}` formatting. Replace with manual `Debug` impls that redact secrets.
 
 #### L2: Mnemonic printed to stdout on opl new
 **Location:** `wallet/main.rs:168-169`
-**Status:** OPEN
+**Status:** **FIXED**
 Print to stderr instead of stdout: `eprintln!("{}", mnemonic.phrase())`.
 
 #### L3: Early-return timing in verify_ed25519
@@ -1239,37 +1280,38 @@ All comments updated from "1,024 blocks/epoch" to "960 blocks/epoch". Test param
 
 ### Phase B: Security Fixes (CRITICAL)
 
-13. C1: Testnet/mainnet data directory isolation + chain_id check on load
-14. C2: Mnemonic from `OPOLYS_MNEMONIC` env var or stdin prompt (using `rpassword`)
-15. C3: `zeroize` crate on `DerivedSeed`/`KeyPair`; manual `Debug` impls that redact
-16. C4+M7: RPC API key defaults to random-generated (printed at startup); constant-time comparison via `subtle::ConstantTimeEq`
+13. ✓ C1: Mainnet data directory isolation + chain_id check on load
+14. ✓ C2: Mnemonic from `OPOLYS_MNEMONIC` env var or stdin prompt (using `rpassword`)
+15. ✓ C3: `zeroize` crate on `DerivedSeed`/`KeyPair`; manual `Debug` impls that redact
+16. ✓ C4+M7: RPC API key defaults to random-generated (printed at startup); constant-time comparison via `subtle::ConstantTimeEq`
 
 ### Phase C: Protocol Fixes (consensus behavior changes)
 
 17. ✓ Delete `ConsensusPhase` from `ChainState` and `PersistedChainState` (done in ec0df9b)
 18. ✓ Refiner loop: produce after `BLOCK_TARGET_TIME_MS` (90,000ms) with no miner block (done in ec0df9b)
-19. M3/M4: Mutual exclusivity check in `validate_block()`
+19. ✓ H1/H2: Domain separation for hashes and signatures
+20. ✓ M3/M4: Mutual exclusivity check in `validate_block()`
 20. ✓ M1/M2: Replace `graduated_slash` with 100% burn on any double-sign (done in ec0df9b, merged with Phase A)
 21. M6: Zero-miner-id — reject blocks with zero producer at height > 0
 22. H4: Unbond fee — reject if `balance < fee`, don't skip burn
 23. H3: Suggested fee — compute from `total_fees_burned`, not `total_fees`
-24. M5: Validate producer field on PoW blocks (reject zero-id producer)
+24. ✓ M5: Validate producer field on PoW blocks (reject zero-id producer)
 
 ### Phase D: Storage & P2P Fixes
 
-25. H5/H8: Atomic RocksDB writes (batch across column families)
-26. H6: Sync response size limit in `request_response::Config`
-27. H7: Wire `request_timeout_secs` to libp2p config
-28. H9: BLAKE3 integrity checksums on stored values, verify on load
-29. M16: WAL sync mode on RocksDB
-30. M13: Persistent P2P keypair from data dir
-31. M15: Validate `start_height` in sync requests, clamp to `[0, chain.height]`
+25. ✓ H5/H8: Atomic RocksDB writes (batch across column families)
+26. ✓ H6: Sync response size limit in `request_response::Config`
+27. ✓ H7: Wire `request_timeout_secs` to libp2p config
+28. ✓ H9: BLAKE3 integrity checksums on stored values, verify on load
+29. ✓ M16: WAL sync mode on RocksDB
+30. ✓ M13: Persistent P2P keypair from data dir
+31. ✓ M15: Validate `start_height` in sync requests, clamp to `[0, chain.height]`
 
 ### Phase E: Medium Fixes
 
-32. M8: CORS restrict to localhost origins only
-33. M9: Request body size limit (1 MiB default)
-34. M10: Key file permissions `chmod 600`
+32. ✓ M8: CORS restrict to localhost origins only
+33. ✓ M9: Request body size limit (1 MiB default)
+34. ✓ M10: Key file permissions `chmod 600`
 35. M21: Silent Borsh errors → `expect()` instead of `if let Ok()`
 36. M22: Propagate `apply_bond` credit errors
 37. M23: Wallet RPC default to `https://`
@@ -1278,7 +1320,7 @@ All comments updated from "1,024 blocks/epoch" to "960 blocks/epoch". Test param
 
 ### Phase F: Low / Cleanup
 
-40. L1: Remove `#[derive(Debug)]` from `Bip39Mnemonic` and `KeyPair`; manual `Debug` impls that redact
+40. ✓ L1: Remove `#[derive(Debug)]` from `Bip39Mnemonic` and `KeyPair`; manual `Debug` impls that redact
 41. L3: Constant-time `verify_ed25519` via `subtle`
 42. L4/L5: Unify tx_id serialization (deferred — breaking change, schedule for mainnet)
 43. L6: Add SLIP-0010 reference test vectors

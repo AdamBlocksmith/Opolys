@@ -15,12 +15,12 @@
 //! transaction signing and refiner block signing. Full wallet recovery from
 //! mnemonic alone is supported — no separate backup file needed.
 
-pub mod key;
-pub mod bip39;
-pub mod signing;
 pub mod account;
+pub mod bip39;
+pub mod key;
+pub mod signing;
 
-pub use key::*;
-pub use bip39::*;
-pub use signing::*;
 pub use account::*;
+pub use bip39::*;
+pub use key::*;
+pub use signing::*;

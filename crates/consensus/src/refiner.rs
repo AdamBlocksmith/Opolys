@@ -27,11 +27,14 @@
 //! is derived from on-chain entropy. There are no rounds, no schedules, and
 //! no fixed refiner sets — just continuous weighted selection.
 
-use opolys_core::{FlakeAmount, ObjectId, RefinerStatus, MIN_BOND_STAKE, EPOCH, MAX_ACTIVE_REFINERS, ANNUAL_ATTRITION_PERMILLE};
-use borsh::{BorshSerialize, BorshDeserialize};
-use serde::{Serialize, Deserialize};
+use borsh::{BorshDeserialize, BorshSerialize};
+use opolys_core::{
+    ANNUAL_ATTRITION_PERMILLE, EPOCH, FlakeAmount, MAX_ACTIVE_REFINERS, MIN_BOND_STAKE, ObjectId,
+    RefinerStatus,
+};
+use opolys_crypto::{Blake3Hasher, DOMAIN_STATE_ROOT};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use opolys_crypto::Blake3Hasher;
 
 /// A pending unbonding entry that matures after a delay of EPOCH blocks.
 ///
@@ -144,7 +147,10 @@ impl RefinerInfo {
     /// Each entry's weight is `stake × (1 + ln(1 + age_years))`, giving
     /// a logarithmic seniority bonus that diminishes over time.
     pub fn weight(&self, current_timestamp: u64) -> FlakeAmount {
-        self.entries.iter().map(|e| e.weight(current_timestamp)).sum()
+        self.entries
+            .iter()
+            .map(|e| e.weight(current_timestamp))
+            .sum()
     }
 
     /// Add a new bond entry (top-up) to this refiner.
@@ -155,7 +161,11 @@ impl RefinerInfo {
     /// stakes are merged (auto-merge) to reduce entry count.
     fn add_entry(&mut self, stake: FlakeAmount, height: u64, timestamp: u64) {
         // Auto-merge: if an entry with the same timestamp exists, combine stakes
-        if let Some(existing) = self.entries.iter_mut().find(|e| e.bonded_at_timestamp == timestamp) {
+        if let Some(existing) = self
+            .entries
+            .iter_mut()
+            .find(|e| e.bonded_at_timestamp == timestamp)
+        {
             existing.stake = existing.stake.saturating_add(stake);
             return;
         }
@@ -165,7 +175,11 @@ impl RefinerInfo {
             bonded_at_height: height,
             bonded_at_timestamp: timestamp,
         };
-        let pos = self.entries.iter().position(|e| e.bonded_at_timestamp > timestamp).unwrap_or(self.entries.len());
+        let pos = self
+            .entries
+            .iter()
+            .position(|e| e.bonded_at_timestamp > timestamp)
+            .unwrap_or(self.entries.len());
         self.entries.insert(pos, entry);
     }
 
@@ -250,10 +264,18 @@ impl RefinerSet {
         if self.cached_refiners.len() <= REFINER_CACHE_MAX_SIZE {
             return;
         }
-        let evict: Vec<ObjectId> = self.cached_refiners.iter()
-            .filter(|(_, v)| v.status != RefinerStatus::Active && v.status != RefinerStatus::Waiting)
+        let evict: Vec<ObjectId> = self
+            .cached_refiners
+            .iter()
+            .filter(|(_, v)| {
+                v.status != RefinerStatus::Active && v.status != RefinerStatus::Waiting
+            })
             .map(|(id, _)| id.clone())
-            .take(self.cached_refiners.len().saturating_sub(REFINER_CACHE_MAX_SIZE))
+            .take(
+                self.cached_refiners
+                    .len()
+                    .saturating_sub(REFINER_CACHE_MAX_SIZE),
+            )
             .collect();
         for id in evict {
             self.cached_refiners.remove(&id);
@@ -295,7 +317,10 @@ impl RefinerSet {
         } else {
             // New refiner: create with first bond entry
             let id = object_id.clone();
-            self.cached_refiners.insert(object_id.clone(), RefinerInfo::new(object_id, stake, height, timestamp));
+            self.cached_refiners.insert(
+                object_id.clone(),
+                RefinerInfo::new(object_id, stake, height, timestamp),
+            );
             self.dirty_refiners.insert(id);
             self.evict_cache_if_full();
         }
@@ -318,7 +343,9 @@ impl RefinerSet {
         amount: FlakeAmount,
         current_height: u64,
     ) -> Result<FlakeAmount, String> {
-        let refiner = self.cached_refiners.get_mut(object_id)
+        let refiner = self
+            .cached_refiners
+            .get_mut(object_id)
             .ok_or_else(|| "Refiner not bonded".to_string())?;
 
         let total_stake = refiner.total_stake();
@@ -378,7 +405,9 @@ impl RefinerSet {
         let mut newly_waiting = Vec::new();
 
         // Collect eligible IDs first to avoid borrow conflict
-        let eligible: Vec<ObjectId> = self.cached_refiners.iter()
+        let eligible: Vec<ObjectId> = self
+            .cached_refiners
+            .iter()
             .filter(|(_, v)| {
                 v.status == RefinerStatus::Bonding
                     && v.entries.first().map_or(false, |e| {
@@ -409,7 +438,9 @@ impl RefinerSet {
     /// activate_matured_refiners().
     pub fn rerank_refiners(&mut self, current_timestamp: u64) -> (Vec<ObjectId>, Vec<ObjectId>) {
         // Sort all eligible refiners by weight descending
-        let mut eligible: Vec<(ObjectId, u64)> = self.cached_refiners.iter()
+        let mut eligible: Vec<(ObjectId, u64)> = self
+            .cached_refiners
+            .iter()
             .filter(|(_, v)| v.status != RefinerStatus::Slashed && v.total_stake() > 0)
             .map(|(id, v)| (id.clone(), v.weight(current_timestamp)))
             .collect();
@@ -463,7 +494,8 @@ impl RefinerSet {
                 if entry.stake == 0 {
                     continue;
                 }
-                let new_stake = ((entry.stake as u128 * DECAY_NUMERATOR as u128) / DECAY_DENOMINATOR as u128) as FlakeAmount;
+                let new_stake = ((entry.stake as u128 * DECAY_NUMERATOR as u128)
+                    / DECAY_DENOMINATOR as u128) as FlakeAmount;
                 let burned = entry.stake.saturating_sub(new_stake);
                 total_burned = total_burned.saturating_add(burned);
                 entry.stake = new_stake;
@@ -479,14 +511,16 @@ impl RefinerSet {
 
     /// Count of refiners currently in `Bonding` status (waiting for epoch maturity).
     pub fn total_bonding_refiners(&self) -> usize {
-        self.cached_refiners.values()
+        self.cached_refiners
+            .values()
             .filter(|v| v.status == RefinerStatus::Bonding)
             .count()
     }
 
     /// Count of refiners currently in `Waiting` status (eligible but outside top-N).
     pub fn total_waiting_refiners(&self) -> usize {
-        self.cached_refiners.values()
+        self.cached_refiners
+            .values()
             .filter(|v| v.status == RefinerStatus::Waiting)
             .count()
     }
@@ -494,7 +528,9 @@ impl RefinerSet {
     /// Directly activate a refiner (test helper and slash suspension recovery).
     /// Transitions Bonding → Active and maintains active_set.
     pub fn activate(&mut self, object_id: &ObjectId, height: u64) -> Result<(), String> {
-        let refiner = self.cached_refiners.get_mut(object_id)
+        let refiner = self
+            .cached_refiners
+            .get_mut(object_id)
             .ok_or_else(|| "Refiner not found".to_string())?;
         if refiner.status != RefinerStatus::Bonding {
             return Err("Refiner not in bonding state".to_string());
@@ -516,8 +552,14 @@ impl RefinerSet {
     ///
     /// Returns the Flake amount burned. Returns `Ok(0)` if the refiner is already
     /// `Slashed` (idempotent for already-punished refiners).
-    pub fn slash_refiner(&mut self, object_id: &ObjectId, _current_height: u64) -> Result<FlakeAmount, String> {
-        let refiner = self.cached_refiners.get_mut(object_id)
+    pub fn slash_refiner(
+        &mut self,
+        object_id: &ObjectId,
+        _current_height: u64,
+    ) -> Result<FlakeAmount, String> {
+        let refiner = self
+            .cached_refiners
+            .get_mut(object_id)
             .ok_or_else(|| "Refiner not found".to_string())?;
 
         // Already permanently slashed — nothing more to take
@@ -545,12 +587,16 @@ impl RefinerSet {
     /// compute stake coverage, which determines the PoW/refiner reward split.
     pub fn total_bonded_stake(&self) -> FlakeAmount {
         // Use active_set for Active refiners (O(active_set.len()))
-        let active_stake: FlakeAmount = self.active_set.iter()
+        let active_stake: FlakeAmount = self
+            .active_set
+            .iter()
             .filter_map(|id| self.cached_refiners.get(id))
             .map(|v| v.total_stake())
             .sum();
         // Add Bonding and Waiting stake (not in active_set)
-        let other_stake: FlakeAmount = self.cached_refiners.values()
+        let other_stake: FlakeAmount = self
+            .cached_refiners
+            .values()
             .filter(|v| v.status == RefinerStatus::Bonding || v.status == RefinerStatus::Waiting)
             .map(|v| v.total_stake())
             .sum();
@@ -559,14 +605,16 @@ impl RefinerSet {
 
     /// Return all refiners currently in `Active` status.
     pub fn active_refiners(&self) -> Vec<&RefinerInfo> {
-        self.active_set.iter()
+        self.active_set
+            .iter()
             .filter_map(|id| self.cached_refiners.get(id))
             .collect()
     }
 
     /// Compute the total weight of all active refiners.
     pub fn total_weight(&self, current_timestamp: u64) -> FlakeAmount {
-        self.active_set.iter()
+        self.active_set
+            .iter()
             .filter_map(|id| self.cached_refiners.get(id))
             .map(|v| v.weight(current_timestamp))
             .sum()
@@ -588,7 +636,10 @@ impl RefinerSet {
     }
 
     /// Load refiners and unbonding queue from serialized data. Used for state restoration.
-    pub fn load_from_refiners(refiners: Vec<RefinerInfo>, unbonding_queue: Vec<PendingUnbond>) -> Self {
+    pub fn load_from_refiners(
+        refiners: Vec<RefinerInfo>,
+        unbonding_queue: Vec<PendingUnbond>,
+    ) -> Self {
         let mut set = RefinerSet {
             cached_refiners: HashMap::new(),
             active_set: Vec::new(),
@@ -609,24 +660,26 @@ impl RefinerSet {
     /// Also includes the unbonding queue to capture pending stake withdrawals.
     pub fn compute_state_root(&self) -> opolys_core::Hash {
         let mut sorted_ids: Vec<&ObjectId> = self.cached_refiners.keys().collect();
-        sorted_ids.sort_by(|a, b| a.0 .0.cmp(&b.0 .0));
+        sorted_ids.sort_by(|a, b| a.0.0.cmp(&b.0.0));
 
         let mut hasher = Blake3Hasher::new();
+        hasher.update(DOMAIN_STATE_ROOT);
+        hasher.update(b"refiners");
 
         // Hash all refiner state (sorted by ObjectId)
         for id in sorted_ids {
             if let Some(refiner) = self.cached_refiners.get(id) {
-                if let Ok(bytes) = borsh::to_vec(refiner) {
-                    hasher.update(&bytes);
-                }
+                let bytes = borsh::to_vec(refiner)
+                    .expect("Refiner serialization must not fail; this is a consensus bug");
+                hasher.update(&bytes);
             }
         }
 
         // Hash the unbonding queue (order matters — it's FIFO)
         for entry in &self.unbonding_queue {
-            if let Ok(bytes) = borsh::to_vec(entry) {
-                hasher.update(&bytes);
-            }
+            let bytes = borsh::to_vec(entry)
+                .expect("Unbonding entry serialization must not fail; this is a consensus bug");
+            hasher.update(&bytes);
         }
 
         hasher.finalize()
@@ -638,12 +691,10 @@ impl RefinerSet {
     /// determines their probability of being selected. The `seed` parameter
     /// provides on-chain entropy to make the selection deterministic and
     /// verifiable. Returns `None` if there are no active refiners.
-    pub fn select_block_producer(
-        &self,
-        current_timestamp: u64,
-        seed: u64,
-    ) -> Option<&RefinerInfo> {
-        let active: Vec<&RefinerInfo> = self.active_set.iter()
+    pub fn select_block_producer(&self, current_timestamp: u64, seed: u64) -> Option<&RefinerInfo> {
+        let active: Vec<&RefinerInfo> = self
+            .active_set
+            .iter()
             .filter_map(|id| self.cached_refiners.get(id))
             .collect();
 
@@ -651,9 +702,7 @@ impl RefinerSet {
             return None;
         }
 
-        let total_weight: FlakeAmount = active.iter()
-            .map(|v| v.weight(current_timestamp))
-            .sum();
+        let total_weight: FlakeAmount = active.iter().map(|v| v.weight(current_timestamp)).sum();
 
         if total_weight == 0 {
             return None;
@@ -741,11 +790,13 @@ mod tests {
     fn unbond_fifo_consumes_oldest_first() {
         let mut vs = RefinerSet::new();
         let id = test_id(b"refiner1");
-        vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0).unwrap();       // Entry 1: 1 OPL at t=0
+        vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0).unwrap(); // Entry 1: 1 OPL at t=0
         vs.bond(id.clone(), MIN_BOND_STAKE * 2, 100, 1000).unwrap(); // Entry 2: 2 OPL at t=1000
 
         // Unbond 1.5 OPL — should fully consume entry 1 (1 OPL) and 0.5 OPL from entry 2
-        let unbonded = vs.unbond_amount(&id, MIN_BOND_STAKE + MIN_BOND_STAKE / 2, 500).unwrap();
+        let unbonded = vs
+            .unbond_amount(&id, MIN_BOND_STAKE + MIN_BOND_STAKE / 2, 500)
+            .unwrap();
 
         // Should return all requested amount since total stake > amount
         assert_eq!(unbonded, MIN_BOND_STAKE + MIN_BOND_STAKE / 2);
@@ -759,7 +810,10 @@ mod tests {
 
         // The unbonded amount should be in the unbonding queue
         assert_eq!(vs.unbonding_queue.len(), 1);
-        assert_eq!(vs.unbonding_queue[0].amount, MIN_BOND_STAKE + MIN_BOND_STAKE / 2);
+        assert_eq!(
+            vs.unbonding_queue[0].amount,
+            MIN_BOND_STAKE + MIN_BOND_STAKE / 2
+        );
         assert_eq!(vs.unbonding_queue[0].matures_at, 500 + EPOCH as u64);
     }
 
@@ -923,7 +977,10 @@ mod tests {
         vs.slash_refiner(&id, 100).unwrap(); // slashed
 
         let result = vs.bond(id.clone(), MIN_BOND_STAKE, 400, 400);
-        assert!(result.is_err(), "Slashed refiners must not be able to re-bond");
+        assert!(
+            result.is_err(),
+            "Slashed refiners must not be able to re-bond"
+        );
     }
 
     #[test]
@@ -972,7 +1029,8 @@ mod tests {
 
         // Top-up at timestamp 1,000,000 (~11.5 days)
         let top_up_time: u64 = 1_000_000;
-        vs.bond(id.clone(), MIN_BOND_STAKE, 100, top_up_time).unwrap();
+        vs.bond(id.clone(), MIN_BOND_STAKE, 100, top_up_time)
+            .unwrap();
 
         let v = vs.get_refiner(&id).unwrap();
         // Check age at ~1 year (31,557,600 seconds) — enough for measurable milli-years
@@ -980,7 +1038,10 @@ mod tests {
         let age_0_milli = v.entries[0].age_years_milli(check_time);
         let age_1_milli = v.entries[1].age_years_milli(check_time);
         // Entry bonded at genesis should have ~31.7 milli-years at check_time
-        assert!(age_0_milli > 0, "Entry bonded at genesis should have age after 1 year");
+        assert!(
+            age_0_milli > 0,
+            "Entry bonded at genesis should have age after 1 year"
+        );
         // Top-up entry should have ~30.5 milli-years (1 year - 11.5 days)
         assert!(age_1_milli > 0, "Top-up entry should have age after 1 year");
         // At the exact top-up time, the new entry has zero seniority
@@ -1021,13 +1082,19 @@ mod tests {
 
         // Phase 1: Three refiners bond at height 0
         vs.bond(alice.clone(), MIN_BOND_STAKE * 10, 0, 0).unwrap(); // Alice: 10 OPL
-        vs.bond(bob.clone(), MIN_BOND_STAKE * 20, 0, 0).unwrap();   // Bob: 20 OPL
+        vs.bond(bob.clone(), MIN_BOND_STAKE * 20, 0, 0).unwrap(); // Bob: 20 OPL
         vs.bond(charlie.clone(), MIN_BOND_STAKE * 5, 0, 0).unwrap(); // Charlie: 5 OPL
 
         // All start as Bonding
-        assert_eq!(vs.get_refiner(&alice).unwrap().status, RefinerStatus::Bonding);
+        assert_eq!(
+            vs.get_refiner(&alice).unwrap().status,
+            RefinerStatus::Bonding
+        );
         assert_eq!(vs.get_refiner(&bob).unwrap().status, RefinerStatus::Bonding);
-        assert_eq!(vs.get_refiner(&charlie).unwrap().status, RefinerStatus::Bonding);
+        assert_eq!(
+            vs.get_refiner(&charlie).unwrap().status,
+            RefinerStatus::Bonding
+        );
         assert_eq!(vs.total_bonded_stake(), MIN_BOND_STAKE * 35);
 
         // Phase 2: Before epoch boundary, no activation
@@ -1037,20 +1104,31 @@ mod tests {
         // Phase 3: At epoch boundary, all refiners move to Waiting then Active
         let waiting = vs.activate_matured_refiners(EPOCH);
         assert_eq!(waiting.len(), 3);
-        assert_eq!(vs.get_refiner(&alice).unwrap().status, RefinerStatus::Waiting);
+        assert_eq!(
+            vs.get_refiner(&alice).unwrap().status,
+            RefinerStatus::Waiting
+        );
 
         let (activated, _) = vs.rerank_refiners(0);
         assert_eq!(activated.len(), 3);
-        assert_eq!(vs.get_refiner(&alice).unwrap().status, RefinerStatus::Active);
+        assert_eq!(
+            vs.get_refiner(&alice).unwrap().status,
+            RefinerStatus::Active
+        );
         assert_eq!(vs.get_refiner(&bob).unwrap().status, RefinerStatus::Active);
-        assert_eq!(vs.get_refiner(&charlie).unwrap().status, RefinerStatus::Active);
+        assert_eq!(
+            vs.get_refiner(&charlie).unwrap().status,
+            RefinerStatus::Active
+        );
 
         // Phase 4: Block producer selection — deterministic via seed
         let producer = vs.select_block_producer(0, 42).unwrap();
         // Bob has 2x the stake of Alice, so Bob should be selected more often
         // but Bob is not guaranteed — just verify selection works
         assert!(
-            producer.object_id == alice || producer.object_id == bob || producer.object_id == charlie,
+            producer.object_id == alice
+                || producer.object_id == bob
+                || producer.object_id == charlie,
             "Producer must be one of the bonded refiners"
         );
 
@@ -1063,7 +1141,10 @@ mod tests {
         assert_eq!(vs.unbonding_queue[0].matures_at, 2000 + EPOCH);
 
         // Alice still has 7 OPL bonded
-        assert_eq!(vs.get_refiner(&alice).unwrap().total_stake(), MIN_BOND_STAKE * 7);
+        assert_eq!(
+            vs.get_refiner(&alice).unwrap().total_stake(),
+            MIN_BOND_STAKE * 7
+        );
 
         // Phase 6: Process matured unbonds — nothing before maturity
         let matured = vs.process_matured_unbonds(2000 + EPOCH - 1);
@@ -1077,12 +1158,18 @@ mod tests {
         assert!(vs.unbonding_queue.is_empty());
 
         // Phase 7: Charlie double-signs — 100% slash, permanent Slashed.
-        assert_eq!(vs.get_refiner(&charlie).unwrap().status, RefinerStatus::Active);
+        assert_eq!(
+            vs.get_refiner(&charlie).unwrap().status,
+            RefinerStatus::Active
+        );
 
         // One strike: 100% burn of 5 OPL, permanent Slashed
         let burn = vs.slash_refiner(&charlie, 2100).unwrap();
         assert_eq!(burn, MIN_BOND_STAKE * 5); // all stake burned
-        assert_eq!(vs.get_refiner(&charlie).unwrap().status, RefinerStatus::Slashed);
+        assert_eq!(
+            vs.get_refiner(&charlie).unwrap().status,
+            RefinerStatus::Slashed
+        );
         assert_eq!(vs.get_refiner(&charlie).unwrap().total_stake(), 0);
 
         // Total burned = 5 OPL (original stake, 100% burn)

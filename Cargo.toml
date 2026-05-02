@@ -29,7 +29,7 @@ opolys-networking = { path = "crates/networking" }
 opolys-node = { path = "crates/node" }
 opolys-wallet = { path = "crates/wallet" }
 opolys-rpc = { path = "crates/rpc" }
-evo-omap = { path = "../EVO-OMAP" }
+evo-omap = { git = "https://github.com/AdamBlocksmith/evo-omap.git", rev = "6a32b3ea9f7030193a4443efa961c9af00827b17" }
 borsh = { version = "1.5", features = ["derive"] }
 blake3 = "1.8"
 ed25519-dalek = { version = "2.1", features = ["serde"] }
@@ -61,3 +61,5 @@ tower-http = { version = "0.6", features = ["cors"] }
 tempfile = "3"
 rayon = "1.10"
 reqwest = { version = "0.12", features = ["json"] }
+zeroize = "1.8"
+subtle = "2.6"

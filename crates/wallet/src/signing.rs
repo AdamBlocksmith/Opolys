@@ -10,9 +10,9 @@
 //! - **RefinerBond** — lock OPL as stake to become a refiner (min 1 OPL per entry)
 //! - **RefinerUnbond** — release stake using FIFO order (oldest entries first)
 
-use opolys_core::{FlakeAmount, ObjectId, Transaction, TransactionAction, SIGNATURE_TYPE_ED25519};
 use crate::key::KeyPair;
-use opolys_crypto::hash_to_object_id;
+use opolys_core::{FlakeAmount, ObjectId, SIGNATURE_TYPE_ED25519, Transaction, TransactionAction};
+use opolys_crypto::{DOMAIN_TX_ID, hash_to_object_id_with_domain, transaction_signing_payload};
 
 /// Stateless transaction signer — all methods are associated functions.
 ///
@@ -43,7 +43,7 @@ impl TransactionSigner {
         let sender_id = sender.object_id().clone();
 
         let tx_id = Self::compute_tx_id(&sender_id, &action, fee, nonce, chain_id);
-        let unsigned_data = borsh::to_vec(&(sender_id.clone(), &action, fee, nonce, chain_id)).unwrap_or_default();
+        let unsigned_data = transaction_signing_payload(&sender_id, &action, fee, nonce, chain_id);
         let signature = sender.sign(&unsigned_data);
 
         Transaction {
@@ -79,7 +79,7 @@ impl TransactionSigner {
         let sender_id = sender.object_id().clone();
 
         let tx_id = Self::compute_tx_id(&sender_id, &action, fee, nonce, chain_id);
-        let unsigned_data = borsh::to_vec(&(sender_id.clone(), &action, fee, nonce, chain_id)).unwrap_or_default();
+        let unsigned_data = transaction_signing_payload(&sender_id, &action, fee, nonce, chain_id);
         let signature = sender.sign(&unsigned_data);
 
         Transaction {
@@ -116,7 +116,7 @@ impl TransactionSigner {
         let sender_id = sender.object_id().clone();
 
         let tx_id = Self::compute_tx_id(&sender_id, &action, fee, nonce, chain_id);
-        let unsigned_data = borsh::to_vec(&(sender_id.clone(), &action, fee, nonce, chain_id)).unwrap_or_default();
+        let unsigned_data = transaction_signing_payload(&sender_id, &action, fee, nonce, chain_id);
         let signature = sender.sign(&unsigned_data);
 
         Transaction {
@@ -143,11 +143,13 @@ impl TransactionSigner {
         chain_id: u64,
     ) -> ObjectId {
         let mut data = sender.0.to_hex().as_bytes().to_vec();
-        data.extend_from_slice(borsh::to_vec(action).unwrap_or_default().as_slice());
+        let action_bytes =
+            borsh::to_vec(action).expect("Transaction action serialization must not fail");
+        data.extend_from_slice(&action_bytes);
         data.extend_from_slice(&fee.to_be_bytes());
         data.extend_from_slice(&nonce.to_be_bytes());
         data.extend_from_slice(&chain_id.to_be_bytes());
-        hash_to_object_id(&data)
+        hash_to_object_id_with_domain(DOMAIN_TX_ID, &data)
     }
 }
 
@@ -155,6 +157,7 @@ impl TransactionSigner {
 mod tests {
     use super::*;
     use opolys_core::{FLAKES_PER_OPL, MAINNET_CHAIN_ID};
+    use opolys_crypto::hash_to_object_id;
 
     #[test]
     fn create_transfer_transaction() {
@@ -186,7 +189,9 @@ mod tests {
             0,
             MAINNET_CHAIN_ID,
         );
-        assert!(matches!(tx.action, TransactionAction::RefinerBond { amount } if amount == bond_amount));
+        assert!(
+            matches!(tx.action, TransactionAction::RefinerBond { amount } if amount == bond_amount)
+        );
         assert_eq!(tx.chain_id, MAINNET_CHAIN_ID);
         assert_eq!(tx.signature_type, SIGNATURE_TYPE_ED25519);
     }
@@ -201,7 +206,9 @@ mod tests {
             1,
             MAINNET_CHAIN_ID,
         );
-        assert!(matches!(tx.action, TransactionAction::RefinerUnbond { amount } if amount == FLAKES_PER_OPL));
+        assert!(
+            matches!(tx.action, TransactionAction::RefinerUnbond { amount } if amount == FLAKES_PER_OPL)
+        );
         assert_eq!(tx.nonce, 1);
         assert_eq!(tx.chain_id, MAINNET_CHAIN_ID);
         assert_eq!(tx.signature_type, SIGNATURE_TYPE_ED25519);
@@ -211,7 +218,14 @@ mod tests {
     fn tx_id_includes_action() {
         let keypair = KeyPair::generate();
         let recipient = hash_to_object_id(b"recipient");
-        let transfer = TransactionSigner::create_transfer(&keypair, recipient.clone(), 1000, 100, 0, MAINNET_CHAIN_ID);
+        let transfer = TransactionSigner::create_transfer(
+            &keypair,
+            recipient.clone(),
+            1000,
+            100,
+            0,
+            MAINNET_CHAIN_ID,
+        );
         let bond = TransactionSigner::create_refiner_bond(&keypair, 1000, 100, 0, MAINNET_CHAIN_ID);
         // Same sender, same fee, same nonce, different action → different tx_id
         assert_ne!(transfer.tx_id, bond.tx_id);
@@ -222,8 +236,22 @@ mod tests {
         let keypair = KeyPair::generate();
         let recipient = hash_to_object_id(b"recipient");
         let other_chain_id: u64 = 2;
-        let mainnet_tx = TransactionSigner::create_transfer(&keypair, recipient.clone(), 1000, 100, 0, MAINNET_CHAIN_ID);
-        let other_tx = TransactionSigner::create_transfer(&keypair, recipient.clone(), 1000, 100, 0, other_chain_id);
+        let mainnet_tx = TransactionSigner::create_transfer(
+            &keypair,
+            recipient.clone(),
+            1000,
+            100,
+            0,
+            MAINNET_CHAIN_ID,
+        );
+        let other_tx = TransactionSigner::create_transfer(
+            &keypair,
+            recipient.clone(),
+            1000,
+            100,
+            0,
+            other_chain_id,
+        );
         // Same sender, action, fee, nonce — but different chain_id → different tx_id
         assert_ne!(mainnet_tx.tx_id, other_tx.tx_id);
         assert_eq!(mainnet_tx.chain_id, MAINNET_CHAIN_ID);

@@ -9,14 +9,17 @@
 //! Fees included in blocks are **burned** rather than collected by any party,
 //! keeping the fee market pure and deflationary.
 
-use opolys_core::{Hash, Block, BlockHeader, FLAKES_PER_OPL, BLOCK_VERSION, MAX_TRANSACTIONS_PER_BLOCK, MAX_BLOCK_SIZE_BYTES, MAX_TX_DATA_SIZE_BYTES, MAX_FUTURE_BLOCK_TIME_SECS, OpolysError};
+use opolys_core::{
+    BLOCK_VERSION, Block, BlockHeader, FLAKES_PER_OPL, Hash, MAX_BLOCK_SIZE_BYTES,
+    MAX_FUTURE_BLOCK_TIME_SECS, MAX_TRANSACTIONS_PER_BLOCK, MAX_TX_DATA_SIZE_BYTES, OpolysError,
+};
 
 /// Maximum slash evidence entries allowed per block.
 /// Prevents DoS via unbounded ed25519 verification under the write lock.
 const MAX_SLASH_EVIDENCE_PER_BLOCK: usize = 10;
-use borsh::{BorshSerialize, BorshDeserialize};
+use borsh::{BorshDeserialize, BorshSerialize};
+use opolys_crypto::{Blake3Hasher, DOMAIN_BLOCK_HASH, DOMAIN_TX_ROOT};
 use serde::{Deserialize, Serialize};
-use opolys_crypto::Blake3Hasher;
 
 /// Metadata extracted from a block for indexing and querying.
 ///
@@ -75,6 +78,7 @@ pub enum BlockStatus {
 /// header state.
 pub fn compute_block_hash(header: &BlockHeader) -> Hash {
     let mut hasher = Blake3Hasher::new();
+    hasher.update(DOMAIN_BLOCK_HASH);
     // Hash every field of the header in a fixed order for determinism.
     // pow_proof and refiner_signature are excluded because:
     // - pow_proof is set AFTER mining (the proof must satisfy the hash, not vice versa)
@@ -103,9 +107,10 @@ pub fn compute_block_hash(header: &BlockHeader) -> Hash {
 /// the transaction set deterministically.
 pub fn compute_transaction_root(transactions: &[opolys_core::Transaction]) -> Hash {
     let mut hasher = Blake3Hasher::new();
+    hasher.update(DOMAIN_TX_ROOT);
     for tx in transactions {
         // Each transaction is committed by its unique ID, fee, and nonce.
-        hasher.update(&tx.tx_id.0 .0);
+        hasher.update(&tx.tx_id.0.0);
         hasher.update(&tx.fee.to_be_bytes());
         hasher.update(&tx.nonce.to_be_bytes());
     }
@@ -203,7 +208,8 @@ pub fn validate_block(
     if block.transactions.len() > MAX_TRANSACTIONS_PER_BLOCK {
         return Err(OpolysError::BlockValidationFailed(format!(
             "Too many transactions: {} > {}",
-            block.transactions.len(), MAX_TRANSACTIONS_PER_BLOCK
+            block.transactions.len(),
+            MAX_TRANSACTIONS_PER_BLOCK
         )));
     }
 
@@ -211,14 +217,13 @@ pub fn validate_block(
     if block.slash_evidence.len() > MAX_SLASH_EVIDENCE_PER_BLOCK {
         return Err(OpolysError::BlockValidationFailed(format!(
             "Too many slash evidence entries: {} > {}",
-            block.slash_evidence.len(), MAX_SLASH_EVIDENCE_PER_BLOCK
+            block.slash_evidence.len(),
+            MAX_SLASH_EVIDENCE_PER_BLOCK
         )));
     }
 
     // 7. Block size check
-    let block_size = borsh::to_vec(block)
-        .map(|v| v.len())
-        .unwrap_or(usize::MAX);
+    let block_size = borsh::to_vec(block).map(|v| v.len()).unwrap_or(usize::MAX);
     if block_size > MAX_BLOCK_SIZE_BYTES {
         return Err(OpolysError::BlockValidationFailed(format!(
             "Block too large: {} bytes > {} bytes",
@@ -242,7 +247,8 @@ pub fn validate_block(
         if !seen_tx_ids.insert(&tx.tx_id) {
             return Err(OpolysError::BlockValidationFailed(format!(
                 "Duplicate transaction {} in block {}",
-                tx.tx_id.to_hex(), block.header.height
+                tx.tx_id.to_hex(),
+                block.header.height
             )));
         }
     }
@@ -252,7 +258,9 @@ pub fn validate_block(
         if tx.data.len() > MAX_TX_DATA_SIZE_BYTES {
             return Err(OpolysError::BlockValidationFailed(format!(
                 "Transaction {} data too large: {} bytes > {} bytes",
-                tx.tx_id.to_hex(), tx.data.len(), MAX_TX_DATA_SIZE_BYTES
+                tx.tx_id.to_hex(),
+                tx.data.len(),
+                MAX_TX_DATA_SIZE_BYTES
             )));
         }
     }
@@ -262,23 +270,43 @@ pub fn validate_block(
         if tx.fee < opolys_core::MIN_FEE {
             return Err(OpolysError::BlockValidationFailed(format!(
                 "Transaction {} fee below minimum: {} < {}",
-                tx.tx_id.to_hex(), tx.fee, opolys_core::MIN_FEE
+                tx.tx_id.to_hex(),
+                tx.fee,
+                opolys_core::MIN_FEE
             )));
         }
     }
 
-// 12. Block proof check:
+    // 12. Block proof check:
     // - PoW blocks: verify the EVO-OMAP proof-of-work
     // - Refiner blocks: verify the refiner's ed25519 signature over the block hash
     //   The producer's public key must be stored on-chain in the AccountStore.
     // - Genesis block (height 0): skip both
     if expected_height > 0 {
-        if block.header.pow_proof.is_some() {
+        let has_pow = block.header.pow_proof.is_some();
+        let has_refiner_signature = block.header.refiner_signature.is_some();
+        if has_pow && has_refiner_signature {
+            return Err(OpolysError::BlockValidationFailed(
+                "Block must not have both pow_proof and refiner_signature".to_string(),
+            ));
+        }
+        if !has_pow && !has_refiner_signature {
+            return Err(OpolysError::BlockValidationFailed(
+                "Block must have either pow_proof or refiner_signature".to_string(),
+            ));
+        }
+        if block.header.producer.0.is_zero() {
+            return Err(OpolysError::BlockValidationFailed(
+                "Block producer must be a non-zero ObjectId".to_string(),
+            ));
+        }
+
+        if has_pow {
             // PoW block — verify the proof-of-work
             if let Err(e) = crate::pow::verify_pow_light(&block.header, block.header.difficulty) {
                 return Err(e);
             }
-        } else if block.header.refiner_signature.is_some() {
+        } else if has_refiner_signature {
             // Refiner block — verify the refiner's ed25519 signature
             // 1. The signature must be exactly 64 bytes (ed25519)
             let sig = block.header.refiner_signature.as_ref().unwrap();
@@ -288,13 +316,7 @@ pub fn validate_block(
                     sig.len()
                 )));
             }
-            // 2. The producer must not be the zero ObjectId
-            if block.header.producer.0.is_zero() {
-                return Err(OpolysError::BlockValidationFailed(
-                    "Refiner block producer must be a valid refiner ObjectId".to_string()
-                ));
-            }
-            // 3. Verify the ed25519 signature over the block hash
+            // 2. Verify the ed25519 signature over the block hash
             //    The producer's public key is stored in their Account on-chain.
             //    This verification is done at the node level (apply_block) where
             //    AccountStore is available, not here in consensus-only validation.
@@ -303,7 +325,7 @@ pub fn validate_block(
         } else {
             // Neither PoW proof nor refiner signature — invalid
             return Err(OpolysError::BlockValidationFailed(
-                "Block must have either pow_proof or refiner_signature".to_string()
+                "Block must have either pow_proof or refiner_signature".to_string(),
             ));
         }
     }
@@ -314,7 +336,7 @@ pub fn validate_block(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opolys_core::{Transaction, TransactionAction, ObjectId};
+    use opolys_core::{ObjectId, Transaction, TransactionAction};
     use opolys_crypto::hash_to_object_id;
 
     #[test]
@@ -387,8 +409,14 @@ mod tests {
     #[test]
     fn block_hash_differs_for_different_heights() {
         let base = test_header(1, 1);
-        let h1 = compute_block_hash(&BlockHeader { height: 1, ..base.clone() });
-        let h2 = compute_block_hash(&BlockHeader { height: 2, ..base.clone() });
+        let h1 = compute_block_hash(&BlockHeader {
+            height: 1,
+            ..base.clone()
+        });
+        let h2 = compute_block_hash(&BlockHeader {
+            height: 2,
+            ..base.clone()
+        });
         assert_ne!(h1, h2);
     }
 
@@ -425,15 +453,67 @@ mod tests {
     #[test]
     fn block_hash_includes_version() {
         let h1 = test_header(1, 1);
-        let h2 = BlockHeader { version: 2, ..h1.clone() };
+        let h2 = BlockHeader {
+            version: 2,
+            ..h1.clone()
+        };
         assert_ne!(compute_block_hash(&h1), compute_block_hash(&h2));
     }
 
     #[test]
     fn block_hash_includes_suggested_fee() {
         let h1 = test_header(1, 1);
-        let h2 = BlockHeader { suggested_fee: 999, ..h1.clone() };
+        let h2 = BlockHeader {
+            suggested_fee: 999,
+            ..h1.clone()
+        };
         assert_ne!(compute_block_hash(&h1), compute_block_hash(&h2));
+    }
+
+    #[test]
+    fn validate_block_rejects_pow_and_refiner_signature_together() {
+        let header = BlockHeader {
+            height: 1,
+            timestamp: 1001,
+            transaction_root: compute_transaction_root(&[]),
+            producer: ObjectId(Hash::from_bytes([7u8; 32])),
+            pow_proof: Some(vec![0; 8]),
+            refiner_signature: Some(vec![0; 64]),
+            ..test_header(1, 1)
+        };
+        let block = Block {
+            header,
+            transactions: vec![],
+            slash_evidence: vec![],
+            genesis_ceremony: None,
+        };
+        let err = validate_block(&block, 1, &Hash::zero(), 1000, 1, 1001).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("both pow_proof and refiner_signature")
+        );
+    }
+
+    #[test]
+    fn validate_block_rejects_zero_producer_after_genesis() {
+        let header = BlockHeader {
+            height: 1,
+            timestamp: 1001,
+            transaction_root: compute_transaction_root(&[]),
+            refiner_signature: Some(vec![0; 64]),
+            ..test_header(1, 1)
+        };
+        let block = Block {
+            header,
+            transactions: vec![],
+            slash_evidence: vec![],
+            genesis_ceremony: None,
+        };
+        let err = validate_block(&block, 1, &Hash::zero(), 1000, 1, 1001).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("producer must be a non-zero ObjectId")
+        );
     }
 
     #[test]

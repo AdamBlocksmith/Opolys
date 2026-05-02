@@ -32,27 +32,32 @@
 //! - `GET /health` — returns `"ok"` if the node is running
 
 use axum::{
-    extract::{ConnectInfo, State},
-    http::{HeaderMap, StatusCode},
+    Json, Router,
+    extract::{ConnectInfo, DefaultBodyLimit, State},
+    http::{HeaderMap, HeaderValue, StatusCode},
     routing::{get, post},
-    Json,
-    Router,
 };
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use subtle::ConstantTimeEq;
 use tokio::sync::RwLock;
 use tower_http::cors::{Any, CorsLayer};
 
-use opolys_core::{FlakeAmount, Block, Transaction, ObjectId, Hash, FLAKES_PER_OPL, EPOCH, MAX_ACTIVE_REFINERS};
 use opolys_consensus::account::AccountStore;
+use opolys_consensus::block::compute_block_hash;
+use opolys_consensus::difficulty::compute_next_difficulty;
 use opolys_consensus::mempool::Mempool;
 use opolys_consensus::refiner::RefinerSet;
-use opolys_consensus::difficulty::compute_next_difficulty;
-use opolys_consensus::block::compute_block_hash;
+use opolys_core::{
+    Block, EPOCH, FLAKES_PER_OPL, FlakeAmount, Hash, MAX_ACTIVE_REFINERS, ObjectId, Transaction,
+};
 use opolys_storage::BlockchainStore;
 
 use crate::jsonrpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse, RateLimiter};
+
+/// Maximum accepted JSON-RPC request body size.
+pub const MAX_RPC_REQUEST_BODY_BYTES: usize = 1_048_576;
 
 /// Simplified chain info snapshot for RPC responses.
 ///
@@ -120,6 +125,8 @@ pub struct RpcState {
     /// Optional API key for write and mining endpoints.
     /// If Some, opl_sendTransaction/getMiningJob/submitSolution require
     /// Authorization: Bearer <key> or X-Api-Key: <key>. Read methods always public.
+    /// If None, write/mining methods are unauthenticated; mainnet nodes should only
+    /// use this when started with an explicit no-auth operator flag.
     pub api_key: Option<String>,
 }
 
@@ -154,7 +161,13 @@ impl RpcState {
         api_key: Option<String>,
     ) -> Self {
         RpcState {
-            chain, accounts, refiners, mempool, store, block_sender, miner_id,
+            chain,
+            accounts,
+            refiners,
+            mempool,
+            store,
+            block_sender,
+            miner_id,
             rate_limiter: Arc::new(Mutex::new(RateLimiter::new(120))),
             api_key,
         }
@@ -174,15 +187,21 @@ fn classify_method(method: &str) -> (&'static str, usize, bool) {
     }
 }
 
+/// Compare API keys in constant time when their lengths match.
+fn constant_time_key_eq(provided: &str, required: &str) -> bool {
+    provided.len() == required.len() && provided.as_bytes().ct_eq(required.as_bytes()).into()
+}
+
 /// Verify `Authorization: Bearer <key>` or `X-Api-Key: <key>` header.
 fn check_api_key(headers: &HeaderMap, required_key: &str) -> bool {
     if let Some(val) = headers.get("authorization").and_then(|v| v.to_str().ok()) {
-        if val.starts_with("Bearer ") && &val["Bearer ".len()..] == required_key {
+        if val.starts_with("Bearer ") && constant_time_key_eq(&val["Bearer ".len()..], required_key)
+        {
             return true;
         }
     }
     if let Some(val) = headers.get("x-api-key").and_then(|v| v.to_str().ok()) {
-        if val == required_key {
+        if constant_time_key_eq(val, required_key) {
             return true;
         }
     }
@@ -207,12 +226,15 @@ pub async fn handle_jsonrpc(
         let mut limiter = state.rate_limiter.lock().unwrap();
         let rate_key = format!("{}:{}", ip, tier);
         if !limiter.check_limit(&rate_key, max_per_min) {
-            return (StatusCode::TOO_MANY_REQUESTS, Json(JsonRpcResponse {
-                jsonrpc: "2.0".to_string(),
-                result: None,
-                error: Some(JsonRpcError::rate_limited()),
-                id: req.id,
-            }));
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(JsonRpcResponse {
+                    jsonrpc: "2.0".to_string(),
+                    result: None,
+                    error: Some(JsonRpcError::rate_limited()),
+                    id: req.id,
+                }),
+            );
         }
     }
 
@@ -220,12 +242,15 @@ pub async fn handle_jsonrpc(
     if needs_auth {
         if let Some(ref required_key) = state.api_key {
             if !check_api_key(&headers, required_key) {
-                return (StatusCode::UNAUTHORIZED, Json(JsonRpcResponse {
-                    jsonrpc: "2.0".to_string(),
-                    result: None,
-                    error: Some(JsonRpcError::unauthorized()),
-                    id: req.id,
-                }));
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(JsonRpcResponse {
+                        jsonrpc: "2.0".to_string(),
+                        result: None,
+                        error: Some(JsonRpcError::unauthorized()),
+                        id: req.id,
+                    }),
+                );
             }
         }
     }
@@ -263,18 +288,24 @@ pub async fn handle_jsonrpc(
     };
 
     match result {
-        Ok(value) => (StatusCode::OK, Json(JsonRpcResponse {
-            jsonrpc: "2.0".to_string(),
-            result: Some(value),
-            error: None,
-            id: req.id,
-        })),
-        Err(e) => (StatusCode::OK, Json(JsonRpcResponse {
-            jsonrpc: "2.0".to_string(),
-            result: None,
-            error: Some(e),
-            id: req.id,
-        })),
+        Ok(value) => (
+            StatusCode::OK,
+            Json(JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                result: Some(value),
+                error: None,
+                id: req.id,
+            }),
+        ),
+        Err(e) => (
+            StatusCode::OK,
+            Json(JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                result: None,
+                error: Some(e),
+                id: req.id,
+            }),
+        ),
     }
 }
 
@@ -311,7 +342,8 @@ async fn handle_get_chain_info(state: &RpcState) -> Result<serde_json::Value, Js
 
 async fn handle_get_finalized_height(state: &RpcState) -> Result<serde_json::Value, JsonRpcError> {
     let chain = state.chain.read().await;
-    serde_json::to_value(chain.finalized_height).map_err(|e| JsonRpcError::internal_error(&e.to_string()))
+    serde_json::to_value(chain.finalized_height)
+        .map_err(|e| JsonRpcError::internal_error(&e.to_string()))
 }
 
 fn handle_get_network_version() -> Result<serde_json::Value, JsonRpcError> {
@@ -319,20 +351,28 @@ fn handle_get_network_version() -> Result<serde_json::Value, JsonRpcError> {
         .map_err(|e| JsonRpcError::internal_error(&e.to_string()))
 }
 
-async fn handle_get_balance(state: &RpcState, params: &serde_json::Value) -> Result<serde_json::Value, JsonRpcError> {
+async fn handle_get_balance(
+    state: &RpcState,
+    params: &serde_json::Value,
+) -> Result<serde_json::Value, JsonRpcError> {
     let object_id = require_object_id(params)?;
     let accounts = state.accounts.read().await;
-    let balance = accounts.get_account(&object_id)
+    let balance = accounts
+        .get_account(&object_id)
         .map(|a| a.balance)
         .unwrap_or(0);
     serde_json::to_value(BalanceResponse {
         object_id: object_id.to_hex(),
         balance_flakes: balance,
         balance_opl: format_flake(balance),
-    }).map_err(|e| JsonRpcError::internal_error(&e.to_string()))
+    })
+    .map_err(|e| JsonRpcError::internal_error(&e.to_string()))
 }
 
-async fn handle_get_account(state: &RpcState, params: &serde_json::Value) -> Result<serde_json::Value, JsonRpcError> {
+async fn handle_get_account(
+    state: &RpcState,
+    params: &serde_json::Value,
+) -> Result<serde_json::Value, JsonRpcError> {
     let object_id = require_object_id(params)?;
     let accounts = state.accounts.read().await;
     match accounts.get_account(&object_id) {
@@ -341,23 +381,33 @@ async fn handle_get_account(state: &RpcState, params: &serde_json::Value) -> Res
             balance_flakes: account.balance,
             balance_opl: format_flake(account.balance),
             nonce: account.nonce,
-        }).map_err(|e| JsonRpcError::internal_error(&e.to_string())),
+        })
+        .map_err(|e| JsonRpcError::internal_error(&e.to_string())),
         None => Err(JsonRpcError::not_found("Account not found")),
     }
 }
 
-async fn handle_get_block_by_height(state: &RpcState, params: &serde_json::Value) -> Result<serde_json::Value, JsonRpcError> {
+async fn handle_get_block_by_height(
+    state: &RpcState,
+    params: &serde_json::Value,
+) -> Result<serde_json::Value, JsonRpcError> {
     let height = require_u64_param(params, "height")?;
     let finalized_height = state.chain.read().await.finalized_height;
     match state.store.load_block(height) {
         Ok(Some(block)) => serde_json::to_value(block_to_response(&block, finalized_height))
             .map_err(|e| JsonRpcError::internal_error(&e.to_string())),
-        Ok(None) => Err(JsonRpcError::not_found(&format!("Block at height {} not found", height))),
+        Ok(None) => Err(JsonRpcError::not_found(&format!(
+            "Block at height {} not found",
+            height
+        ))),
         Err(e) => Err(JsonRpcError::internal_error(&e.to_string())),
     }
 }
 
-async fn handle_get_block_by_hash(state: &RpcState, params: &serde_json::Value) -> Result<serde_json::Value, JsonRpcError> {
+async fn handle_get_block_by_hash(
+    state: &RpcState,
+    params: &serde_json::Value,
+) -> Result<serde_json::Value, JsonRpcError> {
     let hex_hash = require_string_param(params, "hash")?;
     let hash = parse_hash(&hex_hash)?;
     let finalized_height = state.chain.read().await.finalized_height;
@@ -370,7 +420,10 @@ async fn handle_get_block_by_hash(state: &RpcState, params: &serde_json::Value) 
     }
 }
 
-async fn handle_get_latest_blocks(state: &RpcState, params: &serde_json::Value) -> Result<serde_json::Value, JsonRpcError> {
+async fn handle_get_latest_blocks(
+    state: &RpcState,
+    params: &serde_json::Value,
+) -> Result<serde_json::Value, JsonRpcError> {
     let count = optional_u64_param(params, 10)?;
     let chain = state.chain.read().await;
     let current_height = chain.height;
@@ -388,7 +441,10 @@ async fn handle_get_latest_blocks(state: &RpcState, params: &serde_json::Value) 
     serde_json::to_value(blocks).map_err(|e| JsonRpcError::internal_error(&e.to_string()))
 }
 
-async fn handle_get_transaction(state: &RpcState, params: &serde_json::Value) -> Result<serde_json::Value, JsonRpcError> {
+async fn handle_get_transaction(
+    state: &RpcState,
+    params: &serde_json::Value,
+) -> Result<serde_json::Value, JsonRpcError> {
     let hex_id = require_string_param(params, "tx_id")?;
     let tx_id = parse_object_id(&hex_id)?;
 
@@ -405,7 +461,8 @@ async fn handle_get_transaction(state: &RpcState, params: &serde_json::Value) ->
                 nonce: tx.nonce,
                 status: "pending".to_string(),
                 block_height: None,
-            }).map_err(|e| JsonRpcError::internal_error(&e.to_string()));
+            })
+            .map_err(|e| JsonRpcError::internal_error(&e.to_string()));
         }
     }
 
@@ -420,7 +477,8 @@ async fn handle_get_transaction(state: &RpcState, params: &serde_json::Value) ->
             nonce: tx.nonce,
             status: "confirmed".to_string(),
             block_height: Some(block_height),
-        }).map_err(|e| JsonRpcError::internal_error(&e.to_string())),
+        })
+        .map_err(|e| JsonRpcError::internal_error(&e.to_string())),
         Ok(None) => Err(JsonRpcError::not_found("Transaction not found")),
         Err(e) => Err(JsonRpcError::internal_error(&e.to_string())),
     }
@@ -431,7 +489,8 @@ async fn handle_get_mempool_status(state: &RpcState) -> Result<serde_json::Value
     serde_json::to_value(MempoolStatusResponse {
         transaction_count: mempool.transaction_count(),
         total_size_bytes: mempool.total_size(),
-    }).map_err(|e| JsonRpcError::internal_error(&e.to_string()))
+    })
+    .map_err(|e| JsonRpcError::internal_error(&e.to_string()))
 }
 
 async fn handle_get_supply(state: &RpcState) -> Result<serde_json::Value, JsonRpcError> {
@@ -443,7 +502,8 @@ async fn handle_get_supply(state: &RpcState) -> Result<serde_json::Value, JsonRp
         total_issued_opl: format_flake(chain.total_issued),
         total_burned_opl: format_flake(chain.total_burned),
         circulating_supply_opl: format_flake(chain.circulating_supply),
-    }).map_err(|e| JsonRpcError::internal_error(&e.to_string()))
+    })
+    .map_err(|e| JsonRpcError::internal_error(&e.to_string()))
 }
 
 async fn handle_get_difficulty(state: &RpcState) -> Result<serde_json::Value, JsonRpcError> {
@@ -451,8 +511,11 @@ async fn handle_get_difficulty(state: &RpcState) -> Result<serde_json::Value, Js
     let refiners = state.refiners.read().await;
     let bonded_stake = refiners.total_bonded_stake();
     let diff_target = compute_next_difficulty(
-        chain.difficulty, chain.height, &chain.block_timestamps,
-        chain.total_issued, bonded_stake,
+        chain.difficulty,
+        chain.height,
+        &chain.block_timestamps,
+        chain.total_issued,
+        bonded_stake,
     );
     serde_json::to_value(DifficultyResponse {
         current_difficulty: chain.difficulty,
@@ -461,7 +524,8 @@ async fn handle_get_difficulty(state: &RpcState) -> Result<serde_json::Value, Js
         effective_difficulty: diff_target.effective_difficulty(),
         height: chain.height,
         next_retarget_height: ((chain.height / EPOCH) + 1) * EPOCH,
-    }).map_err(|e| JsonRpcError::internal_error(&e.to_string()))
+    })
+    .map_err(|e| JsonRpcError::internal_error(&e.to_string()))
 }
 
 async fn handle_get_refiners(state: &RpcState) -> Result<serde_json::Value, JsonRpcError> {
@@ -473,12 +537,16 @@ async fn handle_get_refiners(state: &RpcState) -> Result<serde_json::Value, Json
     for v in refiner_list {
         let total_stake = v.total_stake();
         let total_weight = v.weight(current_timestamp);
-        let entries: Vec<BondEntryResponse> = v.entries.iter().map(|e| BondEntryResponse {
-            stake_flakes: e.stake,
-            stake_opl: format_flake(e.stake),
-            bonded_at_height: e.bonded_at_height,
-            bonded_at_timestamp: e.bonded_at_timestamp,
-        }).collect();
+        let entries: Vec<BondEntryResponse> = v
+            .entries
+            .iter()
+            .map(|e| BondEntryResponse {
+                stake_flakes: e.stake,
+                stake_opl: format_flake(e.stake),
+                bonded_at_height: e.bonded_at_height,
+                bonded_at_timestamp: e.bonded_at_timestamp,
+            })
+            .collect();
         result.push(RefinerResponse {
             object_id: v.object_id.to_hex(),
             entries,
@@ -494,24 +562,36 @@ async fn handle_get_refiners(state: &RpcState) -> Result<serde_json::Value, Json
 
 // ─── Write endpoint handlers ───────────────────────────────────────
 
-async fn handle_send_transaction(state: &RpcState, params: &serde_json::Value) -> Result<serde_json::Value, JsonRpcError> {
+async fn handle_send_transaction(
+    state: &RpcState,
+    params: &serde_json::Value,
+) -> Result<serde_json::Value, JsonRpcError> {
     let hex_data = require_string_param(params, "data")?;
-    let bytes = hex::decode(&hex_data).map_err(|e| JsonRpcError::invalid_params(&format!("Invalid hex: {}", e)))?;
-    let tx: Transaction = borsh::from_slice(&bytes).map_err(|e| JsonRpcError::invalid_params(&format!("Invalid transaction: {}", e)))?;
+    let bytes = hex::decode(&hex_data)
+        .map_err(|e| JsonRpcError::invalid_params(&format!("Invalid hex: {}", e)))?;
+    let tx: Transaction = borsh::from_slice(&bytes)
+        .map_err(|e| JsonRpcError::invalid_params(&format!("Invalid transaction: {}", e)))?;
 
     let tx_id = tx.tx_id.clone();
     let fee = tx.fee;
     let action = format_action(&tx.action);
 
     // Insert into mempool with priority based on fee/size ratio
-    let priority = if fee > 0 { fee as f64 / bytes.len().max(1) as f64 } else { 0.0 };
+    let priority = if fee > 0 {
+        fee as f64 / bytes.len().max(1) as f64
+    } else {
+        0.0
+    };
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
 
     let sender = tx.sender.clone();
-    let account_nonce = state.accounts.read().await
+    let account_nonce = state
+        .accounts
+        .read()
+        .await
         .get_account(&sender)
         .map(|a| a.nonce)
         .unwrap_or(0);
@@ -519,7 +599,8 @@ async fn handle_send_transaction(state: &RpcState, params: &serde_json::Value) -
 
     {
         let mut mempool = state.mempool.write().await;
-        mempool.add_transaction(tx, priority, timestamp, account_nonce, suggested_fee)
+        mempool
+            .add_transaction(tx, priority, timestamp, account_nonce, suggested_fee)
             .map_err(|e| JsonRpcError::invalid_params(&format!("Mempool rejected: {:?}", e)))?;
     }
 
@@ -529,7 +610,8 @@ async fn handle_send_transaction(state: &RpcState, params: &serde_json::Value) -
         fee_opl: format_flake(fee),
         action,
         status: "pending".to_string(),
-    }).map_err(|e| JsonRpcError::internal_error(&e.to_string()))
+    })
+    .map_err(|e| JsonRpcError::internal_error(&e.to_string()))
 }
 
 // ─── Mining endpoint handlers ──────────────────────────────────────
@@ -543,13 +625,17 @@ async fn handle_get_mining_job(state: &RpcState) -> Result<serde_json::Value, Js
     let total_issued = chain.total_issued;
 
     let diff_target = compute_next_difficulty(
-        chain.difficulty, chain.height, &chain.block_timestamps,
-        total_issued, bonded_stake,
+        chain.difficulty,
+        chain.height,
+        &chain.block_timestamps,
+        total_issued,
+        bonded_stake,
     );
     let difficulty = diff_target.effective_difficulty();
 
     // Collect transactions from mempool
-    let transactions: Vec<Transaction> = mempool.get_ordered_transactions()
+    let transactions: Vec<Transaction> = mempool
+        .get_ordered_transactions()
         .into_iter()
         .take(100)
         .cloned()
@@ -601,10 +687,15 @@ async fn handle_get_mining_job(state: &RpcState) -> Result<serde_json::Value, Js
     serde_json::to_value(job).map_err(|e| JsonRpcError::internal_error(&e.to_string()))
 }
 
-async fn handle_submit_solution(state: &RpcState, params: &serde_json::Value) -> Result<serde_json::Value, JsonRpcError> {
+async fn handle_submit_solution(
+    state: &RpcState,
+    params: &serde_json::Value,
+) -> Result<serde_json::Value, JsonRpcError> {
     let hex_data = require_string_param(params, "block")?;
-    let bytes = hex::decode(&hex_data).map_err(|e| JsonRpcError::invalid_params(&format!("Invalid hex: {}", e)))?;
-    let block: Block = borsh::from_slice(&bytes).map_err(|e| JsonRpcError::invalid_params(&format!("Invalid block: {}", e)))?;
+    let bytes = hex::decode(&hex_data)
+        .map_err(|e| JsonRpcError::invalid_params(&format!("Invalid hex: {}", e)))?;
+    let block: Block = borsh::from_slice(&bytes)
+        .map_err(|e| JsonRpcError::invalid_params(&format!("Invalid block: {}", e)))?;
 
     let height = block.header.height;
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
@@ -614,10 +705,12 @@ async fn handle_submit_solution(state: &RpcState, params: &serde_json::Value) ->
         reply: reply_tx,
     };
 
-    state.block_sender.send(submission).await
-        .map_err(|_| JsonRpcError::internal_error("Node is not accepting blocks — channel closed"))?;
+    state.block_sender.send(submission).await.map_err(|_| {
+        JsonRpcError::internal_error("Node is not accepting blocks — channel closed")
+    })?;
 
-    let result = reply_rx.await
+    let result = reply_rx
+        .await
         .map_err(|_| JsonRpcError::internal_error("Node did not respond to block submission"))?;
 
     match result.block_hash {
@@ -625,9 +718,13 @@ async fn handle_submit_solution(state: &RpcState, params: &serde_json::Value) ->
             height,
             block_hash: hash,
             status: "accepted".to_string(),
-        }).map_err(|e| JsonRpcError::internal_error(&e.to_string())),
+        })
+        .map_err(|e| JsonRpcError::internal_error(&e.to_string())),
         None => Err(JsonRpcError::internal_error(
-            result.error.as_deref().unwrap_or("Block application failed"),
+            result
+                .error
+                .as_deref()
+                .unwrap_or("Block application failed"),
         )),
     }
 }
@@ -638,7 +735,11 @@ async fn handle_submit_solution(state: &RpcState, params: &serde_json::Value) ->
 fn require_object_id(params: &serde_json::Value) -> Result<ObjectId, JsonRpcError> {
     let arr = match params {
         serde_json::Value::Array(a) => a,
-        _ => return Err(JsonRpcError::invalid_params("Expected params array with object_id")),
+        _ => {
+            return Err(JsonRpcError::invalid_params(
+                "Expected params array with object_id",
+            ));
+        }
     };
     if arr.is_empty() {
         return Err(JsonRpcError::invalid_params("Missing object_id parameter"));
@@ -650,24 +751,44 @@ fn require_object_id(params: &serde_json::Value) -> Result<ObjectId, JsonRpcErro
 fn require_u64_param(params: &serde_json::Value, name: &str) -> Result<u64, JsonRpcError> {
     let arr = match params {
         serde_json::Value::Array(a) => a,
-        _ => return Err(JsonRpcError::invalid_params(&format!("Expected params array with {}", name))),
+        _ => {
+            return Err(JsonRpcError::invalid_params(&format!(
+                "Expected params array with {}",
+                name
+            )));
+        }
     };
     if arr.is_empty() {
-        return Err(JsonRpcError::invalid_params(&format!("Missing {} parameter", name)));
+        return Err(JsonRpcError::invalid_params(&format!(
+            "Missing {} parameter",
+            name
+        )));
     }
-    arr[0].as_u64().ok_or_else(|| JsonRpcError::invalid_params(&format!("{} must be a number", name)))
+    arr[0]
+        .as_u64()
+        .ok_or_else(|| JsonRpcError::invalid_params(&format!("{} must be a number", name)))
 }
 
 /// Require a string parameter at index 0.
 fn require_string_param(params: &serde_json::Value, name: &str) -> Result<String, JsonRpcError> {
     let arr = match params {
         serde_json::Value::Array(a) => a,
-        _ => return Err(JsonRpcError::invalid_params(&format!("Expected params array with {}", name))),
+        _ => {
+            return Err(JsonRpcError::invalid_params(&format!(
+                "Expected params array with {}",
+                name
+            )));
+        }
     };
     if arr.is_empty() {
-        return Err(JsonRpcError::invalid_params(&format!("Missing {} parameter", name)));
+        return Err(JsonRpcError::invalid_params(&format!(
+            "Missing {} parameter",
+            name
+        )));
     }
-    arr[0].as_str().map(String::from)
+    arr[0]
+        .as_str()
+        .map(String::from)
         .ok_or_else(|| JsonRpcError::invalid_params(&format!("{} must be a string", name)))
 }
 
@@ -685,9 +806,13 @@ fn optional_u64_param(params: &serde_json::Value, default: u64) -> Result<u64, J
 
 /// Parse a Blake3 hash from hex.
 fn parse_hash(hex_str: &str) -> Result<Hash, JsonRpcError> {
-    let bytes = hex::decode(hex_str).map_err(|e| JsonRpcError::invalid_params(&format!("Invalid hex: {}", e)))?;
+    let bytes = hex::decode(hex_str)
+        .map_err(|e| JsonRpcError::invalid_params(&format!("Invalid hex: {}", e)))?;
     if bytes.len() != 32 {
-        return Err(JsonRpcError::invalid_params(&format!("Expected 32-byte hash, got {} bytes", bytes.len())));
+        return Err(JsonRpcError::invalid_params(&format!(
+            "Expected 32-byte hash, got {} bytes",
+            bytes.len()
+        )));
     }
     let mut arr = [0u8; 32];
     arr.copy_from_slice(&bytes);
@@ -696,9 +821,13 @@ fn parse_hash(hex_str: &str) -> Result<Hash, JsonRpcError> {
 
 /// Parse an ObjectId from a hex string.
 fn parse_object_id(hex_str: &str) -> Result<ObjectId, JsonRpcError> {
-    let bytes = hex::decode(hex_str).map_err(|e| JsonRpcError::invalid_params(&format!("Invalid hex: {}", e)))?;
+    let bytes = hex::decode(hex_str)
+        .map_err(|e| JsonRpcError::invalid_params(&format!("Invalid hex: {}", e)))?;
     if bytes.len() != 32 {
-        return Err(JsonRpcError::invalid_params(&format!("Expected 32 bytes, got {}", bytes.len())));
+        return Err(JsonRpcError::invalid_params(&format!(
+            "Expected 32 bytes, got {}",
+            bytes.len()
+        )));
     }
     let mut arr = [0u8; 32];
     arr.copy_from_slice(&bytes);
@@ -714,7 +843,9 @@ fn format_action(action: &opolys_core::TransactionAction) -> String {
         opolys_core::TransactionAction::RefinerBond { amount } => {
             format!("Bond {} flakes ({})", amount, format_flake(*amount))
         }
-        opolys_core::TransactionAction::RefinerUnbond { amount } => format!("Unbond {} flakes ({})", amount, format_flake(*amount)),
+        opolys_core::TransactionAction::RefinerUnbond { amount } => {
+            format!("Unbond {} flakes ({})", amount, format_flake(*amount))
+        }
     }
 }
 
@@ -924,7 +1055,10 @@ pub async fn health_check() -> &'static str {
 /// Build and return the Axum router with all RPC routes and CORS enabled.
 pub fn build_router(state: RpcState) -> Router {
     let cors = CorsLayer::new()
-        .allow_origin(Any)
+        .allow_origin([
+            HeaderValue::from_static("http://localhost:4171"),
+            HeaderValue::from_static("http://127.0.0.1:4171"),
+        ])
         .allow_methods(Any)
         .allow_headers(Any);
 
@@ -932,6 +1066,7 @@ pub fn build_router(state: RpcState) -> Router {
         .route("/rpc", post(handle_jsonrpc))
         .route("/health", get(health_check))
         .with_state(state)
+        .layer(DefaultBodyLimit::max(MAX_RPC_REQUEST_BODY_BYTES))
         .layer(cors)
 }
 
@@ -940,8 +1075,13 @@ pub fn build_router(state: RpcState) -> Router {
 /// Defaults to `127.0.0.1` (localhost-only). Pass `0.0.0.0` via
 /// `--rpc-listen-addr` to expose publicly. Uses `into_make_service_with_connect_info`
 /// so handlers can extract the client IP for per-IP rate limiting.
-pub async fn start_server(state: RpcState, port: u16, listen_addr: &str) -> Result<(), anyhow::Error> {
-    let ip: std::net::IpAddr = listen_addr.parse()
+pub async fn start_server(
+    state: RpcState,
+    port: u16,
+    listen_addr: &str,
+) -> Result<(), anyhow::Error> {
+    let ip: std::net::IpAddr = listen_addr
+        .parse()
         .map_err(|e| anyhow::anyhow!("Invalid --rpc-listen-addr '{}': {}", listen_addr, e))?;
     let addr = SocketAddr::from((ip, port));
 
@@ -949,7 +1089,11 @@ pub async fn start_server(state: RpcState, port: u16, listen_addr: &str) -> Resu
 
     let app = build_router(state);
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }
@@ -978,5 +1122,31 @@ mod tests {
     fn object_id_from_invalid_hex() {
         assert!(parse_object_id("not_hex").is_err());
         assert!(parse_object_id("0123").is_err());
+    }
+
+    #[test]
+    fn api_key_accepts_bearer_and_x_api_key() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer secret-key".parse().unwrap());
+        assert!(check_api_key(&headers, "secret-key"));
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", "secret-key".parse().unwrap());
+        assert!(check_api_key(&headers, "secret-key"));
+    }
+
+    #[test]
+    fn api_key_rejects_wrong_or_prefix_only_values() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer secret-kex".parse().unwrap());
+        assert!(!check_api_key(&headers, "secret-key"));
+
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "secret-key".parse().unwrap());
+        assert!(!check_api_key(&headers, "secret-key"));
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", "secret".parse().unwrap());
+        assert!(!check_api_key(&headers, "secret-key"));
     }
 }

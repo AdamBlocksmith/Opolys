@@ -18,9 +18,9 @@
 //! room for higher-fee arrivals.
 
 use opolys_core::{
-    Transaction, ObjectId, OpolysError,
-    TX_MAX_SIZE_BYTES, MEMPOOL_MAX_SIZE_BYTES, MEMPOOL_MAX_TXS_PER_ACCOUNT,
-    MEMPOOL_TX_EXPIRY_SECS, MIN_FEE, CAPACITY_RATIO, CONGESTION_THRESHOLD_PERMILLE,
+    CAPACITY_RATIO, CONGESTION_THRESHOLD_PERMILLE, MEMPOOL_MAX_SIZE_BYTES,
+    MEMPOOL_MAX_TXS_PER_ACCOUNT, MEMPOOL_TX_EXPIRY_SECS, MIN_FEE, ObjectId, OpolysError,
+    TX_MAX_SIZE_BYTES, Transaction,
 };
 
 /// Maximum gap between an incoming transaction's nonce and the sender's
@@ -93,11 +93,10 @@ impl Mempool {
     /// Evict all transactions older than `MEMPOOL_TX_EXPIRY_SECS`.
     /// Returns the number of entries removed.
     pub fn evict_expired(&mut self, current_time: u64) -> usize {
-        let expired: Vec<ObjectId> = self.entries
+        let expired: Vec<ObjectId> = self
+            .entries
             .iter()
-            .filter(|(_, e)| {
-                current_time.saturating_sub(e.submitted_at) > MEMPOOL_TX_EXPIRY_SECS
-            })
+            .filter(|(_, e)| current_time.saturating_sub(e.submitted_at) > MEMPOOL_TX_EXPIRY_SECS)
             .map(|(id, _)| id.clone())
             .collect();
         let count = expired.len();
@@ -128,7 +127,8 @@ impl Mempool {
         // FIX 1: enforce minimum fee
         if tx.fee < MIN_FEE {
             return Err(OpolysError::InvalidTransaction(format!(
-                "Fee {} is below minimum fee {}", tx.fee, MIN_FEE
+                "Fee {} is below minimum fee {}",
+                tx.fee, MIN_FEE
             )));
         }
 
@@ -136,14 +136,16 @@ impl Mempool {
         let eff_min = self.effective_min_fee(suggested_fee);
         if tx.fee < eff_min {
             return Err(OpolysError::InvalidTransaction(format!(
-                "Fee {} below congestion minimum {}", tx.fee, eff_min
+                "Fee {} below congestion minimum {}",
+                tx.fee, eff_min
             )));
         }
 
         let tx_size = borsh::to_vec(&tx).map(|v| v.len()).unwrap_or(0);
         if tx_size > TX_MAX_SIZE_BYTES {
             return Err(OpolysError::InvalidTransaction(format!(
-                "Transaction too large: {} bytes", tx_size
+                "Transaction too large: {} bytes",
+                tx_size
             )));
         }
 
@@ -151,7 +153,8 @@ impl Mempool {
         let sender_count = self.account_tx_counts.get(&tx.sender).copied().unwrap_or(0);
         if sender_count >= MEMPOOL_MAX_TXS_PER_ACCOUNT {
             return Err(OpolysError::InvalidTransaction(format!(
-                "Too many transactions from account: {}", tx.sender.to_hex()
+                "Too many transactions from account: {}",
+                tx.sender.to_hex()
             )));
         }
 
@@ -165,11 +168,15 @@ impl Mempool {
 
         // Reject exact duplicate transactions by ID before the replacement check.
         if self.entries.contains_key(&tx.tx_id) {
-            return Err(OpolysError::InvalidTransaction("Duplicate transaction".to_string()));
+            return Err(OpolysError::InvalidTransaction(
+                "Duplicate transaction".to_string(),
+            ));
         }
 
         // FIX 5: same-nonce replacement — require a 10% fee bump to replace
-        let replacement = self.entries.values()
+        let replacement = self
+            .entries
+            .values()
             .find(|e| e.transaction.sender == tx.sender && e.transaction.nonce == tx.nonce)
             .map(|e| (e.transaction.tx_id.clone(), e.priority_score as u64));
 
@@ -194,16 +201,20 @@ impl Mempool {
             return Err(OpolysError::MempoolFull);
         }
 
-        self.account_tx_counts.entry(tx.sender.clone())
+        self.account_tx_counts
+            .entry(tx.sender.clone())
             .and_modify(|c| *c += 1)
             .or_insert(1);
 
         self.total_size += tx_size;
-        self.entries.insert(tx.tx_id.clone(), MempoolEntry {
-            transaction: tx,
-            priority_score,
-            submitted_at,
-        });
+        self.entries.insert(
+            tx.tx_id.clone(),
+            MempoolEntry {
+                transaction: tx,
+                priority_score,
+                submitted_at,
+            },
+        );
 
         Ok(())
     }
@@ -219,7 +230,9 @@ impl Mempool {
                     self.account_tx_counts.remove(sender);
                 }
             }
-            let tx_size = borsh::to_vec(&entry.transaction).map(|v| v.len()).unwrap_or(0);
+            let tx_size = borsh::to_vec(&entry.transaction)
+                .map(|v| v.len())
+                .unwrap_or(0);
             self.total_size = self.total_size.saturating_sub(tx_size);
             Some(entry.transaction)
         } else {
@@ -239,7 +252,8 @@ impl Mempool {
         let mut entries: Vec<&MempoolEntry> = self.entries.values().collect();
         // Sort by priority (descending), then by submission time (ascending).
         entries.sort_by(|a, b| {
-            b.priority_score.partial_cmp(&a.priority_score)
+            b.priority_score
+                .partial_cmp(&a.priority_score)
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| a.submitted_at.cmp(&b.submitted_at))
         });
@@ -260,7 +274,9 @@ impl Mempool {
     /// bytes have been freed. Eviction order is ascending priority score,
     /// then ascending submission time (oldest first among equal priority).
     fn evict_lowest_priority(&mut self, needed_space: usize) {
-        let mut entries: Vec<(ObjectId, f64, u64, usize)> = self.entries.iter()
+        let mut entries: Vec<(ObjectId, f64, u64, usize)> = self
+            .entries
+            .iter()
             .map(|(id, e)| {
                 let size = borsh::to_vec(&e.transaction).map(|v| v.len()).unwrap_or(0);
                 (id.clone(), e.priority_score, e.submitted_at, size)
@@ -359,9 +375,17 @@ mod tests {
             if i < MEMPOOL_MAX_TXS_PER_ACCOUNT {
                 // account_nonce=0, nonce gap checked: i <= 0+10 for first 11, then gap exceeded
                 // Use i as account_nonce proxy so nonce is always within gap
-                assert!(mempool.add_transaction(tx, 1.0, 0, i.saturating_sub(1) as u64, 1).is_ok());
+                assert!(
+                    mempool
+                        .add_transaction(tx, 1.0, 0, i.saturating_sub(1) as u64, 1)
+                        .is_ok()
+                );
             } else {
-                assert!(mempool.add_transaction(tx, 1.0, 0, i.saturating_sub(1) as u64, 1).is_err());
+                assert!(
+                    mempool
+                        .add_transaction(tx, 1.0, 0, i.saturating_sub(1) as u64, 1)
+                        .is_err()
+                );
             }
         }
     }

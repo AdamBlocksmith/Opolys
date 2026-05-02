@@ -24,10 +24,13 @@
 //! keep their original `bonded_at_timestamp`. Invalid amounts (below
 //! MIN_FEE floor or exceeding total stake) result in an error.
 
-use opolys_core::{Transaction, TransactionAction, ObjectId, FlakeAmount, OpolysError, MIN_BOND_STAKE, MIN_FEE, SIGNATURE_TYPE_ED25519, ANNUAL_ATTRITION_PERMILLE};
 use opolys_consensus::account::{AccountStore, TransferResult};
 use opolys_consensus::refiner::RefinerSet;
-use opolys_crypto::hash_to_object_id;
+use opolys_core::{
+    ANNUAL_ATTRITION_PERMILLE, FlakeAmount, MIN_BOND_STAKE, MIN_FEE, ObjectId, OpolysError,
+    SIGNATURE_TYPE_ED25519, Transaction, TransactionAction,
+};
+use opolys_crypto::{DOMAIN_TX_ID, hash_to_object_id_with_domain, transaction_signing_payload};
 
 /// Result of applying a transaction to the chain state.
 ///
@@ -125,9 +128,15 @@ impl TransactionDispatcher {
             TransactionAction::Transfer { recipient, amount } => {
                 Self::apply_transfer(tx, sender, recipient, *amount, accounts)
             }
-            TransactionAction::RefinerBond { amount } => {
-                Self::apply_bond(tx, sender, *amount, accounts, refiners, block_height, block_timestamp)
-            }
+            TransactionAction::RefinerBond { amount } => Self::apply_bond(
+                tx,
+                sender,
+                *amount,
+                accounts,
+                refiners,
+                block_height,
+                block_timestamp,
+            ),
             TransactionAction::RefinerUnbond { amount } => {
                 Self::apply_unbond(tx, sender, *amount, accounts, refiners, block_height)
             }
@@ -197,7 +206,8 @@ impl TransactionDispatcher {
         // Verify total outflow (stake + fee + assay) doesn't exceed balance
         // Assay fee: ANNUAL_ATTRITION_PERMILLE / 4 / 1000 = 0.375% (0.25% each way for bond+unbond)
         // Gold analogy: assay fee to enter the vault
-        let bond_assay = (stake as u128 * ANNUAL_ATTRITION_PERMILLE as u128 / 4 / 1000) as FlakeAmount;
+        let bond_assay =
+            (stake as u128 * ANNUAL_ATTRITION_PERMILLE as u128 / 4 / 1000) as FlakeAmount;
         let total_needed = stake.saturating_add(tx.fee).saturating_add(bond_assay);
         if let Some(account) = accounts.get_account(sender) {
             if account.balance < total_needed {
@@ -216,8 +226,12 @@ impl TransactionDispatcher {
         // Register the bond (creates new entry or merges with same-timestamp entry)
         let sender_clone = sender.clone();
         if let Err(e) = refiners.bond(sender_clone, stake, block_height, block_timestamp) {
-            // Refund on failure
-            if let Ok(()) = accounts.credit(sender, total_needed) {}
+            if let Err(refund_error) = accounts.credit(sender, total_needed) {
+                return ApplyResult::err(&format!(
+                    "Bond failed ({}) and refund failed: {}",
+                    e, refund_error
+                ));
+            }
             return ApplyResult::err(&e);
         }
 
@@ -242,7 +256,7 @@ impl TransactionDispatcher {
     /// If the refiner has insufficient stake, the transaction fails with
     /// no fee burn and no nonce advance.
     ///
-fn apply_unbond(
+    fn apply_unbond(
         tx: &Transaction,
         sender: &ObjectId,
         amount: FlakeAmount,
@@ -259,7 +273,8 @@ fn apply_unbond(
         // assay must be payable. This fixes H4: zero-balance accounts can no longer
         // unbond for free. The assay is 0.375% of the unbonded amount.
         // We use the requested amount as an upper bound for the assay pre-check.
-        let max_assay = (amount as u128 * ANNUAL_ATTRITION_PERMILLE as u128 / 4 / 1000) as FlakeAmount;
+        let max_assay =
+            (amount as u128 * ANNUAL_ATTRITION_PERMILLE as u128 / 4 / 1000) as FlakeAmount;
         let total_fee = tx.fee.saturating_add(max_assay);
         if let Some(account) = accounts.get_account(sender) {
             if account.balance < total_fee {
@@ -286,7 +301,8 @@ fn apply_unbond(
 
         // Unbond assay: 0.375% of actually unbonded amount (may be less than requested)
         // Gold analogy: assay fee to exit the vault
-        let unbond_assay = (unbonded as u128 * ANNUAL_ATTRITION_PERMILLE as u128 / 4 / 1000) as FlakeAmount;
+        let unbond_assay =
+            (unbonded as u128 * ANNUAL_ATTRITION_PERMILLE as u128 / 4 / 1000) as FlakeAmount;
         let total_fee = tx.fee.saturating_add(unbond_assay);
 
         // Deduct fees from sender's balance (already pre-checked above)
@@ -313,7 +329,11 @@ fn apply_unbond(
 ///
 /// This is a fast check to reject obviously invalid transactions before
 /// they consume mempool space or network bandwidth.
-pub fn validate_transaction_basic(tx: &Transaction, sender_balance: FlakeAmount, sender_nonce: u64) -> Result<(), OpolysError> {
+pub fn validate_transaction_basic(
+    tx: &Transaction,
+    sender_balance: FlakeAmount,
+    sender_nonce: u64,
+) -> Result<(), OpolysError> {
     // Check minimum fee
     if tx.fee < MIN_FEE {
         return Err(OpolysError::InvalidParams(format!(
@@ -333,11 +353,13 @@ pub fn validate_transaction_basic(tx: &Transaction, sender_balance: FlakeAmount,
     let total_cost = match &tx.action {
         TransactionAction::Transfer { amount, .. } => amount.saturating_add(tx.fee),
         TransactionAction::RefinerBond { amount } => {
-            let bond_assay = (*amount as u128 * ANNUAL_ATTRITION_PERMILLE as u128 / 4 / 1000) as FlakeAmount;
+            let bond_assay =
+                (*amount as u128 * ANNUAL_ATTRITION_PERMILLE as u128 / 4 / 1000) as FlakeAmount;
             amount.saturating_add(tx.fee).saturating_add(bond_assay)
         }
         TransactionAction::RefinerUnbond { amount } => {
-            let max_unbond_assay = (*amount as u128 * ANNUAL_ATTRITION_PERMILLE as u128 / 4 / 1000) as FlakeAmount;
+            let max_unbond_assay =
+                (*amount as u128 * ANNUAL_ATTRITION_PERMILLE as u128 / 4 / 1000) as FlakeAmount;
             tx.fee.saturating_add(max_unbond_assay)
         }
     };
@@ -407,9 +429,11 @@ pub fn verify_transaction(tx: &Transaction, expected_chain_id: u64) -> Result<()
     // 5. Verify Blake3(public_key) == sender ObjectId binding
     let pk_bytes: [u8; 32] = match tx.public_key.as_slice().try_into() {
         Ok(b) => b,
-        Err(_) => return Err(OpolysError::InvalidTransaction(
-            "Public key conversion failed".to_string()
-        )),
+        Err(_) => {
+            return Err(OpolysError::InvalidTransaction(
+                "Public key conversion failed".to_string(),
+            ));
+        }
     };
     let derived_object_id = opolys_crypto::ed25519_public_key_to_object_id(&pk_bytes);
     if tx.sender != derived_object_id {
@@ -420,9 +444,9 @@ pub fn verify_transaction(tx: &Transaction, expected_chain_id: u64) -> Result<()
         )));
     }
 
-    // 6. Verify ed25519 signature over the Borsh-serialized (sender, action, fee, nonce, chain_id)
-    let unsigned_data = borsh::to_vec(&(tx.sender.clone(), &tx.action, tx.fee, tx.nonce, tx.chain_id))
-        .map_err(|e| OpolysError::InvalidTransaction(format!("Failed to serialize tx data: {}", e)))?;
+    // 6. Verify ed25519 signature over domain-separated transaction payload
+    let unsigned_data =
+        transaction_signing_payload(&tx.sender, &tx.action, tx.fee, tx.nonce, tx.chain_id);
 
     if !opolys_crypto::verify_ed25519(&tx.public_key, &unsigned_data, &tx.signature) {
         return Err(OpolysError::InvalidSignature);
@@ -443,19 +467,21 @@ fn compute_tx_id(
     chain_id: u64,
 ) -> ObjectId {
     let mut data = sender.0.to_hex().as_bytes().to_vec();
-    data.extend_from_slice(borsh::to_vec(action).unwrap_or_default().as_slice());
+    let action_bytes =
+        borsh::to_vec(action).expect("Transaction action serialization must not fail");
+    data.extend_from_slice(&action_bytes);
     data.extend_from_slice(&fee.to_be_bytes());
     data.extend_from_slice(&nonce.to_be_bytes());
     data.extend_from_slice(&chain_id.to_be_bytes());
-    hash_to_object_id(&data)
+    hash_to_object_id_with_domain(DOMAIN_TX_ID, &data)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opolys_core::{opl_to_flake, EPOCH, MAINNET_CHAIN_ID};
+    use ed25519_dalek::{Signer, SigningKey};
+    use opolys_core::{EPOCH, MAINNET_CHAIN_ID, opl_to_flake};
     use opolys_crypto::hash_to_object_id;
-    use ed25519_dalek::{SigningKey, Signer};
 
     /// Deterministic test keypair from a single seed byte.
     fn test_keypair(seed: u8) -> (SigningKey, ObjectId, Vec<u8>) {
@@ -466,61 +492,132 @@ mod tests {
         (signing_key, id, pk_bytes)
     }
 
-    fn signed_transfer(sk: &SigningKey, sender: &ObjectId, pk: Vec<u8>, to: &ObjectId, amount: FlakeAmount, fee: FlakeAmount, nonce: u64) -> Transaction {
-        let action = TransactionAction::Transfer { recipient: to.clone(), amount };
+    fn signed_transfer(
+        sk: &SigningKey,
+        sender: &ObjectId,
+        pk: Vec<u8>,
+        to: &ObjectId,
+        amount: FlakeAmount,
+        fee: FlakeAmount,
+        nonce: u64,
+    ) -> Transaction {
+        let action = TransactionAction::Transfer {
+            recipient: to.clone(),
+            amount,
+        };
         let tx_id = compute_tx_id(sender, &action, fee, nonce, MAINNET_CHAIN_ID);
-        let msg = borsh::to_vec(&(sender.clone(), &action, fee, nonce, MAINNET_CHAIN_ID)).unwrap();
+        let msg = transaction_signing_payload(sender, &action, fee, nonce, MAINNET_CHAIN_ID);
         Transaction {
-            tx_id, sender: sender.clone(), action, fee,
+            tx_id,
+            sender: sender.clone(),
+            action,
+            fee,
             signature: sk.sign(&msg).to_bytes().to_vec(),
-            signature_type: SIGNATURE_TYPE_ED25519, nonce,
-            chain_id: MAINNET_CHAIN_ID, data: vec![], public_key: pk,
+            signature_type: SIGNATURE_TYPE_ED25519,
+            nonce,
+            chain_id: MAINNET_CHAIN_ID,
+            data: vec![],
+            public_key: pk,
         }
     }
 
-    fn signed_bond(sk: &SigningKey, sender: &ObjectId, pk: Vec<u8>, amount: FlakeAmount, fee: FlakeAmount, nonce: u64) -> Transaction {
+    fn signed_bond(
+        sk: &SigningKey,
+        sender: &ObjectId,
+        pk: Vec<u8>,
+        amount: FlakeAmount,
+        fee: FlakeAmount,
+        nonce: u64,
+    ) -> Transaction {
         let action = TransactionAction::RefinerBond { amount };
         let tx_id = compute_tx_id(sender, &action, fee, nonce, MAINNET_CHAIN_ID);
-        let msg = borsh::to_vec(&(sender.clone(), &action, fee, nonce, MAINNET_CHAIN_ID)).unwrap();
+        let msg = transaction_signing_payload(sender, &action, fee, nonce, MAINNET_CHAIN_ID);
         Transaction {
-            tx_id, sender: sender.clone(), action, fee,
+            tx_id,
+            sender: sender.clone(),
+            action,
+            fee,
             signature: sk.sign(&msg).to_bytes().to_vec(),
-            signature_type: SIGNATURE_TYPE_ED25519, nonce,
-            chain_id: MAINNET_CHAIN_ID, data: vec![], public_key: pk,
+            signature_type: SIGNATURE_TYPE_ED25519,
+            nonce,
+            chain_id: MAINNET_CHAIN_ID,
+            data: vec![],
+            public_key: pk,
         }
     }
 
-    fn signed_unbond(sk: &SigningKey, sender: &ObjectId, pk: Vec<u8>, amount: FlakeAmount, fee: FlakeAmount, nonce: u64) -> Transaction {
+    fn signed_unbond(
+        sk: &SigningKey,
+        sender: &ObjectId,
+        pk: Vec<u8>,
+        amount: FlakeAmount,
+        fee: FlakeAmount,
+        nonce: u64,
+    ) -> Transaction {
         let action = TransactionAction::RefinerUnbond { amount };
         let tx_id = compute_tx_id(sender, &action, fee, nonce, MAINNET_CHAIN_ID);
-        let msg = borsh::to_vec(&(sender.clone(), &action, fee, nonce, MAINNET_CHAIN_ID)).unwrap();
+        let msg = transaction_signing_payload(sender, &action, fee, nonce, MAINNET_CHAIN_ID);
         Transaction {
-            tx_id, sender: sender.clone(), action, fee,
+            tx_id,
+            sender: sender.clone(),
+            action,
+            fee,
             signature: sk.sign(&msg).to_bytes().to_vec(),
-            signature_type: SIGNATURE_TYPE_ED25519, nonce,
-            chain_id: MAINNET_CHAIN_ID, data: vec![], public_key: pk,
+            signature_type: SIGNATURE_TYPE_ED25519,
+            nonce,
+            chain_id: MAINNET_CHAIN_ID,
+            data: vec![],
+            public_key: pk,
         }
     }
 
     /// Unsigned helper used only for validate_transaction_basic tests (no sig check).
-    fn unsigned_transfer(sender: &ObjectId, recipient: &ObjectId, amount: FlakeAmount, fee: FlakeAmount, nonce: u64) -> Transaction {
-        let action = TransactionAction::Transfer { recipient: recipient.clone(), amount };
+    fn unsigned_transfer(
+        sender: &ObjectId,
+        recipient: &ObjectId,
+        amount: FlakeAmount,
+        fee: FlakeAmount,
+        nonce: u64,
+    ) -> Transaction {
+        let action = TransactionAction::Transfer {
+            recipient: recipient.clone(),
+            amount,
+        };
         let tx_id = compute_tx_id(sender, &action, fee, nonce, MAINNET_CHAIN_ID);
         Transaction {
-            tx_id, sender: sender.clone(), action, fee,
-            signature: vec![], signature_type: SIGNATURE_TYPE_ED25519, nonce,
-            chain_id: MAINNET_CHAIN_ID, data: vec![], public_key: vec![],
+            tx_id,
+            sender: sender.clone(),
+            action,
+            fee,
+            signature: vec![],
+            signature_type: SIGNATURE_TYPE_ED25519,
+            nonce,
+            chain_id: MAINNET_CHAIN_ID,
+            data: vec![],
+            public_key: vec![],
         }
     }
 
     /// Unsigned helper used only for validate_transaction_basic tests (no sig check).
-    fn unsigned_bond(sender: &ObjectId, amount: FlakeAmount, fee: FlakeAmount, nonce: u64) -> Transaction {
+    fn unsigned_bond(
+        sender: &ObjectId,
+        amount: FlakeAmount,
+        fee: FlakeAmount,
+        nonce: u64,
+    ) -> Transaction {
         let action = TransactionAction::RefinerBond { amount };
         let tx_id = compute_tx_id(sender, &action, fee, nonce, MAINNET_CHAIN_ID);
         Transaction {
-            tx_id, sender: sender.clone(), action, fee,
-            signature: vec![], signature_type: SIGNATURE_TYPE_ED25519, nonce,
-            chain_id: MAINNET_CHAIN_ID, data: vec![], public_key: vec![],
+            tx_id,
+            sender: sender.clone(),
+            action,
+            fee,
+            signature: vec![],
+            signature_type: SIGNATURE_TYPE_ED25519,
+            nonce,
+            chain_id: MAINNET_CHAIN_ID,
+            data: vec![],
+            public_key: vec![],
         }
     }
 
@@ -536,12 +633,27 @@ mod tests {
 
         let tx = signed_transfer(&sk, &alice, pk, &bob, opl_to_flake(10), opl_to_flake(1), 0);
         let result = TransactionDispatcher::apply_transaction(
-            &tx, &mut accounts, &mut refiners, 1, 100, MAINNET_CHAIN_ID,
+            &tx,
+            &mut accounts,
+            &mut refiners,
+            1,
+            100,
+            MAINNET_CHAIN_ID,
         );
-        assert!(result.success, "Transfer should succeed: {:?}", result.error);
+        assert!(
+            result.success,
+            "Transfer should succeed: {:?}",
+            result.error
+        );
         assert_eq!(result.fee_burned, opl_to_flake(1));
-        assert_eq!(accounts.get_account(&alice).unwrap().balance, opl_to_flake(989));
-        assert_eq!(accounts.get_account(&bob).unwrap().balance, opl_to_flake(10));
+        assert_eq!(
+            accounts.get_account(&alice).unwrap().balance,
+            opl_to_flake(989)
+        );
+        assert_eq!(
+            accounts.get_account(&bob).unwrap().balance,
+            opl_to_flake(10)
+        );
     }
 
     #[test]
@@ -556,7 +668,12 @@ mod tests {
 
         let tx = signed_transfer(&sk, &alice, pk, &bob, 200, 10, 0);
         let result = TransactionDispatcher::apply_transaction(
-            &tx, &mut accounts, &mut refiners, 1, 100, MAINNET_CHAIN_ID,
+            &tx,
+            &mut accounts,
+            &mut refiners,
+            1,
+            100,
+            MAINNET_CHAIN_ID,
         );
         assert!(!result.success);
     }
@@ -574,13 +691,21 @@ mod tests {
 
         let tx = signed_bond(&sk, &alice, pk, MIN_BOND_STAKE, opl_to_flake(1), 0);
         let result = TransactionDispatcher::apply_transaction(
-            &tx, &mut accounts, &mut refiners, 1, 100, MAINNET_CHAIN_ID,
+            &tx,
+            &mut accounts,
+            &mut refiners,
+            1,
+            100,
+            MAINNET_CHAIN_ID,
         );
         assert!(result.success, "Bond should succeed: {:?}", result.error);
         assert_eq!(refiners.refiner_count(), 1);
         // Alice's balance: 200 - 1 (stake) - 1 (fee) - bond_assay = 197.99625 OPL
         let bond_assay = MIN_BOND_STAKE as u128 * ANNUAL_ATTRITION_PERMILLE as u128 / 4 / 1000;
-        assert_eq!(accounts.get_account(&alice).unwrap().balance, opl_to_flake(200) - MIN_BOND_STAKE - opl_to_flake(1) - bond_assay as FlakeAmount);
+        assert_eq!(
+            accounts.get_account(&alice).unwrap().balance,
+            opl_to_flake(200) - MIN_BOND_STAKE - opl_to_flake(1) - bond_assay as FlakeAmount
+        );
     }
 
     /// Bond refiner with insufficient stake — should fail.
@@ -596,7 +721,12 @@ mod tests {
         let too_low = 50; // Below MIN_BOND_STAKE (1 OPL = 1,000,000 flakes)
         let tx = signed_bond(&sk, &alice, pk, too_low, opl_to_flake(1), 0);
         let result = TransactionDispatcher::apply_transaction(
-            &tx, &mut accounts, &mut refiners, 1, 100, MAINNET_CHAIN_ID,
+            &tx,
+            &mut accounts,
+            &mut refiners,
+            1,
+            100,
+            MAINNET_CHAIN_ID,
         );
         assert!(!result.success);
     }
@@ -614,16 +744,30 @@ mod tests {
         // First bond: 1 OPL
         let tx1 = signed_bond(&sk, &alice, pk.clone(), MIN_BOND_STAKE, opl_to_flake(1), 0);
         let result1 = TransactionDispatcher::apply_transaction(
-            &tx1, &mut accounts, &mut refiners, 1, 100, MAINNET_CHAIN_ID,
+            &tx1,
+            &mut accounts,
+            &mut refiners,
+            1,
+            100,
+            MAINNET_CHAIN_ID,
         );
         assert!(result1.success);
 
         // Second bond (top-up): 2 OPL
         let tx2 = signed_bond(&sk, &alice, pk, MIN_BOND_STAKE * 2, opl_to_flake(1), 1);
         let result2 = TransactionDispatcher::apply_transaction(
-            &tx2, &mut accounts, &mut refiners, 2, 200, MAINNET_CHAIN_ID,
+            &tx2,
+            &mut accounts,
+            &mut refiners,
+            2,
+            200,
+            MAINNET_CHAIN_ID,
         );
-        assert!(result2.success, "Top-up bond should succeed: {:?}", result2.error);
+        assert!(
+            result2.success,
+            "Top-up bond should succeed: {:?}",
+            result2.error
+        );
 
         let v = refiners.get_refiner(&alice).unwrap();
         assert_eq!(v.entries.len(), 2);
@@ -643,25 +787,70 @@ mod tests {
 
         // Bond 1 OPL at t=100
         let tx1 = signed_bond(&sk, &alice, pk.clone(), MIN_BOND_STAKE, opl_to_flake(1), 0);
-        let r1 = TransactionDispatcher::apply_transaction(&tx1, &mut accounts, &mut refiners, 1, 100, MAINNET_CHAIN_ID);
+        let r1 = TransactionDispatcher::apply_transaction(
+            &tx1,
+            &mut accounts,
+            &mut refiners,
+            1,
+            100,
+            MAINNET_CHAIN_ID,
+        );
         assert!(r1.success, "First bond should succeed: {:?}", r1.error);
 
         // Bond 2 OPL at t=1000
-        let tx2 = signed_bond(&sk, &alice, pk.clone(), MIN_BOND_STAKE * 2, opl_to_flake(1), 1);
-        let r2 = TransactionDispatcher::apply_transaction(&tx2, &mut accounts, &mut refiners, 2, 1000, MAINNET_CHAIN_ID);
-        assert!(r2.success, "Second bond (top-up) should succeed: {:?}", r2.error);
+        let tx2 = signed_bond(
+            &sk,
+            &alice,
+            pk.clone(),
+            MIN_BOND_STAKE * 2,
+            opl_to_flake(1),
+            1,
+        );
+        let r2 = TransactionDispatcher::apply_transaction(
+            &tx2,
+            &mut accounts,
+            &mut refiners,
+            2,
+            1000,
+            MAINNET_CHAIN_ID,
+        );
+        assert!(
+            r2.success,
+            "Second bond (top-up) should succeed: {:?}",
+            r2.error
+        );
 
         // Alice balance: 500 - 1 (stake) - 1 (fee) - bond_assay_1 - 2 (stake) - 1 (fee) - bond_assay_2
         let bond_assay_1 = MIN_BOND_STAKE as u128 * ANNUAL_ATTRITION_PERMILLE as u128 / 4 / 1000;
-        let bond_assay_2 = (MIN_BOND_STAKE * 2) as u128 * ANNUAL_ATTRITION_PERMILLE as u128 / 4 / 1000;
-        assert_eq!(accounts.get_account(&alice).unwrap().balance,
-            opl_to_flake(500) - MIN_BOND_STAKE - opl_to_flake(1) - bond_assay_1 as FlakeAmount
-            - MIN_BOND_STAKE * 2 - opl_to_flake(1) - bond_assay_2 as FlakeAmount);
+        let bond_assay_2 =
+            (MIN_BOND_STAKE * 2) as u128 * ANNUAL_ATTRITION_PERMILLE as u128 / 4 / 1000;
+        assert_eq!(
+            accounts.get_account(&alice).unwrap().balance,
+            opl_to_flake(500)
+                - MIN_BOND_STAKE
+                - opl_to_flake(1)
+                - bond_assay_1 as FlakeAmount
+                - MIN_BOND_STAKE * 2
+                - opl_to_flake(1)
+                - bond_assay_2 as FlakeAmount
+        );
 
         // Unbond 1.5 OPL — consumes first entry (1 OPL) + 0.5 OPL from second entry
-        let tx3 = signed_unbond(&sk, &alice, pk, MIN_BOND_STAKE + MIN_BOND_STAKE / 2, opl_to_flake(1), 2);
+        let tx3 = signed_unbond(
+            &sk,
+            &alice,
+            pk,
+            MIN_BOND_STAKE + MIN_BOND_STAKE / 2,
+            opl_to_flake(1),
+            2,
+        );
         let result = TransactionDispatcher::apply_transaction(
-            &tx3, &mut accounts, &mut refiners, 3, 300, MAINNET_CHAIN_ID,
+            &tx3,
+            &mut accounts,
+            &mut refiners,
+            3,
+            300,
+            MAINNET_CHAIN_ID,
         );
         assert!(result.success, "Unbond should succeed: {:?}", result.error);
 
@@ -672,16 +861,26 @@ mod tests {
 
         // Unbonded stake goes into the unbonding queue, not immediately returned
         assert_eq!(refiners.unbonding_queue.len(), 1);
-        assert_eq!(refiners.unbonding_queue[0].amount, MIN_BOND_STAKE + MIN_BOND_STAKE / 2);
+        assert_eq!(
+            refiners.unbonding_queue[0].amount,
+            MIN_BOND_STAKE + MIN_BOND_STAKE / 2
+        );
         assert_eq!(refiners.unbonding_queue[0].matures_at, 3 + EPOCH as u64);
 
         // Alice's balance after unbond: previous balance - 1 (fee) - unbond_assay
         let unbond_amount = MIN_BOND_STAKE + MIN_BOND_STAKE / 2; // 1.5 OPL
         let unbond_assay = unbond_amount as u128 * ANNUAL_ATTRITION_PERMILLE as u128 / 4 / 1000;
-        let prev_balance = opl_to_flake(500) - MIN_BOND_STAKE - opl_to_flake(1) - bond_assay_1 as FlakeAmount
-            - MIN_BOND_STAKE * 2 - opl_to_flake(1) - bond_assay_2 as FlakeAmount;
-        assert_eq!(accounts.get_account(&alice).unwrap().balance,
-            prev_balance - opl_to_flake(1) - unbond_assay as FlakeAmount);
+        let prev_balance = opl_to_flake(500)
+            - MIN_BOND_STAKE
+            - opl_to_flake(1)
+            - bond_assay_1 as FlakeAmount
+            - MIN_BOND_STAKE * 2
+            - opl_to_flake(1)
+            - bond_assay_2 as FlakeAmount;
+        assert_eq!(
+            accounts.get_account(&alice).unwrap().balance,
+            prev_balance - opl_to_flake(1) - unbond_assay as FlakeAmount
+        );
     }
 
     /// Unbond more than total stake — unbonds all available.
@@ -695,13 +894,25 @@ mod tests {
         accounts.credit(&alice, opl_to_flake(200)).unwrap();
 
         let tx1 = signed_bond(&sk, &alice, pk.clone(), MIN_BOND_STAKE, opl_to_flake(1), 0);
-        let r = TransactionDispatcher::apply_transaction(&tx1, &mut accounts, &mut refiners, 1, 100, MAINNET_CHAIN_ID);
+        let r = TransactionDispatcher::apply_transaction(
+            &tx1,
+            &mut accounts,
+            &mut refiners,
+            1,
+            100,
+            MAINNET_CHAIN_ID,
+        );
         assert!(r.success, "Bond should succeed: {:?}", r.error);
 
         // Try to unbond 10x the total stake
         let tx2 = signed_unbond(&sk, &alice, pk, MIN_BOND_STAKE * 10, opl_to_flake(1), 1);
         let result = TransactionDispatcher::apply_transaction(
-            &tx2, &mut accounts, &mut refiners, 2, 200, MAINNET_CHAIN_ID,
+            &tx2,
+            &mut accounts,
+            &mut refiners,
+            2,
+            200,
+            MAINNET_CHAIN_ID,
         );
         assert!(result.success);
         // Refiner removed because all stake unbonded
@@ -720,7 +931,12 @@ mod tests {
         // Alice has no account and is not a refiner
         let tx = signed_unbond(&sk, &alice, pk, MIN_BOND_STAKE, opl_to_flake(1), 0);
         let result = TransactionDispatcher::apply_transaction(
-            &tx, &mut accounts, &mut refiners, 1, 100, MAINNET_CHAIN_ID,
+            &tx,
+            &mut accounts,
+            &mut refiners,
+            1,
+            100,
+            MAINNET_CHAIN_ID,
         );
         assert!(!result.success);
     }
@@ -757,12 +973,20 @@ mod tests {
 
         let tx = signed_bond(&sk, &alice, pk.clone(), MIN_BOND_STAKE, opl_to_flake(1), 0);
         let result = TransactionDispatcher::apply_transaction(
-            &tx, &mut accounts, &mut refiners, 1, 100, MAINNET_CHAIN_ID,
+            &tx,
+            &mut accounts,
+            &mut refiners,
+            1,
+            100,
+            MAINNET_CHAIN_ID,
         );
         assert!(result.success, "Bond should succeed: {:?}", result.error);
 
         let account = accounts.get_account(&alice).unwrap();
-        assert!(account.public_key.is_some(), "Public key should be stored after bond");
+        assert!(
+            account.public_key.is_some(),
+            "Public key should be stored after bond"
+        );
         assert_eq!(account.public_key.as_ref().unwrap(), &pk);
     }
 
@@ -777,14 +1001,34 @@ mod tests {
         accounts.create_account(alice.clone()).unwrap();
         accounts.credit(&alice, opl_to_flake(1000)).unwrap();
 
-        let tx = signed_transfer(&sk, &alice, pk.clone(), &bob, opl_to_flake(10), opl_to_flake(1), 0);
-        let result = TransactionDispatcher::apply_transaction(
-            &tx, &mut accounts, &mut refiners, 1, 100, MAINNET_CHAIN_ID,
+        let tx = signed_transfer(
+            &sk,
+            &alice,
+            pk.clone(),
+            &bob,
+            opl_to_flake(10),
+            opl_to_flake(1),
+            0,
         );
-        assert!(result.success, "Transfer should succeed: {:?}", result.error);
+        let result = TransactionDispatcher::apply_transaction(
+            &tx,
+            &mut accounts,
+            &mut refiners,
+            1,
+            100,
+            MAINNET_CHAIN_ID,
+        );
+        assert!(
+            result.success,
+            "Transfer should succeed: {:?}",
+            result.error
+        );
 
         let account = accounts.get_account(&alice).unwrap();
-        assert!(account.public_key.is_some(), "Public key should be stored after transfer");
+        assert!(
+            account.public_key.is_some(),
+            "Public key should be stored after transfer"
+        );
         assert_eq!(account.public_key.as_ref().unwrap(), &pk);
     }
 
@@ -802,11 +1046,19 @@ mod tests {
         // Unsigned transfer with empty public_key — must be rejected
         let tx = unsigned_transfer(&alice, &bob, opl_to_flake(10), opl_to_flake(1), 0);
         let result = TransactionDispatcher::apply_transaction(
-            &tx, &mut accounts, &mut refiners, 1, 100, MAINNET_CHAIN_ID,
+            &tx,
+            &mut accounts,
+            &mut refiners,
+            1,
+            100,
+            MAINNET_CHAIN_ID,
         );
         assert!(!result.success, "Empty public_key must be rejected");
         // Balance must be unchanged — no funds drained
-        assert_eq!(accounts.get_account(&alice).unwrap().balance, opl_to_flake(1000));
+        assert_eq!(
+            accounts.get_account(&alice).unwrap().balance,
+            opl_to_flake(1000)
+        );
     }
 
     /// Chain ID mismatch must be rejected — prevents cross-chain replay attacks.
@@ -827,10 +1079,22 @@ mod tests {
 
         // Applying it with a different chain_id must fail
         let result = TransactionDispatcher::apply_transaction(
-            &tx, &mut accounts, &mut refiners, 1, 100, wrong_chain_id,
+            &tx,
+            &mut accounts,
+            &mut refiners,
+            1,
+            100,
+            wrong_chain_id,
         );
-        assert!(!result.success, "Mainnet tx must be rejected with wrong chain_id");
+        assert!(
+            !result.success,
+            "Mainnet tx must be rejected with wrong chain_id"
+        );
         let err = result.error.unwrap();
-        assert!(err.contains("chain_id"), "Error must mention chain_id: {}", err);
+        assert!(
+            err.contains("chain_id"),
+            "Error must mention chain_id: {}",
+            err
+        );
     }
 }

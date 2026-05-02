@@ -9,9 +9,9 @@
 //! debits, and atomic transfers. Transfer fees are **burned** — they leave the
 //! circulating supply entirely, aligning with Opolys' market-driven fee model.
 
+use borsh::{BorshDeserialize, BorshSerialize};
 use opolys_core::{FlakeAmount, ObjectId, OpolysError};
-use borsh::{BorshSerialize, BorshDeserialize};
-use opolys_crypto::Blake3Hasher;
+use opolys_crypto::{Blake3Hasher, DOMAIN_STATE_ROOT};
 
 /// A single account in the Opolys ledger.
 ///
@@ -108,9 +108,13 @@ impl AccountStore {
     /// Register a brand-new account. Fails if the ObjectId already exists.
     pub fn create_account(&mut self, object_id: ObjectId) -> Result<&Account, OpolysError> {
         if self.accounts.contains_key(&object_id) {
-            return Err(OpolysError::AccountNotFound(format!("Account already exists: {}", object_id.to_hex())));
+            return Err(OpolysError::AccountNotFound(format!(
+                "Account already exists: {}",
+                object_id.to_hex()
+            )));
         }
-        self.accounts.insert(object_id.clone(), Account::new(object_id.clone()));
+        self.accounts
+            .insert(object_id.clone(), Account::new(object_id.clone()));
         Ok(self.accounts.get(&object_id).unwrap())
     }
 
@@ -127,7 +131,9 @@ impl AccountStore {
     /// Add `amount` flakes to the account's balance. Uses saturating arithmetic
     /// to prevent overflow.
     pub fn credit(&mut self, object_id: &ObjectId, amount: FlakeAmount) -> Result<(), OpolysError> {
-        let account = self.accounts.get_mut(object_id)
+        let account = self
+            .accounts
+            .get_mut(object_id)
             .ok_or_else(|| OpolysError::AccountNotFound(object_id.to_hex()))?;
         account.balance = account.balance.saturating_add(amount);
         Ok(())
@@ -136,7 +142,9 @@ impl AccountStore {
     /// Subtract `amount` flakes from the account's balance. Fails if the
     /// account doesn't exist or holds insufficient funds.
     pub fn debit(&mut self, object_id: &ObjectId, amount: FlakeAmount) -> Result<(), OpolysError> {
-        let account = self.accounts.get_mut(object_id)
+        let account = self
+            .accounts
+            .get_mut(object_id)
             .ok_or_else(|| OpolysError::AccountNotFound(object_id.to_hex()))?;
         if account.balance < amount {
             return Err(OpolysError::InsufficientBalance {
@@ -165,7 +173,9 @@ impl AccountStore {
     ) -> Result<TransferResult, OpolysError> {
         // The sender must cover both the transfer amount and the burned fee.
         let total_needed = amount.saturating_add(fee);
-        let from_account = self.accounts.get(from)
+        let from_account = self
+            .accounts
+            .get(from)
             .ok_or_else(|| OpolysError::AccountNotFound(from.to_hex()))?;
 
         if from_account.balance < total_needed {
@@ -185,11 +195,17 @@ impl AccountStore {
 
         // Debit the sender (amount + fee) and increment nonce for replay protection.
         let from_balance_before = self.accounts.get(from).unwrap().balance;
-        self.accounts.get_mut(from).unwrap().balance = from_balance_before.saturating_sub(total_needed);
+        self.accounts.get_mut(from).unwrap().balance =
+            from_balance_before.saturating_sub(total_needed);
         self.accounts.get_mut(from).unwrap().nonce += 1;
 
         // Credit only the transfer amount to the recipient; the fee is burned.
-        self.accounts.get_mut(to).unwrap().balance = self.accounts.get(to).unwrap().balance.saturating_add(amount);
+        self.accounts.get_mut(to).unwrap().balance = self
+            .accounts
+            .get(to)
+            .unwrap()
+            .balance
+            .saturating_add(amount);
 
         Ok(TransferResult {
             amount,
@@ -211,14 +227,16 @@ impl AccountStore {
     /// balances, nonces, and public keys.
     pub fn compute_state_root(&self) -> opolys_core::Hash {
         let mut sorted_ids: Vec<&ObjectId> = self.accounts.keys().collect();
-        sorted_ids.sort_by(|a, b| a.0 .0.cmp(&b.0 .0));
+        sorted_ids.sort_by(|a, b| a.0.0.cmp(&b.0.0));
 
         let mut hasher = Blake3Hasher::new();
+        hasher.update(DOMAIN_STATE_ROOT);
+        hasher.update(b"accounts");
         for id in sorted_ids {
             if let Some(account) = self.accounts.get(id) {
-                if let Ok(bytes) = borsh::to_vec(account) {
-                    hasher.update(&bytes);
-                }
+                let bytes = borsh::to_vec(account)
+                    .expect("Account serialization must not fail; this is a consensus bug");
+                hasher.update(&bytes);
             }
         }
         hasher.finalize()

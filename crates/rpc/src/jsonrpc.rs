@@ -63,22 +63,34 @@ pub struct JsonRpcError {
 impl JsonRpcError {
     /// `-32601` — the requested method does not exist.
     pub fn method_not_found() -> Self {
-        JsonRpcError { code: -32601, message: "Method not found".to_string() }
+        JsonRpcError {
+            code: -32601,
+            message: "Method not found".to_string(),
+        }
     }
 
     /// `-32602` — invalid or missing method parameters.
     pub fn invalid_params(msg: &str) -> Self {
-        JsonRpcError { code: -32602, message: msg.to_string() }
+        JsonRpcError {
+            code: -32602,
+            message: msg.to_string(),
+        }
     }
 
     /// `-32603` — an internal server error occurred.
     pub fn internal_error(msg: &str) -> Self {
-        JsonRpcError { code: -32603, message: msg.to_string() }
+        JsonRpcError {
+            code: -32603,
+            message: msg.to_string(),
+        }
     }
 
     /// `-32001` — the requested resource was not found (application-specific).
     pub fn not_found(msg: &str) -> Self {
-        JsonRpcError { code: -32001, message: msg.to_string() }
+        JsonRpcError {
+            code: -32001,
+            message: msg.to_string(),
+        }
     }
 
     /// `-32004` — authentication required (application-specific).
@@ -86,7 +98,8 @@ impl JsonRpcError {
         JsonRpcError {
             code: -32004,
             message: "This method requires an API key. \
-                      Start node with --rpc-api-key <secret>".to_string(),
+                      Use Authorization: Bearer <key> or X-Api-Key: <key>."
+                .to_string(),
         }
     }
 
@@ -141,7 +154,10 @@ impl RateLimiter {
     /// different rate limits to different method tiers from a single limiter instance.
     pub fn check_limit(&mut self, key: &str, max: usize) -> bool {
         let now = Instant::now();
-        let entries = self.requests.entry(key.to_string()).or_insert_with(Vec::new);
+        let entries = self
+            .requests
+            .entry(key.to_string())
+            .or_insert_with(Vec::new);
         entries.retain(|t| now.duration_since(*t).as_secs() < 60);
         if entries.len() >= max {
             return false;

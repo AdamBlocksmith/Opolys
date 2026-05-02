@@ -25,11 +25,7 @@ impl Default for DiscoveryConfig {
 
 /// DNS seeds for mainnet — resolved at startup, not hardcoded IPs.
 /// Update these DNS records to rotate bootstrap infrastructure without releasing a new binary.
-pub const MAINNET_DNS_SEEDS: &[&str] = &[
-    "seed.opolys.io",
-    "seed2.opolys.io",
-    "seed3.opolys.io",
-];
+pub const MAINNET_DNS_SEEDS: &[&str] = &["seed.opolys.io", "seed2.opolys.io", "seed3.opolys.io"];
 
 /// Resolve DNS seed hostnames to QUIC Multiaddr strings.
 ///

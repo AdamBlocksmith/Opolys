@@ -25,3 +25,8 @@ thiserror.workspace = true
 clap.workspace = true
 tokio.workspace = true
 reqwest.workspace = true
+rpassword = "7.4"
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

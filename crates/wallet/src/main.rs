@@ -11,19 +11,32 @@
 //!   opl unbond <amount>         — Create and sign a refiner unbond
 //!   opl send <tx_hex>          — Broadcast a signed transaction via RPC
 
-use clap::Parser;
-use opolys_core::{FlakeAmount, FLAKES_PER_OPL, MAINNET_CHAIN_ID};
+use clap::{Args, Parser};
+use opolys_core::{FLAKES_PER_OPL, FlakeAmount, MAINNET_CHAIN_ID};
 use opolys_wallet::{Bip39Mnemonic, TransactionSigner};
+
+const DEFAULT_RPC_URL: &str = "https://localhost:4171";
 
 #[derive(Parser, Debug)]
 #[command(name = "opl", about = "Opolys wallet CLI", version)]
 struct Cli {
-    /// RPC server URL (default: http://localhost:4171)
-    #[arg(long, default_value = "http://localhost:4171")]
+    /// RPC server URL (default: https://localhost:4171)
+    #[arg(long, default_value = DEFAULT_RPC_URL)]
     rpc_url: String,
 
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(Args, Debug, Clone, Copy)]
+struct MnemonicInput {
+    /// Read the mnemonic from OPOLYS_MNEMONIC
+    #[arg(long, conflicts_with = "from_stdin")]
+    from_env: bool,
+
+    /// Prompt for the mnemonic without echoing it
+    #[arg(long, conflicts_with = "from_env")]
+    from_stdin: bool,
 }
 
 #[derive(clap::Subcommand, Debug)]
@@ -37,8 +50,8 @@ enum Command {
 
     /// Show the address for a given mnemonic
     Address {
-        /// 24-word mnemonic phrase
-        phrase: String,
+        #[command(flatten)]
+        mnemonic: MnemonicInput,
 
         /// Account index to derive (default: 0)
         #[arg(long, default_value = "0")]
@@ -53,8 +66,8 @@ enum Command {
 
     /// Create a signed transfer transaction
     Transfer {
-        /// 24-word mnemonic phrase
-        phrase: String,
+        #[command(flatten)]
+        mnemonic: MnemonicInput,
 
         /// Recipient address (hex ObjectId)
         recipient: String,
@@ -77,8 +90,8 @@ enum Command {
 
     /// Create a signed refiner bond transaction
     Bond {
-        /// 24-word mnemonic phrase
-        phrase: String,
+        #[command(flatten)]
+        mnemonic: MnemonicInput,
 
         /// Amount to bond in OPL
         amount: String,
@@ -98,8 +111,8 @@ enum Command {
 
     /// Create a signed refiner unbond transaction
     Unbond {
-        /// 24-word mnemonic phrase
-        phrase: String,
+        #[command(flatten)]
+        mnemonic: MnemonicInput,
 
         /// Amount to unbond in OPL
         amount: String,
@@ -128,21 +141,39 @@ fn parse_opl_amount(s: &str) -> Result<FlakeAmount, String> {
     let parts: Vec<&str> = s.split('.').collect();
     match parts.len() {
         1 => {
-            let whole: u64 = parts[0].parse().map_err(|e| format!("Invalid amount: {}", e))?;
+            let whole: u64 = parts[0]
+                .parse()
+                .map_err(|e| format!("Invalid amount: {}", e))?;
             Ok(whole * FLAKES_PER_OPL)
         }
         2 => {
-            let whole: u64 = parts[0].parse().map_err(|e| format!("Invalid whole amount: {}", e))?;
+            let whole: u64 = parts[0]
+                .parse()
+                .map_err(|e| format!("Invalid whole amount: {}", e))?;
             let frac_str = parts[1];
             if frac_str.len() > 6 {
                 return Err("Too many decimal places (max 6)".to_string());
             }
             let frac_str_padded = format!("{:0<6}", frac_str);
-            let frac: u64 = frac_str_padded[..6].parse().map_err(|e| format!("Invalid fraction: {}", e))?;
+            let frac: u64 = frac_str_padded[..6]
+                .parse()
+                .map_err(|e| format!("Invalid fraction: {}", e))?;
             Ok(whole * FLAKES_PER_OPL + frac)
         }
         _ => Err("Invalid amount format".to_string()),
     }
+}
+
+fn read_mnemonic(input: MnemonicInput) -> Result<Bip39Mnemonic, Box<dyn std::error::Error>> {
+    let phrase = if input.from_env {
+        std::env::var("OPOLYS_MNEMONIC").map_err(|_| "OPOLYS_MNEMONIC is not set")?
+    } else if input.from_stdin {
+        rpassword::prompt_password("Mnemonic: ")?
+    } else {
+        return Err("Choose --from-env or --from-stdin to provide the mnemonic".into());
+    };
+
+    Ok(Bip39Mnemonic::from_words(phrase.trim())?)
 }
 
 #[tokio::main]
@@ -157,24 +188,29 @@ async fn main() {
 
 async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let chain_id = MAINNET_CHAIN_ID;
+    warn_if_insecure_rpc_url(&cli.rpc_url);
     match cli.command {
         Command::New { account } => {
             let mnemonic = Bip39Mnemonic::generate();
             let phrase = mnemonic.phrase();
-            println!("Mnemonic (24 words):");
-            println!("{}", phrase);
-            println!();
+            eprintln!("Mnemonic (24 words):");
+            eprintln!("{}", phrase);
+            eprintln!();
 
             let seed = mnemonic.to_seed("");
             let keypair = seed.derive_keypair(account);
-            println!("Address (account {}): {}", account, keypair.object_id().to_hex());
-            println!();
-            println!("IMPORTANT: Write down this mnemonic and keep it safe.");
-            println!("Anyone with this phrase can access your funds.");
+            println!(
+                "Address (account {}): {}",
+                account,
+                keypair.object_id().to_hex()
+            );
+            eprintln!();
+            eprintln!("IMPORTANT: Write down this mnemonic and keep it safe.");
+            eprintln!("Anyone with this phrase can access your funds.");
         }
 
-        Command::Address { phrase, account } => {
-            let mnemonic = Bip39Mnemonic::from_words(&phrase)?;
+        Command::Address { mnemonic, account } => {
+            let mnemonic = read_mnemonic(mnemonic)?;
             let seed = mnemonic.to_seed("");
             let keypair = seed.derive_keypair(account);
             println!("{}", keypair.object_id().to_hex());
@@ -197,11 +233,21 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             if let Some(error) = body.get("error") {
                 return Err(format!("RPC error: {}", error).into());
             }
-            println!("{}", serde_json::to_string_pretty(&body.get("result").unwrap_or(&body))?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&body.get("result").unwrap_or(&body))?
+            );
         }
 
-        Command::Transfer { phrase, recipient, amount, fee, nonce, account } => {
-            let mnemonic = Bip39Mnemonic::from_words(&phrase)?;
+        Command::Transfer {
+            mnemonic,
+            recipient,
+            amount,
+            fee,
+            nonce,
+            account,
+        } => {
+            let mnemonic = read_mnemonic(mnemonic)?;
             let seed = mnemonic.to_seed("");
             let keypair = seed.derive_keypair(account);
 
@@ -228,8 +274,14 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             println!("{}", hex::encode(tx_bytes));
         }
 
-        Command::Bond { phrase, amount, fee, nonce, account } => {
-            let mnemonic = Bip39Mnemonic::from_words(&phrase)?;
+        Command::Bond {
+            mnemonic,
+            amount,
+            fee,
+            nonce,
+            account,
+        } => {
+            let mnemonic = read_mnemonic(mnemonic)?;
             let seed = mnemonic.to_seed("");
             let keypair = seed.derive_keypair(account);
 
@@ -253,8 +305,14 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             println!("{}", hex::encode(tx_bytes));
         }
 
-        Command::Unbond { phrase, amount, fee, nonce, account } => {
-            let mnemonic = Bip39Mnemonic::from_words(&phrase)?;
+        Command::Unbond {
+            mnemonic,
+            amount,
+            fee,
+            nonce,
+            account,
+        } => {
+            let mnemonic = read_mnemonic(mnemonic)?;
             let seed = mnemonic.to_seed("");
             let keypair = seed.derive_keypair(account);
 
@@ -295,11 +353,27 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             if let Some(error) = body.get("error") {
                 return Err(format!("RPC error: {}", error).into());
             }
-            println!("{}", serde_json::to_string_pretty(&body.get("result").unwrap_or(&body))?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&body.get("result").unwrap_or(&body))?
+            );
         }
     }
 
     Ok(())
+}
+
+fn is_insecure_rpc_url(rpc_url: &str) -> bool {
+    rpc_url
+        .get(..7)
+        .map(|prefix| prefix.eq_ignore_ascii_case("http://"))
+        .unwrap_or(false)
+}
+
+fn warn_if_insecure_rpc_url(rpc_url: &str) {
+    if is_insecure_rpc_url(rpc_url) {
+        eprintln!("Warning: RPC URL uses http://. Use https:// for mainnet wallet operations.");
+    }
 }
 
 async fn query_nonce(rpc_url: &str, address: String) -> Result<u64, Box<dyn std::error::Error>> {
@@ -317,8 +391,30 @@ async fn query_nonce(rpc_url: &str, address: String) -> Result<u64, Box<dyn std:
 
     let body: serde_json::Value = resp.json().await?;
     let result = body.get("result").ok_or("No result in RPC response")?;
-    let nonce = result.get("nonce")
+    let nonce = result
+        .get("nonce")
         .and_then(|n| n.as_u64())
         .ok_or("No nonce in account response")?;
     Ok(nonce)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn cli_defaults_to_https_rpc_url() {
+        let cli = Cli::parse_from(["opl", "new"]);
+
+        assert_eq!(cli.rpc_url, DEFAULT_RPC_URL);
+    }
+
+    #[test]
+    fn insecure_rpc_detection_is_scheme_based() {
+        assert!(is_insecure_rpc_url("http://localhost:4171"));
+        assert!(is_insecure_rpc_url("HTTP://localhost:4171"));
+        assert!(!is_insecure_rpc_url("https://localhost:4171"));
+        assert!(!is_insecure_rpc_url("httpx://localhost:4171"));
+    }
 }

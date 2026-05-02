@@ -6,7 +6,7 @@
 //! on-chain `ObjectId` addresses. This module provides verification only —
 //! key generation and signing happen at the wallet layer.
 
-use ed25519_dalek::{Verifier, VerifyingKey, Signature as DalekSignature};
+use ed25519_dalek::{Signature as DalekSignature, Verifier, VerifyingKey};
 use opolys_core::ObjectId;
 
 /// Derive an on-chain [`ObjectId`] from a 32-byte ed25519 public key.
@@ -29,7 +29,7 @@ pub fn ed25519_public_key_to_object_id(public_key: &[u8; 32]) -> ObjectId {
 /// because the preferred public API always goes through a typed function that
 /// documents what is being hashed.
 fn hash_bytes_to_object_id(data: &[u8]) -> ObjectId {
-    let hash = crate::hash::hash(data);
+    let hash = crate::hash::hash_with_domain(crate::hash::DOMAIN_OBJECT_ID, data);
     ObjectId(hash)
 }
 
@@ -48,11 +48,7 @@ fn hash_bytes_to_object_id(data: &[u8]) -> ObjectId {
 /// # Panics
 ///
 /// This function never panics; all error cases are mapped to `false`.
-pub fn verify_ed25519(
-    public_key: &[u8],
-    message: &[u8],
-    signature: &[u8],
-) -> bool {
+pub fn verify_ed25519(public_key: &[u8], message: &[u8], signature: &[u8]) -> bool {
     // Reject keys that are not exactly 32 bytes.
     if public_key.len() != 32 {
         return false;
@@ -86,9 +82,9 @@ pub fn verify_ed25519(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ed25519_dalek::{SigningKey, Signer};
-    use rand::rngs::OsRng;
+    use ed25519_dalek::{Signer, SigningKey};
     use rand::TryRngCore;
+    use rand::rngs::OsRng;
 
     fn generate_keypair() -> (SigningKey, ObjectId) {
         let mut seed = [0u8; 32];

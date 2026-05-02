@@ -8,14 +8,17 @@
 //! The same ed25519 key is used for both transaction signing and refiner
 //! block signing. Full wallet recovery from mnemonic alone is supported.
 
-use ed25519_dalek::{SigningKey, VerifyingKey, Signature as DalekSignature, Signer, Verifier};
+use ed25519_dalek::{Signature as DalekSignature, Signer, SigningKey, Verifier, VerifyingKey};
 use opolys_core::ObjectId;
+use opolys_crypto::hash_to_object_id;
 use rand::TryRngCore;
 use rand::rngs::OsRng;
 use std::collections::HashMap;
-use std::fs;
-use std::path::PathBuf;
-use opolys_crypto::hash_to_object_id;
+use std::fmt;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use zeroize::{Zeroize, Zeroizing};
 
 /// Errors that can occur during wallet operations.
 #[derive(Debug)]
@@ -57,12 +60,23 @@ impl std::error::Error for WalletError {}
 ///
 /// Use `KeyPair::generate()` for random keys or `KeyPair::from_seed()` for
 /// deterministic keys derived from SLIP-0010 HD paths.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct KeyPair {
-    signing_key: SigningKey,
+    /// Raw ed25519 private seed. Wiped on drop by `Zeroizing`.
+    seed: Zeroizing<[u8; 32]>,
     verifying_key: VerifyingKey,
     /// Blake3-256 hash of the public key — this is the on-chain identity.
     object_id: ObjectId,
+}
+
+impl fmt::Debug for KeyPair {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("KeyPair")
+            .field("seed", &"[REDACTED]")
+            .field("verifying_key", &self.verifying_key)
+            .field("object_id", &self.object_id)
+            .finish()
+    }
 }
 
 impl KeyPair {
@@ -73,12 +87,13 @@ impl KeyPair {
     pub fn generate() -> Self {
         let mut rng = OsRng;
         let mut seed = [0u8; 32];
-        rng.try_fill_bytes(&mut seed).expect("Failed to generate random bytes");
+        rng.try_fill_bytes(&mut seed)
+            .expect("Failed to generate random bytes");
         let signing_key = SigningKey::from_bytes(&seed);
         let verifying_key = signing_key.verifying_key();
         let object_id = hash_to_object_id(verifying_key.as_bytes());
         Self {
-            signing_key,
+            seed: Zeroizing::new(seed),
             verifying_key,
             object_id,
         }
@@ -93,7 +108,7 @@ impl KeyPair {
         let verifying_key = signing_key.verifying_key();
         let object_id = hash_to_object_id(verifying_key.as_bytes());
         Self {
-            signing_key,
+            seed: Zeroizing::new(*seed),
             verifying_key,
             object_id,
         }
@@ -111,7 +126,8 @@ impl KeyPair {
 
     /// Sign a message with the ed25519 private key.
     pub fn sign(&self, message: &[u8]) -> Vec<u8> {
-        let signature: DalekSignature = self.signing_key.sign(message);
+        let signing_key = SigningKey::from_bytes(&self.seed);
+        let signature: DalekSignature = signing_key.sign(message);
         signature.to_bytes().to_vec()
     }
 
@@ -133,7 +149,7 @@ impl KeyPair {
 
     /// Serialize the 32-byte private key seed.
     pub fn to_bytes(&self) -> [u8; 32] {
-        self.signing_key.to_bytes()
+        *self.seed
     }
 
     /// Reconstruct a key pair from a 32-byte seed.
@@ -145,7 +161,7 @@ impl KeyPair {
         let verifying_key = signing_key.verifying_key();
         let object_id = hash_to_object_id(verifying_key.as_bytes());
         Some(Self {
-            signing_key,
+            seed: Zeroizing::new(*bytes),
             verifying_key,
             object_id,
         })
@@ -184,13 +200,17 @@ impl Wallet {
         let keypair = KeyPair::generate();
         let object_id = keypair.object_id().clone();
 
-        fs::create_dir_all(&self.keys_dir)
-            .map_err(|e| WalletError::IoError(e.to_string()))?;
+        fs::create_dir_all(&self.keys_dir).map_err(|e| WalletError::IoError(e.to_string()))?;
 
-        let key_path = self.keys_dir.join(format!("{}_{}.key", name, object_id.to_hex()[..16].to_string()));
-        let key_bytes = keypair.to_bytes();
-        fs::write(&key_path, &key_bytes)
+        let key_path = self.keys_dir.join(format!(
+            "{}_{}.key",
+            name,
+            object_id.to_hex()[..16].to_string()
+        ));
+        let mut key_bytes = keypair.to_bytes();
+        write_private_key_file(&key_path, &key_bytes)
             .map_err(|e| WalletError::IoError(e.to_string()))?;
+        key_bytes.zeroize();
 
         self.keys.insert(object_id.clone(), keypair);
         Ok(object_id)
@@ -239,4 +259,56 @@ mod tests {
         let kp2 = KeyPair::from_seed(&seed);
         assert_eq!(kp1.object_id(), kp2.object_id());
     }
+
+    #[test]
+    fn debug_redacts_private_seed() {
+        let seed = [42u8; 32];
+        let keypair = KeyPair::from_seed(&seed);
+        let debug = format!("{:?}", keypair);
+
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains(&hex::encode(seed)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_account_writes_private_key_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut wallet = Wallet::new(temp_dir.path().to_path_buf());
+        wallet.create_account("alice").unwrap();
+
+        let key_path = fs::read_dir(temp_dir.path())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let mode = fs::metadata(key_path).unwrap().permissions().mode() & 0o777;
+
+        assert_eq!(mode, 0o600);
+    }
+}
+
+#[cfg(unix)]
+fn private_key_open_options() -> OpenOptions {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true).mode(0o600);
+    options
+}
+
+#[cfg(not(unix))]
+fn private_key_open_options() -> OpenOptions {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    options
+}
+
+fn write_private_key_file(path: &Path, key_bytes: &[u8; 32]) -> Result<(), std::io::Error> {
+    let mut file = private_key_open_options().open(path)?;
+    file.write_all(key_bytes)?;
+    file.sync_all()
 }

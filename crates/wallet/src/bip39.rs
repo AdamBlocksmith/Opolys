@@ -19,6 +19,8 @@
 use crate::key::{KeyPair, WalletError};
 use hmac::{Hmac, Mac};
 use sha2::Sha512;
+use std::fmt;
+use zeroize::Zeroize;
 
 type HmacSha512 = Hmac<Sha512>;
 
@@ -36,16 +38,22 @@ const SLIP10_MASTER_KEY: &[u8] = b"ed25519 seed";
 ///
 /// Uses the full 2048-word English wordlist with proper checksum validation.
 /// 24-word mnemonics provide 256 bits of entropy.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Bip39Mnemonic {
     inner: bip39::Mnemonic,
+}
+
+impl fmt::Debug for Bip39Mnemonic {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Bip39Mnemonic").field(&"[REDACTED]").finish()
+    }
 }
 
 impl Bip39Mnemonic {
     /// Generate a new random 24-word mnemonic (256 bits of entropy).
     pub fn generate() -> Self {
-        let inner = bip39::Mnemonic::generate(MNEMONIC_WORDS)
-            .expect("Failed to generate 24-word mnemonic");
+        let inner =
+            bip39::Mnemonic::generate(MNEMONIC_WORDS).expect("Failed to generate 24-word mnemonic");
         Bip39Mnemonic { inner }
     }
 
@@ -91,9 +99,20 @@ impl Bip39Mnemonic {
 /// This is the master secret from which all key material is derived
 /// using SLIP-0010 for ed25519. The passphrase argument allows BIP-39
 /// password protection for additional security.
-#[derive(Debug)]
 pub struct DerivedSeed {
     seed: [u8; 64],
+}
+
+impl fmt::Debug for DerivedSeed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("DerivedSeed").field(&"[REDACTED]").finish()
+    }
+}
+
+impl Drop for DerivedSeed {
+    fn drop(&mut self) {
+        self.seed.zeroize();
+    }
 }
 
 impl DerivedSeed {
@@ -115,8 +134,11 @@ impl DerivedSeed {
     /// block signing. Full wallet recovery from mnemonic alone is supported.
     pub fn derive_keypair(&self, account: u32) -> KeyPair {
         let path = DerivationPath::new(BIP44_PURPOSE, OPOLYS_COIN_TYPE, account);
-        let (private_key, _chain_code) = slip10_derive_ed25519(&self.seed, &path);
-        KeyPair::from_seed(&private_key)
+        let (mut private_key, mut chain_code) = slip10_derive_ed25519(&self.seed, &path);
+        let keypair = KeyPair::from_seed(&private_key);
+        private_key.zeroize();
+        chain_code.zeroize();
+        keypair
     }
 
     /// Derive an ed25519 keypair for the given account index.
@@ -140,7 +162,11 @@ struct DerivationPath {
 impl DerivationPath {
     /// Create a derivation path with the given purpose, coin type, and account.
     fn new(purpose: u32, coin_type: u32, account: u32) -> Self {
-        DerivationPath { purpose, coin_type, account }
+        DerivationPath {
+            purpose,
+            coin_type,
+            account,
+        }
     }
 
     /// Returns the hardened derivation indices for SLIP-0010.
@@ -150,8 +176,8 @@ impl DerivationPath {
     fn indices(&self) -> Vec<u32> {
         vec![
             0x80000000 | self.purpose,   // 44'
-            0x80000000 | self.coin_type,  // 999'
-            0x80000000 | self.account,    // account'
+            0x80000000 | self.coin_type, // 999'
+            0x80000000 | self.account,   // account'
             0x80000000 | 0,              // 0' (change)
         ]
     }
@@ -162,15 +188,15 @@ impl DerivationPath {
 /// Derives the master secret key and chain code from the BIP-39 seed
 /// using HMAC-SHA512 with the key "ed25519 seed".
 fn slip10_master_key(seed: &[u8]) -> ([u8; 32], [u8; 32]) {
-    let mut mac = HmacSha512::new_from_slice(SLIP10_MASTER_KEY)
-        .expect("HMAC key should be valid");
+    let mut mac = HmacSha512::new_from_slice(SLIP10_MASTER_KEY).expect("HMAC key should be valid");
     mac.update(seed);
-    let result = mac.finalize().into_bytes();
+    let mut result = mac.finalize().into_bytes();
 
     let mut private_key = [0u8; 32];
     private_key.copy_from_slice(&result[..32]);
     let mut chain_code = [0u8; 32];
     chain_code.copy_from_slice(&result[32..64]);
+    result.zeroize();
 
     (private_key, chain_code)
 }
@@ -182,15 +208,17 @@ fn slip10_derive_ed25519(seed: &[u8], path: &DerivationPath) -> ([u8; 32], [u8; 
     let (mut key, mut chain_code) = slip10_master_key(seed);
 
     for index in path.indices() {
-        let mut mac = HmacSha512::new_from_slice(&chain_code)
-            .expect("HMAC key should be valid");
+        let mut mac = HmacSha512::new_from_slice(&chain_code).expect("HMAC key should be valid");
         mac.update(&[0x00]);
         mac.update(&key);
         mac.update(&index.to_be_bytes());
-        let result = mac.finalize().into_bytes();
+        let mut result = mac.finalize().into_bytes();
 
+        key.zeroize();
+        chain_code.zeroize();
         key.copy_from_slice(&result[..32]);
         chain_code.copy_from_slice(&result[32..64]);
+        result.zeroize();
     }
 
     (key, chain_code)
@@ -212,6 +240,21 @@ mod tests {
         let phrase = mnemonic.phrase();
         let restored = Bip39Mnemonic::from_words(&phrase).expect("Should restore mnemonic");
         assert_eq!(restored.phrase(), phrase);
+    }
+
+    #[test]
+    fn debug_redacts_mnemonic_and_seed() {
+        let mnemonic = Bip39Mnemonic::generate();
+        let phrase = mnemonic.phrase();
+        let seed = mnemonic.to_seed("");
+
+        let mnemonic_debug = format!("{:?}", mnemonic);
+        let seed_debug = format!("{:?}", seed);
+
+        assert!(mnemonic_debug.contains("[REDACTED]"));
+        assert!(!mnemonic_debug.contains(&phrase));
+        assert!(seed_debug.contains("[REDACTED]"));
+        assert!(!seed_debug.contains("seed"));
     }
 
     #[test]

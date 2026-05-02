@@ -11,10 +11,15 @@
 //! constants and attestation fields, ensuring that every node derives the
 //! exact same chain state from the same config.
 
-use opolys_core::{Block, BlockHeader, Hash, ObjectId, FlakeAmount, GenesisCeremonyData, MIN_DIFFICULTY, GENESIS_DIFFICULTY, BASE_REWARD, NETWORK_PROTOCOL_VERSION, BLOCK_TARGET_TIME_MS, MIN_BOND_STAKE, FLAKES_PER_OPL, EPOCH, BLOCK_VERSION, MIN_FEE, CURRENCY_NAME, CURRENCY_TICKER, CURRENCY_SMALLEST_UNIT};
-use borsh::{BorshSerialize, BorshDeserialize};
-use opolys_crypto::Blake3Hasher;
 use crate::account::AccountStore;
+use borsh::{BorshDeserialize, BorshSerialize};
+use opolys_core::{
+    BASE_REWARD, BLOCK_TARGET_TIME_MS, BLOCK_VERSION, Block, BlockHeader, CURRENCY_NAME,
+    CURRENCY_SMALLEST_UNIT, CURRENCY_TICKER, EPOCH, FLAKES_PER_OPL, FlakeAmount,
+    GENESIS_DIFFICULTY, GenesisCeremonyData, Hash, MIN_BOND_STAKE, MIN_DIFFICULTY, MIN_FEE,
+    NETWORK_PROTOCOL_VERSION, ObjectId,
+};
+use opolys_crypto::{Blake3Hasher, DOMAIN_STATE_ROOT};
 
 /// Cryptographic attestation from the Opolys genesis ceremony.
 ///
@@ -89,7 +94,8 @@ impl Default for GenesisConfig {
                 wgc_response_hash: [0u8; 32],
                 // Derivation: floor(annual_production * troy_oz_per_tonne / blocks_per_year)
                 // blocks_per_year = floor(365.25 * 86400 / 90) = 350,640
-                derivation_formula: "floor(annual_production_tonnes * 32150.7 / 350640)".to_string(),
+                derivation_formula: "floor(annual_production_tonnes * 32150.7 / 350640)"
+                    .to_string(),
             },
             genesis_accounts: vec![],
             base_reward: BASE_REWARD,
@@ -113,6 +119,8 @@ pub fn build_genesis_block(config: &GenesisConfig) -> Block {
     // state fully deterministic — any node with the same config produces
     // the exact same hash.
     let mut state_hasher = Blake3Hasher::new();
+    state_hasher.update(DOMAIN_STATE_ROOT);
+    state_hasher.update(b"genesis");
     state_hasher.update(config.protocol_version.as_bytes());
     state_hasher.update(CURRENCY_NAME.as_bytes());
     state_hasher.update(CURRENCY_TICKER.as_bytes());
@@ -167,10 +175,7 @@ pub fn build_genesis_block(config: &GenesisConfig) -> Block {
 /// No transactions are created — the balances are written directly
 /// into the chain state. This ensures genesis accounts exist from
 /// block 0 without requiring a coinbase transaction.
-pub fn apply_genesis_accounts(
-    config: &GenesisConfig,
-    accounts: &mut AccountStore,
-) -> FlakeAmount {
+pub fn apply_genesis_accounts(config: &GenesisConfig, accounts: &mut AccountStore) -> FlakeAmount {
     let mut total_issued: FlakeAmount = 0;
     for (account_id, amount, pk) in &config.genesis_accounts {
         if accounts.get_account(account_id).is_none() {

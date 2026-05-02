@@ -14,22 +14,27 @@
 //! via channels. The node sends commands through `NetworkCommand` and
 //! receives events via `NetworkEvent`.
 
-use crate::behaviour::{OpolysBehaviour, GOSSIP_BLOCK_TOPIC, GOSSIP_TX_TOPIC, opolys_agent_string, sync_protocol, OpolysBehaviourEvent};
+use crate::behaviour::{
+    GOSSIP_BLOCK_TOPIC, GOSSIP_TX_TOPIC, OpolysBehaviour, OpolysBehaviourEvent,
+    opolys_agent_string, sync_protocol,
+};
 use crate::challenge::{ChallengeRequest, ChallengeResponse, challenge_protocol};
 use crate::discovery::DiscoveryConfig;
 use crate::gossip::GossipConfig;
 use crate::sync::{SyncConfig, SyncRequest, SyncResponse};
-use opolys_core::{DEFAULT_LISTEN_PORT, PING_INTERVAL_SECS, PING_TIMEOUT_SECS};
+use futures::StreamExt;
+use libp2p::PeerId;
+use libp2p::StreamProtocol;
 use libp2p::gossipsub::{MessageAuthenticity, ValidationMode};
 use libp2p::kad::store::MemoryStore;
 use libp2p::request_response;
 use libp2p::swarm::SwarmEvent;
-use libp2p::PeerId;
-use libp2p::StreamProtocol;
-use futures::StreamExt;
+use opolys_core::{DEFAULT_LISTEN_PORT, PING_INTERVAL_SECS, PING_TIMEOUT_SECS};
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
@@ -37,14 +42,10 @@ use tokio::sync::oneshot;
 #[derive(Debug)]
 pub enum NetworkCommand {
     /// Broadcast a transaction via gossipsub.
-    BroadcastTransaction {
-        data: Vec<u8>,
-    },
+    BroadcastTransaction { data: Vec<u8> },
 
     /// Broadcast a block via gossipsub.
-    BroadcastBlock {
-        data: Vec<u8>,
-    },
+    BroadcastBlock { data: Vec<u8> },
 
     /// Request blocks from a specific peer for chain sync.
     RequestBlocks {
@@ -60,9 +61,7 @@ pub enum NetworkCommand {
     },
 
     /// Dial a specific peer address.
-    DialPeer {
-        addr: libp2p::Multiaddr,
-    },
+    DialPeer { addr: libp2p::Multiaddr },
 
     /// Get the list of connected peers.
     GetConnectedPeers {
@@ -70,9 +69,7 @@ pub enum NetworkCommand {
     },
 
     /// Disconnect from a specific peer (e.g., after peer scoring bans them).
-    DisconnectPeer {
-        peer_id: PeerId,
-    },
+    DisconnectPeer { peer_id: PeerId },
 
     /// Send a memory-fingerprinting challenge to a newly connected peer.
     SendChallenge {
@@ -123,6 +120,8 @@ pub struct NetworkConfig {
     pub listen_port: u16,
     /// Bootstrap peer addresses for initial network discovery.
     pub bootstrap_peers: Vec<String>,
+    /// Optional path for the persistent libp2p node identity keypair.
+    pub keypair_path: Option<PathBuf>,
     /// Gossip protocol configuration.
     pub gossip_config: GossipConfig,
     /// Discovery configuration.
@@ -136,11 +135,76 @@ impl Default for NetworkConfig {
         NetworkConfig {
             listen_port: DEFAULT_LISTEN_PORT,
             bootstrap_peers: Vec::new(),
+            keypair_path: None,
             gossip_config: GossipConfig::default(),
             discovery_config: DiscoveryConfig::default(),
             sync_config: SyncConfig::default(),
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn persistent_keypair_roundtrips_peer_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("network_keypair.ed25519");
+
+        let first = load_or_create_keypair(Some(&path)).unwrap();
+        let first_peer = first.public().to_peer_id();
+        assert!(path.exists());
+
+        let second = load_or_create_keypair(Some(&path)).unwrap();
+        assert_eq!(first_peer, second.public().to_peer_id());
+    }
+}
+
+fn load_or_create_keypair(
+    path: Option<&Path>,
+) -> Result<libp2p::identity::Keypair, Box<dyn Error>> {
+    let Some(path) = path else {
+        return Ok(libp2p::identity::Keypair::generate_ed25519());
+    };
+
+    if path.exists() {
+        let bytes = std::fs::read(path)
+            .map_err(|e| format!("Failed to read P2P keypair at {:?}: {}", path, e))?;
+        let keypair = libp2p::identity::Keypair::from_protobuf_encoding(&bytes)
+            .map_err(|e| format!("Failed to decode P2P keypair at {:?}: {}", path, e))?;
+        return Ok(keypair);
+    }
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create P2P keypair directory {:?}: {}", parent, e))?;
+    }
+
+    let keypair = libp2p::identity::Keypair::generate_ed25519();
+    let encoded = keypair
+        .to_protobuf_encoding()
+        .map_err(|e| format!("Failed to encode P2P keypair: {}", e))?;
+    write_private_file(path, &encoded)?;
+    Ok(keypair)
+}
+
+#[cfg(unix)]
+fn write_private_file(path: &Path, data: &[u8]) -> Result<(), Box<dyn Error>> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true).mode(0o600);
+    std::io::Write::write_all(&mut options.open(path)?, data)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_private_file(path: &Path, data: &[u8]) -> Result<(), Box<dyn Error>> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    std::io::Write::write_all(&mut options.open(path)?, data)?;
+    Ok(())
 }
 
 /// The main P2P network interface for an Opolys node.
@@ -164,7 +228,7 @@ impl OpolysNetwork {
     /// ping, and request-response protocols. Listens on the configured
     /// port and dials bootstrap peers.
     pub async fn new(config: NetworkConfig) -> Result<Self, Box<dyn Error>> {
-        let local_key = libp2p::identity::Keypair::generate_ed25519();
+        let local_key = load_or_create_keypair(config.keypair_path.as_deref())?;
         let local_peer_id = local_key.public().to_peer_id();
 
         let gossipsub_config = libp2p::gossipsub::ConfigBuilder::default()
@@ -181,9 +245,7 @@ impl OpolysNetwork {
         .map_err(|e| format!("Gossipsub init error: {}", e))?;
 
         let store = MemoryStore::new(local_peer_id);
-        let kademlia_config = libp2p::kad::Config::new(
-            StreamProtocol::new("/opolys/kad/1"),
-        );
+        let kademlia_config = libp2p::kad::Config::new(StreamProtocol::new("/opolys/kad/1"));
         let kademlia = libp2p::kad::Behaviour::with_config(local_peer_id, store, kademlia_config);
 
         let identify = libp2p::identify::Behaviour::new(
@@ -201,13 +263,18 @@ impl OpolysNetwork {
                 .with_timeout(std::time::Duration::from_secs(PING_TIMEOUT_SECS)),
         );
 
+        let sync_rr_config = request_response::Config::default()
+            .with_request_timeout(Duration::from_secs(config.sync_config.request_timeout_secs));
         let request_response = request_response::cbor::Behaviour::new(
             [(sync_protocol(), request_response::ProtocolSupport::Full)],
-            request_response::Config::default(),
+            sync_rr_config,
         );
 
         let challenge_rr = request_response::cbor::Behaviour::new(
-            [(challenge_protocol(), request_response::ProtocolSupport::Full)],
+            [(
+                challenge_protocol(),
+                request_response::ProtocolSupport::Full,
+            )],
             request_response::Config::default(),
         );
 
@@ -223,7 +290,9 @@ impl OpolysNetwork {
         let swarm = libp2p::SwarmBuilder::with_existing_identity(local_key.clone())
             .with_tokio()
             .with_quic()
-            .with_relay_client(libp2p::noise::Config::new, || libp2p::yamux::Config::default())?
+            .with_relay_client(libp2p::noise::Config::new, || {
+                libp2p::yamux::Config::default()
+            })?
             .with_behaviour(|_, _| behaviour)?
             .with_swarm_config(|cfg| {
                 cfg.with_idle_connection_timeout(std::time::Duration::from_secs(60))
@@ -298,7 +367,10 @@ impl OpolysNetwork {
         response: SyncResponse,
     ) -> Result<(), NetworkError> {
         self.command_tx
-            .send(NetworkCommand::RespondSyncRequest { request_id, response })
+            .send(NetworkCommand::RespondSyncRequest {
+                request_id,
+                response,
+            })
             .await
             .map_err(|_| NetworkError::ChannelClosed)
     }
@@ -307,7 +379,9 @@ impl OpolysNetwork {
     pub async fn connected_peers(&self) -> Result<Vec<PeerId>, NetworkError> {
         let (tx, rx) = oneshot::channel();
         self.command_tx
-            .send(NetworkCommand::GetConnectedPeers { response_channel: tx })
+            .send(NetworkCommand::GetConnectedPeers {
+                response_channel: tx,
+            })
             .await
             .map_err(|_| NetworkError::ChannelClosed)?;
         rx.await.map_err(|_| NetworkError::ChannelClosed)
@@ -322,9 +396,18 @@ impl OpolysNetwork {
     }
 
     /// Send a memory-fingerprinting challenge to a peer.
-    pub async fn send_challenge(&self, peer_id: PeerId, height: u64, nonce: u64) -> Result<(), NetworkError> {
+    pub async fn send_challenge(
+        &self,
+        peer_id: PeerId,
+        height: u64,
+        nonce: u64,
+    ) -> Result<(), NetworkError> {
         self.command_tx
-            .send(NetworkCommand::SendChallenge { peer_id, height, nonce })
+            .send(NetworkCommand::SendChallenge {
+                peer_id,
+                height,
+                nonce,
+            })
             .await
             .map_err(|_| NetworkError::ChannelClosed)
     }
@@ -336,7 +419,10 @@ impl OpolysNetwork {
         hash_val: u64,
     ) -> Result<(), NetworkError> {
         self.command_tx
-            .send(NetworkCommand::RespondChallenge { request_id, hash_val })
+            .send(NetworkCommand::RespondChallenge {
+                request_id,
+                hash_val,
+            })
             .await
             .map_err(|_| NetworkError::ChannelClosed)
     }
@@ -348,9 +434,15 @@ struct SwarmTask {
     command_rx: mpsc::Receiver<NetworkCommand>,
     event_tx: mpsc::Sender<crate::behaviour::OpolysNetworkEvent>,
     /// Pending inbound sync request response channels, keyed by request_id.
-    inbound_request_channels: HashMap<request_response::InboundRequestId, request_response::ResponseChannel<SyncResponse>>,
+    inbound_request_channels: HashMap<
+        request_response::InboundRequestId,
+        request_response::ResponseChannel<SyncResponse>,
+    >,
     /// Pending inbound challenge response channels, keyed by request_id.
-    inbound_challenge_channels: HashMap<request_response::InboundRequestId, request_response::ResponseChannel<ChallengeResponse>>,
+    inbound_challenge_channels: HashMap<
+        request_response::InboundRequestId,
+        request_response::ResponseChannel<ChallengeResponse>,
+    >,
 }
 
 impl SwarmTask {
@@ -429,16 +521,41 @@ impl SwarmTask {
                 }
             }
             NetworkCommand::RequestBlocks { peer_id, request } => {
-                let request_id = self.swarm.behaviour_mut().request_response.send_request(&peer_id, request);
+                let request_id = self
+                    .swarm
+                    .behaviour_mut()
+                    .request_response
+                    .send_request(&peer_id, request);
                 tracing::debug!(%peer_id, ?request_id, "Sent sync request to peer");
             }
-            NetworkCommand::RespondSyncRequest { request_id, response } => {
+            NetworkCommand::RespondSyncRequest {
+                request_id,
+                response,
+            } => {
+                if !response.is_within_size_limit() {
+                    tracing::warn!(
+                        ?request_id,
+                        bytes = response.payload_size_bytes(),
+                        max = crate::sync::MAX_SYNC_RESPONSE_BYTES,
+                        "Refusing to send oversized sync response"
+                    );
+                    self.inbound_request_channels.remove(&request_id);
+                    return;
+                }
                 if let Some(channel) = self.inbound_request_channels.remove(&request_id) {
-                    if let Err(e) = self.swarm.behaviour_mut().request_response.send_response(channel, response) {
+                    if let Err(e) = self
+                        .swarm
+                        .behaviour_mut()
+                        .request_response
+                        .send_response(channel, response)
+                    {
                         tracing::warn!(?request_id, "Failed to send sync response: {:?}", e);
                     }
                 } else {
-                    tracing::warn!(?request_id, "No pending inbound request channel for sync response");
+                    tracing::warn!(
+                        ?request_id,
+                        "No pending inbound request channel for sync response"
+                    );
                 }
             }
             NetworkCommand::DialPeer { addr } => {
@@ -453,14 +570,29 @@ impl SwarmTask {
             NetworkCommand::DisconnectPeer { peer_id } => {
                 let _ = self.swarm.disconnect_peer_id(peer_id);
             }
-            NetworkCommand::SendChallenge { peer_id, height, nonce } => {
+            NetworkCommand::SendChallenge {
+                peer_id,
+                height,
+                nonce,
+            } => {
                 let request = ChallengeRequest { height, nonce };
-                self.swarm.behaviour_mut().challenge_rr.send_request(&peer_id, request);
+                self.swarm
+                    .behaviour_mut()
+                    .challenge_rr
+                    .send_request(&peer_id, request);
             }
-            NetworkCommand::RespondChallenge { request_id, hash_val } => {
+            NetworkCommand::RespondChallenge {
+                request_id,
+                hash_val,
+            } => {
                 if let Some(channel) = self.inbound_challenge_channels.remove(&request_id) {
                     let response = ChallengeResponse { hash_val };
-                    if let Err(e) = self.swarm.behaviour_mut().challenge_rr.send_response(channel, response) {
+                    if let Err(e) = self
+                        .swarm
+                        .behaviour_mut()
+                        .challenge_rr
+                        .send_response(channel, response)
+                    {
                         tracing::warn!(?request_id, "Failed to send challenge response: {:?}", e);
                     }
                 } else {
@@ -472,30 +604,33 @@ impl SwarmTask {
 
     fn handle_swarm_event(
         &mut self,
-        event: SwarmEvent<
-            <OpolysBehaviour as libp2p::swarm::NetworkBehaviour>::ToSwarm,
-        >,
+        event: SwarmEvent<<OpolysBehaviour as libp2p::swarm::NetworkBehaviour>::ToSwarm>,
     ) {
         match event {
             SwarmEvent::Behaviour(composed_event) => {
                 self.handle_composed_event(composed_event);
             }
-            SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
+            SwarmEvent::ConnectionEstablished {
+                peer_id, endpoint, ..
+            } => {
                 tracing::info!("Peer connected: {}", peer_id);
                 // Only outbound connections have a reliable dialable address to cache.
                 let addr = match &endpoint {
                     libp2p::core::ConnectedPoint::Dialer { address, .. } => Some(address.clone()),
                     libp2p::core::ConnectedPoint::Listener { .. } => None,
                 };
-                let _ = self.event_tx.try_send(
-                    crate::behaviour::OpolysNetworkEvent::PeerConnected { peer_id, addr },
-                );
+                let _ =
+                    self.event_tx
+                        .try_send(crate::behaviour::OpolysNetworkEvent::PeerConnected {
+                            peer_id,
+                            addr,
+                        });
             }
             SwarmEvent::ConnectionClosed { peer_id, .. } => {
                 tracing::info!("Peer disconnected: {}", peer_id);
-                let _ = self.event_tx.try_send(
-                    crate::behaviour::OpolysNetworkEvent::PeerDisconnected { peer_id },
-                );
+                let _ = self
+                    .event_tx
+                    .try_send(crate::behaviour::OpolysNetworkEvent::PeerDisconnected { peer_id });
             }
             SwarmEvent::NewListenAddr { address, .. } => {
                 tracing::info!("Listening on {}", address);
@@ -514,54 +649,46 @@ impl SwarmTask {
     /// The `#[derive(NetworkBehaviour)]` macro generates `OpolysBehaviourEvent`
     /// with variants matching the struct field names (in UpperCamelCase):
     /// Gossipsub, Kademlia, Identify, Ping, RequestResponse.
-    fn handle_composed_event(
-        &mut self,
-        event: OpolysBehaviourEvent,
-    ) {
+    fn handle_composed_event(&mut self, event: OpolysBehaviourEvent) {
         match event {
             // ── Gossipsub events ─────────────────────────────────────────
             // Route incoming gossip messages to the node based on their topic.
             // Transactions arrive on the tx topic; blocks on the block topic.
-            OpolysBehaviourEvent::Gossipsub(gossip_event) => {
-                match gossip_event {
-                    libp2p::gossipsub::Event::Message {
-                        propagation_source,
-                        message,
-                        ..
-                    } => {
-                        let topic = message.topic.to_string();
-                        let data = message.data;
-                        let source = propagation_source;
+            OpolysBehaviourEvent::Gossipsub(gossip_event) => match gossip_event {
+                libp2p::gossipsub::Event::Message {
+                    propagation_source,
+                    message,
+                    ..
+                } => {
+                    let topic = message.topic.to_string();
+                    let data = message.data;
+                    let source = propagation_source;
 
-                        if topic == GOSSIP_TX_TOPIC {
-                            let _ = self.event_tx.try_send(
-                                crate::behaviour::OpolysNetworkEvent::GossipTransaction {
-                                    data,
-                                    source,
-                                },
-                            );
-                        } else if topic == GOSSIP_BLOCK_TOPIC {
-                            let _ = self.event_tx.try_send(
-                                crate::behaviour::OpolysNetworkEvent::GossipBlock {
-                                    data,
-                                    source,
-                                },
-                            );
-                        } else {
-                            tracing::warn!(topic = %topic, "Unknown gossip topic");
-                        }
-                    }
-                    libp2p::gossipsub::Event::Subscribed { peer_id, topic } => {
-                        tracing::debug!(peer = %peer_id, topic = %topic, "Peer subscribed to topic");
-                    }
-                    libp2p::gossipsub::Event::Unsubscribed { peer_id, topic } => {
-                        tracing::debug!(peer = %peer_id, topic = %topic, "Peer unsubscribed from topic");
-                    }
-                    libp2p::gossipsub::Event::GossipsubNotSupported { peer_id } => {
-                        tracing::debug!(peer = %peer_id, "Peer does not support gossipsub");
+                    if topic == GOSSIP_TX_TOPIC {
+                        let _ = self.event_tx.try_send(
+                            crate::behaviour::OpolysNetworkEvent::GossipTransaction {
+                                data,
+                                source,
+                            },
+                        );
+                    } else if topic == GOSSIP_BLOCK_TOPIC {
+                        let _ = self.event_tx.try_send(
+                            crate::behaviour::OpolysNetworkEvent::GossipBlock { data, source },
+                        );
+                    } else {
+                        tracing::warn!(topic = %topic, "Unknown gossip topic");
                     }
                 }
-            }
+                libp2p::gossipsub::Event::Subscribed { peer_id, topic } => {
+                    tracing::debug!(peer = %peer_id, topic = %topic, "Peer subscribed to topic");
+                }
+                libp2p::gossipsub::Event::Unsubscribed { peer_id, topic } => {
+                    tracing::debug!(peer = %peer_id, topic = %topic, "Peer unsubscribed from topic");
+                }
+                libp2p::gossipsub::Event::GossipsubNotSupported { peer_id } => {
+                    tracing::debug!(peer = %peer_id, "Peer does not support gossipsub");
+                }
+            },
 
             // ── Request-Response events ────────────────────────────────────
             // Sync requests arrive as inbound Request messages; sync responses
@@ -573,7 +700,11 @@ impl SwarmTask {
                             // Inbound sync request from a peer — save the response
                             // channel and emit an event so the node can look up blocks
                             // and respond asynchronously.
-                            libp2p::request_response::Message::Request { request_id, request, channel } => {
+                            libp2p::request_response::Message::Request {
+                                request_id,
+                                request,
+                                channel,
+                            } => {
                                 tracing::info!(peer = %peer, ?request_id, start_height = request.start_height, count = request.count, "Sync request received");
                                 self.inbound_request_channels.insert(request_id, channel);
                                 let _ = self.event_tx.try_send(
@@ -586,7 +717,20 @@ impl SwarmTask {
                             }
                             // Inbound response to our outbound sync request — forward
                             // to the node as a SyncResponseReceived event.
-                            libp2p::request_response::Message::Response { request_id, response } => {
+                            libp2p::request_response::Message::Response {
+                                request_id,
+                                response,
+                            } => {
+                                if !response.is_within_size_limit() {
+                                    tracing::warn!(
+                                        peer = %peer,
+                                        ?request_id,
+                                        bytes = response.payload_size_bytes(),
+                                        max = crate::sync::MAX_SYNC_RESPONSE_BYTES,
+                                        "Dropping oversized sync response"
+                                    );
+                                    return;
+                                }
                                 tracing::debug!(peer = %peer, ?request_id, blocks = response.blocks.len(), "Sync response received");
                                 let _ = self.event_tx.try_send(
                                     crate::behaviour::OpolysNetworkEvent::SyncResponseReceived {
@@ -597,10 +741,18 @@ impl SwarmTask {
                             }
                         }
                     }
-                    libp2p::request_response::Event::OutboundFailure { peer, request_id, error } => {
+                    libp2p::request_response::Event::OutboundFailure {
+                        peer,
+                        request_id,
+                        error,
+                    } => {
                         tracing::warn!(peer = %peer, ?request_id, ?error, "Outbound sync request failed");
                     }
-                    libp2p::request_response::Event::InboundFailure { peer, request_id, error } => {
+                    libp2p::request_response::Event::InboundFailure {
+                        peer,
+                        request_id,
+                        error,
+                    } => {
                         tracing::warn!(peer = %peer, ?request_id, ?error, "Inbound sync request failed");
                     }
                     libp2p::request_response::Event::ResponseSent { peer, request_id } => {
@@ -616,7 +768,10 @@ impl SwarmTask {
                         tracing::debug!(peer = %peer_id, agent = %info.agent_version, "Identify received");
                         // Add peer addresses to Kademlia DHT for better routing
                         for addr in info.listen_addrs {
-                            self.swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
+                            self.swarm
+                                .behaviour_mut()
+                                .kademlia
+                                .add_address(&peer_id, addr);
                         }
                         // Forward the agent version so main.rs can detect refiner announcements
                         let _ = self.event_tx.try_send(
@@ -644,57 +799,63 @@ impl SwarmTask {
             }
 
             // ── Challenge request-response events ──────────────────────────
-            OpolysBehaviourEvent::ChallengeRr(rr_event) => {
-                match rr_event {
-                    libp2p::request_response::Event::Message { peer, message } => {
-                        match message {
-                            libp2p::request_response::Message::Request { request_id, request, channel } => {
-                                tracing::debug!(peer = %peer, "Memory challenge received");
-                                self.inbound_challenge_channels.insert(request_id, channel);
-                                let _ = self.event_tx.try_send(
-                                    crate::behaviour::OpolysNetworkEvent::ChallengeRequestReceived {
-                                        peer_id: peer,
-                                        request_id,
-                                        height: request.height,
-                                        nonce: request.nonce,
-                                    },
-                                );
-                            }
-                            libp2p::request_response::Message::Response { response, .. } => {
-                                tracing::debug!(peer = %peer, hash_val = response.hash_val, "Memory challenge response received");
-                                let _ = self.event_tx.try_send(
-                                    crate::behaviour::OpolysNetworkEvent::ChallengeResponseReceived {
-                                        peer_id: peer,
-                                        hash_val: response.hash_val,
-                                    },
-                                );
-                            }
-                        }
+            OpolysBehaviourEvent::ChallengeRr(rr_event) => match rr_event {
+                libp2p::request_response::Event::Message { peer, message } => match message {
+                    libp2p::request_response::Message::Request {
+                        request_id,
+                        request,
+                        channel,
+                    } => {
+                        tracing::debug!(peer = %peer, "Memory challenge received");
+                        self.inbound_challenge_channels.insert(request_id, channel);
+                        let _ = self.event_tx.try_send(
+                            crate::behaviour::OpolysNetworkEvent::ChallengeRequestReceived {
+                                peer_id: peer,
+                                request_id,
+                                height: request.height,
+                                nonce: request.nonce,
+                            },
+                        );
                     }
-                    libp2p::request_response::Event::OutboundFailure { peer, request_id, error } => {
-                        tracing::debug!(peer = %peer, ?request_id, ?error, "Challenge outbound failure");
+                    libp2p::request_response::Message::Response { response, .. } => {
+                        tracing::debug!(peer = %peer, hash_val = response.hash_val, "Memory challenge response received");
+                        let _ = self.event_tx.try_send(
+                            crate::behaviour::OpolysNetworkEvent::ChallengeResponseReceived {
+                                peer_id: peer,
+                                hash_val: response.hash_val,
+                            },
+                        );
                     }
-                    libp2p::request_response::Event::InboundFailure { peer, request_id, error } => {
-                        tracing::debug!(peer = %peer, ?request_id, ?error, "Challenge inbound failure");
-                    }
-                    libp2p::request_response::Event::ResponseSent { peer, request_id } => {
-                        tracing::trace!(peer = %peer, ?request_id, "Challenge response sent");
-                    }
+                },
+                libp2p::request_response::Event::OutboundFailure {
+                    peer,
+                    request_id,
+                    error,
+                } => {
+                    tracing::debug!(peer = %peer, ?request_id, ?error, "Challenge outbound failure");
                 }
-            }
+                libp2p::request_response::Event::InboundFailure {
+                    peer,
+                    request_id,
+                    error,
+                } => {
+                    tracing::debug!(peer = %peer, ?request_id, ?error, "Challenge inbound failure");
+                }
+                libp2p::request_response::Event::ResponseSent { peer, request_id } => {
+                    tracing::trace!(peer = %peer, ?request_id, "Challenge response sent");
+                }
+            },
 
             // ── Ping events ────────────────────────────────────────────────
             // The ping event is a struct (not an enum) in libp2p 0.54.
-            OpolysBehaviourEvent::Ping(ping_event) => {
-                match ping_event.result {
-                    Ok(rtt) => {
-                        tracing::trace!(peer = %ping_event.peer, rtt_ms = rtt.as_millis(), "Ping succeeded");
-                    }
-                    Err(error) => {
-                        tracing::debug!(peer = %ping_event.peer, ?error, "Ping failed");
-                    }
+            OpolysBehaviourEvent::Ping(ping_event) => match ping_event.result {
+                Ok(rtt) => {
+                    tracing::trace!(peer = %ping_event.peer, rtt_ms = rtt.as_millis(), "Ping succeeded");
                 }
-            }
+                Err(error) => {
+                    tracing::debug!(peer = %ping_event.peer, ?error, "Ping failed");
+                }
+            },
         }
     }
 }

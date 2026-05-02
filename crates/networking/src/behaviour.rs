@@ -6,10 +6,10 @@
 
 use crate::challenge::{ChallengeRequest, ChallengeResponse};
 use crate::sync::{SyncRequest, SyncResponse};
+use libp2p::StreamProtocol;
 use libp2p::kad::store::MemoryStore;
 use libp2p::request_response;
 use libp2p::swarm::NetworkBehaviour;
-use libp2p::StreamProtocol;
 use opolys_core::NETWORK_PROTOCOL_VERSION;
 
 pub use libp2p::request_response::InboundRequestId;
@@ -91,9 +91,7 @@ pub enum OpolysNetworkEvent {
     },
 
     /// A peer disconnected from us.
-    PeerDisconnected {
-        peer_id: libp2p::PeerId,
-    },
+    PeerDisconnected { peer_id: libp2p::PeerId },
 
     /// A sync response was received from a peer.
     SyncResponseReceived {

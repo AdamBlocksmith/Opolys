@@ -97,7 +97,9 @@ impl Hash {
 ///
 /// Wraps a [`Hash`] to provide type safety — an `ObjectId` is conceptually distinct
 /// from a raw content hash even though they share the same 32-byte representation.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, BorshSerialize, BorshDeserialize, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, BorshSerialize, BorshDeserialize, Serialize, Deserialize,
+)]
 pub struct ObjectId(pub Hash);
 
 impl ObjectId {
@@ -112,7 +114,10 @@ impl ObjectId {
     /// or contains invalid hex bytes.
     pub fn from_hex(hex: &str) -> Result<Self, String> {
         if hex.len() != 64 {
-            return Err(format!("ObjectId hex must be 64 characters, got {}", hex.len()));
+            return Err(format!(
+                "ObjectId hex must be 64 characters, got {}",
+                hex.len()
+            ));
         }
         let bytes = hex::decode(hex).map_err(|e| format!("Invalid hex: {}", e))?;
         if bytes.len() != 32 {
@@ -130,7 +135,7 @@ impl ObjectId {
 
     /// Returns a reference to the inner 32-byte array.
     pub fn as_bytes(&self) -> &[u8; 32] {
-        &self.0 .0
+        &self.0.0
     }
 }
 
@@ -155,7 +160,10 @@ impl ObjectId {
 pub enum TransactionAction {
     /// Transfer `amount` Flakes from the sender to `recipient`.
     /// The attached `fee` (set on the Transaction itself) is burned, not collected.
-    Transfer { recipient: ObjectId, amount: FlakeAmount },
+    Transfer {
+        recipient: ObjectId,
+        amount: FlakeAmount,
+    },
 
     /// Bond `amount` Flakes as refiner stake. If the sender is already a
     /// refiner, this creates a new bond entry (top-up) with its own seniority

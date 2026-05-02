@@ -74,18 +74,17 @@ Every node requires a genesis ceremony attestation file:
 ```bash
 # Run the genesis ceremony to generate attestation
 cargo run --bin genesis-ceremony -- \
-  --gold-price-usd-cents 328700 \
-  --annual-production-tonnes 3630 \
-  --above-ground-tonnes 219891 \
-  --output genesis-params.json
+  --output-dir ./genesis
 
 # Start mainnet node with ceremony output
 cargo run --release -- \
-  --genesis-params genesis-params.json \
+  --genesis-params ./genesis/genesis_attestation.json \
   --mine \
-  --key-file /path/to/miner.key \
-  --rpc-api-key <secret>
+  --key-file /path/to/miner.key
 ```
+
+If `--rpc-api-key` is omitted, the node generates a random API key at startup
+for write/mining RPC methods and prints it once in the startup logs.
 
 ### CLI Flags
 
@@ -103,28 +102,32 @@ cargo run --release -- \
 | `--genesis-params` | _(none)_ | Path to genesis ceremony JSON (required) |
 | `--no-rpc` | disabled | Disable JSON-RPC server |
 | `--rpc-listen-addr` | `127.0.0.1` | RPC listen address (`0.0.0.0` to expose publicly) |
-| `--rpc-api-key` | _(none)_ | API key for write/mining RPC methods |
+| `--rpc-api-key` | random generated key | API key for write/mining RPC methods |
+| `--no-rpc-auth` | disabled | Explicitly disable API-key auth for write/mining RPC methods |
 
 ### Wallet CLI (`opl`)
+
+`opl` defaults to `https://localhost:4171` for RPC. If you explicitly pass an
+`http://` RPC URL, the wallet prints a warning before making RPC calls.
 
 ```bash
 # Generate a new wallet (BIP-39 24-word mnemonic)
 opl new
 
 # Show wallet address
-opl address
+opl address --from-stdin
 
 # Check balance via RPC
 opl balance
 
 # Transfer OPL
-opl transfer --recipient <hex_object_id> --amount <flakes> --fee <flakes>
+opl transfer --from-stdin <hex_object_id> <amount_opl> --fee <fee_opl>
 
 # Bond stake as validator
-opl bond --amount <flakes> --fee <flakes>
+opl bond --from-stdin <amount_opl> --fee <fee_opl>
 
 # Unbond stake (FIFO order)
-opl unbond --amount <flakes> --fee <flakes>
+opl unbond --from-stdin <amount_opl> --fee <fee_opl>
 
 # Sign and broadcast a transaction
 opl send --signed-tx <hex>
@@ -573,11 +576,13 @@ curl -X POST http://localhost:4171/rpc \
 # Get mining job
 curl -X POST http://localhost:4171/rpc \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <rpc_api_key>" \
   -d '{"jsonrpc":"2.0","method":"opl_getMiningJob","params":null,"id":4}'
 
 # Submit transaction
 curl -X POST http://localhost:4171/rpc \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <rpc_api_key>" \
   -d '{"jsonrpc":"2.0","method":"opl_sendTransaction","params":["<borsh_hex>"],"id":5}'
 ```
 

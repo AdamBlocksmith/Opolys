@@ -14,7 +14,22 @@
 //! generation and variable-length operations, providing deterministic
 //! arbitrary-length output from a single seed.
 
-use opolys_core::{Hash, ObjectId};
+use opolys_core::{FlakeAmount, Hash, ObjectId, TransactionAction};
+
+/// Blake3 domain for transaction IDs.
+pub const DOMAIN_TX_ID: &[u8] = b"OPL_TX_ID_V1";
+/// Blake3 domain for block header hashes.
+pub const DOMAIN_BLOCK_HASH: &[u8] = b"OPL_BLOCK_HASH_V1";
+/// Blake3 domain for on-chain ObjectIds.
+pub const DOMAIN_OBJECT_ID: &[u8] = b"OPL_OBJECT_ID_V1";
+/// Blake3 domain for state roots.
+pub const DOMAIN_STATE_ROOT: &[u8] = b"OPL_STATE_ROOT_V1";
+/// Blake3 domain for block transaction roots.
+pub const DOMAIN_TX_ROOT: &[u8] = b"OPL_TX_ROOT_V1";
+/// Ed25519 signing domain for transactions.
+pub const DOMAIN_TX_SIGNATURE: &[u8] = b"OPL_TX_V1";
+/// Ed25519 signing domain for refiner block signatures.
+pub const DOMAIN_REFINER_BLOCK_SIGNATURE: &[u8] = b"OPL_REF_BLOCK_V1";
 
 /// A streaming Blake3-256 hasher that incrementally absorbs input data.
 ///
@@ -84,13 +99,48 @@ pub fn hash(data: &[u8]) -> Hash {
     hasher.finalize()
 }
 
+/// Compute a Blake3-256 hash with an explicit protocol domain tag.
+pub fn hash_with_domain(domain: &[u8], data: &[u8]) -> Hash {
+    let mut hasher = Blake3Hasher::new();
+    hasher.update(domain);
+    hasher.update(data);
+    hasher.finalize()
+}
+
 /// Compute a Blake3-256 hash of the input and wrap it as an [`ObjectId`].
 ///
 /// On the Opolys network, every on-chain object (transaction, block header,
 /// etc.) is identified by its Blake3-256 digest wrapped in `ObjectId`. This
 /// function is the standard way to derive such an identifier from raw bytes.
 pub fn hash_to_object_id(data: &[u8]) -> ObjectId {
-    ObjectId(hash(data))
+    hash_to_object_id_with_domain(DOMAIN_OBJECT_ID, data)
+}
+
+/// Compute a domain-separated Blake3-256 hash and wrap it as an [`ObjectId`].
+pub fn hash_to_object_id_with_domain(domain: &[u8], data: &[u8]) -> ObjectId {
+    ObjectId(hash_with_domain(domain, data))
+}
+
+/// Build the exact bytes signed by wallet transactions.
+pub fn transaction_signing_payload(
+    sender: &ObjectId,
+    action: &TransactionAction,
+    fee: FlakeAmount,
+    nonce: u64,
+    chain_id: u64,
+) -> Vec<u8> {
+    let mut payload = DOMAIN_TX_SIGNATURE.to_vec();
+    let tx_bytes = borsh::to_vec(&(sender.clone(), action, fee, nonce, chain_id))
+        .expect("Transaction signing payload serialization must not fail");
+    payload.extend_from_slice(&tx_bytes);
+    payload
+}
+
+/// Build the exact bytes signed by refiner block producers.
+pub fn refiner_block_signing_payload(block_hash: &Hash) -> Vec<u8> {
+    let mut payload = DOMAIN_REFINER_BLOCK_SIGNATURE.to_vec();
+    payload.extend_from_slice(block_hash.as_bytes());
+    payload
 }
 
 /// Compute SHA3-256 of arbitrary data.
