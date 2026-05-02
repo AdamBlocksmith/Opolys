@@ -72,12 +72,12 @@ cargo build --release
 Every node requires a genesis ceremony attestation file:
 
 ```bash
-# Run the genesis ceremony to generate attestation
-cargo run --bin genesis-ceremony -- \
+# Run the genesis ceremony to generate the mainnet attestation.
+cargo run -p genesis-ceremony -- \
   --output-dir ./genesis
 
 # Start mainnet node with ceremony output
-cargo run --release -- \
+cargo run --release -p opolys-node -- \
   --genesis-params ./genesis/genesis_attestation.json \
   --mine \
   --key-file /path/to/miner.key
@@ -85,6 +85,9 @@ cargo run --release -- \
 
 If `--rpc-api-key` is omitted, the node generates a random API key at startup
 for write/mining RPC methods and prints it once in the startup logs.
+
+For the full ceremony, verification, and launch checklist, see
+[`docs/MAINNET_LAUNCH.md`](docs/MAINNET_LAUNCH.md).
 
 ### CLI Flags
 
@@ -97,7 +100,7 @@ for write/mining RPC methods and prints it once in the startup logs.
 | `--no-bootstrap` | disabled | Skip DNS seeds and peer cache; only dial `--bootstrap` peers |
 | `--log-level` | `info` | Log level: trace, debug, info, warn, error |
 | `--mine` | disabled | Enable PoW mining loop |
-| `--validate` | disabled | Enable PoS block production |
+| `--refine` | disabled | Enable refiner block production |
 | `--key-file` | _(none)_ | Path to 32-byte ed25519 seed file |
 | `--genesis-params` | _(none)_ | Path to genesis ceremony JSON (required) |
 | `--no-rpc` | disabled | Disable JSON-RPC server |
@@ -238,7 +241,7 @@ core ← crypto ← consensus ← execution ← node → rpc
 | `libp2p` | 0.54 | P2P networking (QUIC, Kademlia, Gossipsub) |
 | `tokio` | 1 | Async runtime |
 | `axum` | 0.8 | JSON-RPC server |
-| `evo-omap` | local | Proof-of-work algorithm (EVO-OMAP) |
+| `evo-omap` | pinned Git revision | Proof-of-work algorithm (EVO-OMAP) |
 | `rayon` | 1.10 | Parallel mining |
 | `bip39` | 2.2 | Mnemonic generation |
 
