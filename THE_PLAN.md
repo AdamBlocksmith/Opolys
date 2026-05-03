@@ -1155,9 +1155,10 @@ Replaced 10%/33%/100% graduated slash with 100% burn on any double-sign. No offe
 
 #### M14: TOCTOU race — height check vs apply_block
 **Location:** `main.rs:760` (gossip), `main.rs:395` (mining)
-**Status:** OPEN
+**Status:** **FIXED**
 **What it is:** Height is read under a read lock, then `apply_block()` acquires a write lock later. Between the two, another thread could apply a block at the same height.
 **How to fix:** Acquire write lock first, do height check inside the write lock.
+**How fixed:** `OpolysNode::apply_block()` is the only state transition path and validates expected height plus parent hash while holding the chain write lock. Gossip/mining height reads are only advisory filters. Added a regression test proving a previously valid block is rejected after the tip advances.
 
 #### M15: Sync start_height unvalidated
 **Location:** `main.rs:963-993`
@@ -1316,7 +1317,7 @@ All comments updated from "1,024 blocks/epoch" to "960 blocks/epoch". Test param
 35. M21: Silent Borsh errors → `expect()` instead of `if let Ok()`
 36. M22: Propagate `apply_bond` credit errors
 37. M23: Wallet RPC default to `https://`
-38. M14: Acquire write lock before height check (fix TOCTOU)
+38. DONE M14: Apply-block height/parent validation under write lock
 39. ~~M19: Delete dead `compute_pow_share`/`compute_pos_share` f64 functions~~ — **DONE** (2cf09c2)
 
 ### Phase F: Low / Cleanup

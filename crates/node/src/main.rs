@@ -883,6 +883,9 @@ async fn handle_network_event(
 
             match borsh::from_slice::<opolys_core::Block>(&data) {
                 Ok(block) => {
+                    // Advisory DoS filter only. apply_block() re-checks height,
+                    // parent hash, difficulty, and state roots while holding the
+                    // chain write lock, so a stale snapshot cannot advance state.
                     let current_height = node.chain.read().await.current_height;
                     // Skip blocks we've already applied (height <= current)
                     if block.header.height <= current_height {

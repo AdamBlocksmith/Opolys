@@ -1745,6 +1745,31 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn stale_block_candidate_rejected_after_tip_advances() {
+        let (config, _dir) = test_config();
+        let node = OpolysNode::new(config);
+        register_test_miner_account(&node).await;
+        node.chain.write().await.current_difficulty = MIN_DIFFICULTY;
+
+        let block = node
+            .mine_block(1_000_000)
+            .await
+            .expect("Should mine block 1");
+        assert_eq!(block.header.height, 1);
+
+        node.apply_block(&block)
+            .await
+            .expect("First application should advance the tip");
+
+        let stale_result = node.apply_block(&block).await;
+        assert!(
+            stale_result.is_err(),
+            "Re-applying a previously valid block must be rejected"
+        );
+        assert_eq!(node.chain.read().await.current_height, 1);
+    }
+
     /// Supply accounting invariant: total_issued - total_burned == sum(account balances)
     /// + sum(bonded stake) + sum(pending unbonding stake).
     ///
