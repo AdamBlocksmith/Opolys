@@ -471,7 +471,7 @@ vein_yield = yield_milli / 1000.0
 
 Where:
 - `target = 2^(64-D) - 1` for difficulty D (leading zero bits model)
-- `hash_int` = first 8 bytes of the EVO-OMAP PoW hash, interpreted as big-endian u64
+- `hash_int` = first 8 bytes of the EVO-OMAP PoW hash, interpreted as little-endian u64
 - `ln()` returns 0 when `hash_int <= 0` or `hash_int >= target`, giving the 1.0× floor
 
 The `sqrt(ln)` formula produces a natural distribution with rare bonanzas:
@@ -899,6 +899,8 @@ valid if: u64(pow_hash[..8]) <= target
 pow_hash = SHA3-256(state_summary || commitment_hash || memory_commitment)
 ```
 EVO-OMAP difficulty means **leading zero bits** in the SHA3-256 output, NOT a u64 divisor.
+
+EVO-OMAP boundary byte order is little-endian: Opolys serializes the mining header integers, nonce proof, seed-material integers, memory-challenge integers, and PoW hash `u64` interpretation in little-endian when crossing into EVO-OMAP. Canonical block hashes, transaction IDs, and storage keys keep their own Opolys encodings.
 
 ---
 

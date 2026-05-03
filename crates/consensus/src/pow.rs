@@ -90,7 +90,7 @@ impl PowContext {
         };
 
         let mut proof_buf = Vec::with_capacity(8);
-        proof_buf.extend_from_slice(&nonce.to_be_bytes());
+        proof_buf.extend_from_slice(&nonce.to_le_bytes());
 
         let mut header = header;
         header.pow_proof = Some(proof_buf);
@@ -131,7 +131,7 @@ impl PowContext {
         };
 
         let mut proof_buf = Vec::with_capacity(8);
-        proof_buf.extend_from_slice(&nonce.to_be_bytes());
+        proof_buf.extend_from_slice(&nonce.to_le_bytes());
 
         let mut header = header;
         header.pow_proof = Some(proof_buf);
@@ -158,19 +158,19 @@ impl Default for PowContext {
 /// which are set after mining. Also includes `version` and `suggested_fee`
 /// to bind the PoW to the complete header state.
 ///
-/// Opolys serializes block-header integers in big-endian network order at this
-/// boundary. EVO-OMAP then interprets its internal VM words in little-endian
-/// order by specification; cross-client implementations must preserve both.
+/// Opolys serializes block-header integers in little-endian order at this
+/// boundary to match EVO-OMAP's VM word convention. This applies only to the
+/// EVO input; canonical block hashing and storage use their own encodings.
 pub fn serialize_header_for_pow(header: &BlockHeader) -> Vec<u8> {
     let mut buf = Vec::with_capacity(256);
-    buf.extend_from_slice(&header.version.to_be_bytes());
-    buf.extend_from_slice(&header.height.to_be_bytes());
+    buf.extend_from_slice(&header.version.to_le_bytes());
+    buf.extend_from_slice(&header.height.to_le_bytes());
     buf.extend_from_slice(&header.previous_hash.0);
     buf.extend_from_slice(&header.state_root.0);
     buf.extend_from_slice(&header.transaction_root.0);
-    buf.extend_from_slice(&header.timestamp.to_be_bytes());
-    buf.extend_from_slice(&header.difficulty.to_be_bytes());
-    buf.extend_from_slice(&header.suggested_fee.to_be_bytes());
+    buf.extend_from_slice(&header.timestamp.to_le_bytes());
+    buf.extend_from_slice(&header.difficulty.to_le_bytes());
+    buf.extend_from_slice(&header.suggested_fee.to_le_bytes());
     if let Some(ref ext_root) = header.extension_root {
         buf.extend_from_slice(&ext_root.0);
     }
@@ -183,7 +183,7 @@ pub fn serialize_header_for_pow(header: &BlockHeader) -> Vec<u8> {
 /// parent hash, preventing durable future-dataset precomputation.
 pub fn epoch_seed_material(header: &BlockHeader) -> Vec<u8> {
     let mut material = Vec::with_capacity(40);
-    material.extend_from_slice(&MAINNET_CHAIN_ID.to_be_bytes());
+    material.extend_from_slice(&MAINNET_CHAIN_ID.to_le_bytes());
     material.extend_from_slice(&header.previous_hash.0);
     material
 }
@@ -207,7 +207,7 @@ pub fn verify_pow_light(header: &BlockHeader, difficulty: u64) -> Result<(), Opo
         return Err(OpolysError::InvalidProofOfWork);
     }
 
-    let nonce = u64::from_be_bytes(
+    let nonce = u64::from_le_bytes(
         nonce_bytes[..8]
             .try_into()
             .map_err(|_| OpolysError::InvalidProofOfWork)?,
@@ -236,7 +236,7 @@ pub fn compute_pow_hash_value(header: &BlockHeader) -> Option<u64> {
     if nonce_bytes.len() < 8 {
         return None;
     }
-    let nonce = u64::from_be_bytes(nonce_bytes[..8].try_into().ok()?);
+    let nonce = u64::from_le_bytes(nonce_bytes[..8].try_into().ok()?);
     let header_bytes = serialize_header_for_pow(header);
     let seed_material = epoch_seed_material(header);
     let epoch_seed = evo_omap::compute_epoch_seed_with_epoch_length_and_seed_material(
@@ -246,7 +246,7 @@ pub fn compute_pow_hash_value(header: &BlockHeader) -> Option<u64> {
     );
     let mut dataset = evo_omap::LightDataset::new(&epoch_seed);
     let hash = evo_omap::evo_omap_hash_light(&mut dataset, &header_bytes, header.height, nonce);
-    Some(u64::from_be_bytes(
+    Some(u64::from_le_bytes(
         hash.0[..8].try_into().unwrap_or([0u8; 8]),
     ))
 }
@@ -267,14 +267,14 @@ pub fn compute_challenge_hash(
     let epoch_seed = evo_omap::compute_epoch_seed_with_epoch_length(height, EPOCH);
     let mut dataset = evo_omap::LightDataset::new(&epoch_seed);
     let mut input = Vec::with_capacity(32 + challenger_peer_id.len() + responder_peer_id.len());
-    input.extend_from_slice(&height.to_be_bytes());
-    input.extend_from_slice(&nonce.to_be_bytes());
-    input.extend_from_slice(&(challenger_peer_id.len() as u64).to_be_bytes());
+    input.extend_from_slice(&height.to_le_bytes());
+    input.extend_from_slice(&nonce.to_le_bytes());
+    input.extend_from_slice(&(challenger_peer_id.len() as u64).to_le_bytes());
     input.extend_from_slice(challenger_peer_id);
-    input.extend_from_slice(&(responder_peer_id.len() as u64).to_be_bytes());
+    input.extend_from_slice(&(responder_peer_id.len() as u64).to_le_bytes());
     input.extend_from_slice(responder_peer_id);
     let hash = evo_omap::evo_omap_hash_light(&mut dataset, &input, height, nonce);
-    u64::from_be_bytes(hash.0[..8].try_into().unwrap_or([0u8; 8]))
+    u64::from_le_bytes(hash.0[..8].try_into().unwrap_or([0u8; 8]))
 }
 
 /// Convenience function: mine a block without persistent caching.
@@ -376,7 +376,7 @@ mod tests {
     }
 
     #[test]
-    fn test_header_serialization_uses_big_endian_boundary() {
+    fn test_header_serialization_uses_little_endian_evo_boundary() {
         let header = BlockHeader {
             version: 0x01020304,
             height: 0x05060708090a0b0c,
@@ -388,11 +388,23 @@ mod tests {
 
         let bytes = serialize_header_for_pow(&header);
 
-        assert_eq!(&bytes[0..4], &0x01020304u32.to_be_bytes());
-        assert_eq!(&bytes[4..12], &0x05060708090a0b0cu64.to_be_bytes());
-        assert_eq!(&bytes[108..116], &0x0d0e0f1011121314u64.to_be_bytes());
-        assert_eq!(&bytes[116..124], &0x15161718191a1b1cu64.to_be_bytes());
-        assert_eq!(&bytes[124..132], &0x1d1e1f2021222324u64.to_be_bytes());
+        assert_eq!(&bytes[0..4], &0x01020304u32.to_le_bytes());
+        assert_eq!(&bytes[4..12], &0x05060708090a0b0cu64.to_le_bytes());
+        assert_eq!(&bytes[108..116], &0x0d0e0f1011121314u64.to_le_bytes());
+        assert_eq!(&bytes[116..124], &0x15161718191a1b1cu64.to_le_bytes());
+        assert_eq!(&bytes[124..132], &0x1d1e1f2021222324u64.to_le_bytes());
+    }
+
+    #[test]
+    fn epoch_seed_material_uses_little_endian_chain_id() {
+        let header = BlockHeader {
+            previous_hash: Hash::from_bytes([7u8; 32]),
+            ..make_header(1, 1)
+        };
+        let material = epoch_seed_material(&header);
+
+        assert_eq!(&material[0..8], &MAINNET_CHAIN_ID.to_le_bytes());
+        assert_eq!(&material[8..40], header.previous_hash.as_bytes());
     }
 
     #[test]
