@@ -289,6 +289,7 @@ new_difficulty = old_difficulty × (expected_time / actual_time)
 ```
 
 If blocks were too fast (actual < expected), difficulty increases. If too slow (actual > expected), difficulty decreases.
+Integer retargeting rounds to nearest instead of truncating down.
 
 **No maximum clamp.** The only floor is `MIN_DIFFICULTY` (1), which is a mathematical requirement since difficulty 0 would make all hashes valid.
 
@@ -805,7 +806,7 @@ effective_difficulty = max(retarget, consensus_floor, MIN_DIFFICULTY)
 ```
 new_difficulty = old_difficulty × expected_time / actual_time
 ```
-No maximum clamp. Floor is MIN_DIFFICULTY (1). Uses truncating integer division (see M18 for bias). If `actual_time == 0` (timestamp collision), difficulty spikes to `old_difficulty × 4` as a safety measure.
+No maximum clamp. Floor is MIN_DIFFICULTY (1). Uses rounded integer division to avoid long-term downward bias. If `actual_time == 0` (timestamp collision), difficulty spikes to `old_difficulty × 4` as a safety measure.
 
 ### Consensus Floor
 ```
@@ -1177,9 +1178,9 @@ Difficulty 1 means "1 leading zero bit", so ~50% of random hashes pass. Correct 
 
 #### M18: Integer division bias in retarget
 **Location:** `difficulty.rs:133`
-**Status:** OPEN
+**Status:** **FIXED**
 **What it is:** `old_difficulty * expected_time / actual_time` truncates toward zero, creating systematic downward bias over many epochs.
-**How to fix:** Use rounding division: `((numerator + actual/2) / actual)`.
+**How fixed:** Retarget now computes `((numerator + denominator / 2) / denominator)` using the existing `u128` intermediate, rounding to nearest instead of truncating down.
 
 #### ~~M19: Dead code: compute_pow_share/compute_pos_share use f64~~ — **FIXED** (2cf09c2)
 **Location:** ~~`emission.rs:174-193`~~
@@ -1391,7 +1392,7 @@ A comprehensive audit of all consensus-critical formulas and constants in the co
 
 - **Fixed:** Section 8 header "PoS vs PoW Block Reward" → "Refiner vs Miner Block Reward". Key Formulas `pow_share_amount`/`pos_share_amount` → `miner_share_amount`/`refiner_share_amount`. PING_TIMEOUT_SECS corrected from 10s to 20s. Section numbering updated after merging old Section 23 (New Constants) into Section 3.
 
-- **Confirmed discrepancies (bugs already tracked):** H3 (suggested fee uses `total_fees` not `total_fees_burned`), M4 (missing mutual exclusivity check), H4 (unbond fee bypass), M6 (zero producer phantom issuance), M18 (integer division bias in retarget), H6 (no sync response size limit).
+- **Confirmed discrepancies (bugs already tracked):** H3 (suggested fee uses `total_fees` not `total_fees_burned`), M4 (missing mutual exclusivity check), H4 (unbond fee bypass), M6 (zero producer phantom issuance), H6 (no sync response size limit).
 
 ---
 

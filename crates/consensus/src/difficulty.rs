@@ -131,10 +131,11 @@ fn compute_retarget(
     // Standard retarget: scale difficulty proportionally to expected vs actual time.
     // If blocks were too fast (actual < expected), difficulty increases.
     // If blocks were too slow (actual > expected), difficulty decreases.
-    // Uses u128 intermediate to prevent overflow on large difficulty values.
+    // Uses u128 intermediate and round-to-nearest division to avoid systematic
+    // downward bias from repeated truncation.
     let numerator = current_difficulty as u128 * expected_time_ms as u128;
     let denominator = actual_time_ms as u128;
-    let new_difficulty = (numerator / denominator) as u64;
+    let new_difficulty = ((numerator + (denominator / 2)) / denominator) as u64;
 
     // No maximum clamp — difficulty adjusts freely.
     // The only floor is MIN_DIFFICULTY (1), a mathematical requirement.
@@ -241,6 +242,19 @@ mod tests {
             "Difficulty should drop when blocks are too slow: got {}",
             new_diff
         );
+    }
+
+    #[test]
+    fn retarget_rounds_to_nearest_instead_of_truncating_down() {
+        let expected_time_secs = EPOCH * opolys_core::BLOCK_TARGET_TIME_MS / 1_000;
+        let current_difficulty = 3;
+        let actual_time_secs = expected_time_secs * 2;
+        let mut timestamps = vec![0u64; (EPOCH + 1) as usize];
+        timestamps[EPOCH as usize] = actual_time_secs;
+
+        let new_diff = compute_retarget(current_difficulty, EPOCH, &timestamps);
+
+        assert_eq!(new_diff, 2);
     }
 
     #[test]
