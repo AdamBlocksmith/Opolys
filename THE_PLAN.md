@@ -731,19 +731,19 @@ Opolys/
 | 9: Networking | **DONE** | P2P gossip/sync/discovery wired to node |
 | 10: Staking | **DONE** | `--refine`, 100% slash on double-sign, timeout-based refiner block production |
 | 11: Security | **DONE** | Eclipse protection, subnet diversity, DoS limits, memory challenge |
-| 12: Pass 1 | **IN PROGRESS** | Phase A DONE (ec0df9b), M19 DONE (2cf09c2), H3+H4 FIXED, L7+L10 FIXED, economic model (vein yield, assay, decay, two-state fees) DONE (07da54b). Phase B–E remaining security & protocol fixes |
+| 12: Pass 1 | **DONE** | Security, protocol, storage, P2P, wallet, and cleanup fixes complete; full workspace test suite passing |
 | 13: Pass 2 | **DONE** | Refiner-block attestations, reliability score, block confidence, attestation finality |
-| 14: Mainnet | **READY** | Genesis ceremony and launch (after dry-run validation) |
+| 14: Mainnet | **READY FOR DRY RUN** | Genesis ceremony and launch after one final launch rehearsal |
 
 ---
 
 ## 21. Test Count
 
-**171 tests passing** across 10 crates (as of commit 07da54b):
-- `opolys-consensus`: 95 tests
-- `opolys-core`: 13 tests
-- `opolys-crypto`: 8 tests
-- `opolys-storage`: 6 tests
+**253 tests passing** across the workspace (as of commit 950273e plus plan-status refresh):
+- Full unit, integration, and doctest suite passes with `cargo test --workspace`
+- Genesis ceremony dry-run and verification tests pass
+- Refiner-block attestation/finality tests pass
+- Mined-block PoW security path tests pass
 
 Run with `cargo test --workspace`.
 
