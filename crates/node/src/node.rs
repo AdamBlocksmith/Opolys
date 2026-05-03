@@ -1496,14 +1496,15 @@ impl OpolysNode {
             accounts.credit(producer, miner_share_amount).ok();
         }
 
-        // Distribute the refiner share among active refiners proportional to weight.
+        // Distribute the refiner share among active refiners proportional to
+        // stake, seniority, and verified attestation reliability.
         // Each refiner's share = refiner_share_amount × (their_weight / total_weight).
         if refiner_share_amount > 0 {
             let current_timestamp = chain.block_timestamps.last().copied().unwrap_or(0);
-            let total_weight = refiners.total_weight(current_timestamp);
+            let total_weight = refiners.total_attestation_weight(current_timestamp);
             if total_weight > 0 {
                 for v in refiners.active_refiners() {
-                    let v_weight = v.weight(current_timestamp);
+                    let v_weight = v.attestation_weight(current_timestamp);
                     let v_share = ((refiner_share_amount as u128 * v_weight as u128)
                         / total_weight as u128) as FlakeAmount;
                     if v_share > 0 {
