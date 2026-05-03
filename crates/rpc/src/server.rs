@@ -52,8 +52,8 @@ use opolys_consensus::difficulty::compute_next_difficulty;
 use opolys_consensus::mempool::Mempool;
 use opolys_consensus::refiner::RefinerSet;
 use opolys_core::{
-    Block, EPOCH, FLAKES_PER_OPL, FlakeAmount, Hash, MAX_ACTIVE_REFINERS, ObjectId, RefinerStatus,
-    Transaction,
+    Block, BlockAttestation, EPOCH, FLAKES_PER_OPL, FlakeAmount, Hash, MAX_ACTIVE_REFINERS,
+    ObjectId, RefinerStatus, Transaction,
 };
 use opolys_storage::BlockchainStore;
 
@@ -578,17 +578,7 @@ async fn handle_get_block_confidence(
     let current_timestamp = chain.block_timestamps.last().copied().unwrap_or(0);
     drop(chain);
 
-    let refiners = state.refiners.read().await;
-    let mut total_active_weight: u128 = 0;
-    for refiner in refiners.all_refiners() {
-        if refiner.status == RefinerStatus::Active {
-            total_active_weight =
-                total_active_weight.saturating_add(refiner.weight(current_timestamp) as u128);
-        }
-    }
-
-    let mut seen_refiners: HashSet<ObjectId> = HashSet::new();
-    let mut attesting_weight: u128 = 0;
+    let mut included_attestations = Vec::new();
     let mut included_through_height = target_height;
 
     for height in target_height.saturating_add(1)..=current_height {
@@ -598,27 +588,19 @@ async fn handle_get_block_confidence(
             Err(e) => return Err(JsonRpcError::internal_error(&e.to_string())),
         };
         included_through_height = height;
-        for attestation in &block.attestations {
-            if attestation.height != target_height || attestation.block_hash != target_hash {
-                continue;
-            }
-            if !seen_refiners.insert(attestation.refiner.clone()) {
-                continue;
-            }
-            if let Some(refiner) = refiners.get_refiner(&attestation.refiner) {
-                if refiner.status == RefinerStatus::Active {
-                    attesting_weight =
-                        attesting_weight.saturating_add(refiner.weight(current_timestamp) as u128);
-                }
-            }
-        }
+        included_attestations.extend(block.attestations);
     }
 
-    let confidence_milli = if total_active_weight > 0 {
-        ((attesting_weight.saturating_mul(1000)) / total_active_weight).min(1000) as u64
-    } else {
-        0
-    };
+    let refiners = state.refiners.read().await;
+    let total_active_weight = total_active_refiner_weight(&refiners, current_timestamp);
+    let (attestation_count, attesting_weight) = attestation_confidence_weight(
+        target_height,
+        &target_hash,
+        &included_attestations,
+        &refiners,
+        current_timestamp,
+    );
+    let confidence_milli = confidence_milli(attesting_weight, total_active_weight);
 
     serde_json::to_value(BlockConfidenceResponse {
         height: target_height,
@@ -627,7 +609,7 @@ async fn handle_get_block_confidence(
             .saturating_sub(target_height)
             .saturating_add(1),
         finalized: target_height <= finalized_height,
-        attestation_count: seen_refiners.len(),
+        attestation_count,
         attesting_weight: attesting_weight.min(u64::MAX as u128) as u64,
         total_active_weight: total_active_weight.min(u64::MAX as u128) as u64,
         confidence_milli,
@@ -936,6 +918,51 @@ fn load_confidence_target_block(
     }
 }
 
+fn total_active_refiner_weight(refiners: &RefinerSet, current_timestamp: u64) -> u128 {
+    refiners
+        .all_refiners()
+        .into_iter()
+        .filter(|refiner| refiner.status == RefinerStatus::Active)
+        .map(|refiner| refiner.weight(current_timestamp) as u128)
+        .sum()
+}
+
+fn attestation_confidence_weight(
+    target_height: u64,
+    target_hash: &Hash,
+    attestations: &[BlockAttestation],
+    refiners: &RefinerSet,
+    current_timestamp: u64,
+) -> (usize, u128) {
+    let mut seen_refiners: HashSet<ObjectId> = HashSet::new();
+    let mut attesting_weight: u128 = 0;
+
+    for attestation in attestations {
+        if attestation.height != target_height || &attestation.block_hash != target_hash {
+            continue;
+        }
+        if !seen_refiners.insert(attestation.refiner.clone()) {
+            continue;
+        }
+        if let Some(refiner) = refiners.get_refiner(&attestation.refiner) {
+            if refiner.status == RefinerStatus::Active {
+                attesting_weight =
+                    attesting_weight.saturating_add(refiner.weight(current_timestamp) as u128);
+            }
+        }
+    }
+
+    (seen_refiners.len(), attesting_weight)
+}
+
+fn confidence_milli(attesting_weight: u128, total_active_weight: u128) -> u64 {
+    if total_active_weight > 0 {
+        ((attesting_weight.saturating_mul(1000)) / total_active_weight).min(1000) as u64
+    } else {
+        0
+    }
+}
+
 /// Parse an ObjectId from a hex string.
 fn parse_object_id(hex_str: &str) -> Result<ObjectId, JsonRpcError> {
     let bytes = hex::decode(hex_str)
@@ -1232,6 +1259,38 @@ pub async fn start_server(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opolys_core::MIN_BOND_STAKE;
+
+    fn test_refiner(label: &[u8]) -> ObjectId {
+        opolys_crypto::hash_to_object_id(label)
+    }
+
+    fn test_hash(label: &[u8]) -> Hash {
+        let mut hasher = opolys_crypto::Blake3Hasher::new();
+        hasher.update(label);
+        hasher.finalize()
+    }
+
+    fn test_attestation(refiner: ObjectId, height: u64, block_hash: Hash) -> BlockAttestation {
+        BlockAttestation {
+            refiner,
+            refiner_pubkey: vec![0; 32],
+            height,
+            block_hash,
+            signature: vec![0; 64],
+        }
+    }
+
+    fn active_refiners(ids: &[ObjectId]) -> RefinerSet {
+        let mut refiners = RefinerSet::new();
+        for id in ids {
+            refiners
+                .bond(id.clone(), MIN_BOND_STAKE, 0, 0)
+                .expect("bond should succeed");
+            refiners.activate(id, 1).expect("activate should succeed");
+        }
+        refiners
+    }
 
     #[test]
     fn format_flake_amounts() {
@@ -1270,6 +1329,74 @@ mod tests {
             included_through_height: 9,
         };
         assert_eq!(response.confidence_percent, "25.0");
+    }
+
+    #[test]
+    fn confidence_counts_duplicate_refiner_once() {
+        let block_hash = test_hash(b"target");
+        let refiner_a = test_refiner(b"a");
+        let refiner_b = test_refiner(b"b");
+        let refiners = active_refiners(&[refiner_a.clone(), refiner_b]);
+        let attestations = vec![
+            test_attestation(refiner_a.clone(), 7, block_hash.clone()),
+            test_attestation(refiner_a, 7, block_hash.clone()),
+        ];
+
+        let (count, weight) =
+            attestation_confidence_weight(7, &block_hash, &attestations, &refiners, 0);
+        let total = total_active_refiner_weight(&refiners, 0);
+
+        assert_eq!(count, 1);
+        assert_eq!(confidence_milli(weight, total), 500);
+    }
+
+    #[test]
+    fn confidence_ignores_wrong_height_and_hash() {
+        let block_hash = test_hash(b"target");
+        let other_hash = test_hash(b"other");
+        let refiner_a = test_refiner(b"a");
+        let refiner_b = test_refiner(b"b");
+        let refiners = active_refiners(&[refiner_a.clone(), refiner_b.clone()]);
+        let attestations = vec![
+            test_attestation(refiner_a, 8, block_hash.clone()),
+            test_attestation(refiner_b, 7, other_hash),
+        ];
+
+        let (count, weight) =
+            attestation_confidence_weight(7, &block_hash, &attestations, &refiners, 0);
+
+        assert_eq!(count, 0);
+        assert_eq!(weight, 0);
+    }
+
+    #[test]
+    fn confidence_does_not_weight_inactive_or_unknown_refiners() {
+        let block_hash = test_hash(b"target");
+        let active = test_refiner(b"active");
+        let bonding = test_refiner(b"bonding");
+        let unknown = test_refiner(b"unknown");
+        let mut refiners = active_refiners(std::slice::from_ref(&active));
+        refiners
+            .bond(bonding.clone(), MIN_BOND_STAKE, 0, 0)
+            .expect("bonding refiner should be recorded");
+        let attestations = vec![
+            test_attestation(active, 7, block_hash.clone()),
+            test_attestation(bonding, 7, block_hash.clone()),
+            test_attestation(unknown, 7, block_hash.clone()),
+        ];
+
+        let (count, weight) =
+            attestation_confidence_weight(7, &block_hash, &attestations, &refiners, 0);
+        let total = total_active_refiner_weight(&refiners, 0);
+
+        assert_eq!(count, 3);
+        assert_eq!(weight, total);
+        assert_eq!(confidence_milli(weight, total), 1000);
+    }
+
+    #[test]
+    fn confidence_zero_active_weight_returns_zero() {
+        assert_eq!(confidence_milli(100, 0), 0);
     }
 
     #[test]
