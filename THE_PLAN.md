@@ -959,7 +959,7 @@ Every bug below includes: **What it is**, **Why it matters**, and **How to fix i
 
 **How to fix:** (1) Default to a randomly-generated API key printed at startup. Only allow `None` (no auth) via explicit `--no-rpc-auth` flag. (2) Replace `==` with constant-time comparison via `subtle::ConstantTimeEq`.
 
-**How fixed:** Node startup now generates a random 32-byte hex RPC API key when RPC is enabled and `--rpc-api-key` is omitted, printing it once in startup logs. Unauthenticated write/mining RPC is only reachable through the explicit `--no-rpc-auth` flag. `check_api_key()` now uses `subtle::ConstantTimeEq` for bearer and `X-Api-Key` comparisons.
+**How fixed:** Node startup now generates a random 32-byte hex RPC API key when RPC is enabled and `--rpc-api-key` is omitted, printing it once in startup logs. If OS randomness fails, startup exits cleanly instead of panicking. Unauthenticated write/mining RPC is only reachable through the explicit `--no-rpc-auth` flag. `check_api_key()` now uses `subtle::ConstantTimeEq` for bearer and `X-Api-Key` comparisons.
 
 ---
 

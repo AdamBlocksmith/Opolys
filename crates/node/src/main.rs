@@ -53,12 +53,15 @@ const MAX_PEERS_PER_SUBNET: usize = 3;
 const KNOWN_PEERS_FILE: &str = "known_peers.txt";
 
 /// Generate a random RPC API key for write/mining methods.
-fn generate_rpc_api_key() -> String {
+fn generate_rpc_api_key() -> Result<String, String> {
     let mut key = [0u8; 32];
-    OsRng
-        .try_fill_bytes(&mut key)
-        .expect("OS randomness unavailable for RPC API key generation");
-    hex::encode(key)
+    OsRng.try_fill_bytes(&mut key).map_err(|e| {
+        format!(
+            "OS randomness unavailable for RPC API key generation: {}",
+            e
+        )
+    })?;
+    Ok(hex::encode(key))
 }
 
 /// Load cached peer addresses from a previous session.
@@ -155,6 +158,13 @@ mod tests {
         assert_eq!(start, 40);
         assert_eq!(count, 3);
     }
+
+    #[test]
+    fn generated_rpc_api_key_is_32_random_bytes_hex() {
+        let key = generate_rpc_api_key().expect("Should generate RPC API key");
+        assert_eq!(key.len(), 64);
+        assert!(key.chars().all(|c| c.is_ascii_hexdigit()));
+    }
 }
 
 fn clamp_sync_request_range(start_height: u64, count: u64, current_height: u64) -> (u64, u64) {
@@ -191,7 +201,16 @@ async fn main() {
     let rpc_api_key = if args.no_rpc || args.no_rpc_auth {
         None
     } else {
-        Some(provided_rpc_api_key.unwrap_or_else(generate_rpc_api_key))
+        match provided_rpc_api_key {
+            Some(key) => Some(key),
+            None => match generate_rpc_api_key() {
+                Ok(key) => Some(key),
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to generate RPC API key");
+                    std::process::exit(1);
+                }
+            },
+        }
     };
 
     if !args.no_rpc && args.no_rpc_auth {
