@@ -19,7 +19,7 @@ Opolys encodes these properties directly into consensus:
 | **Gold ore varies in richness** | Vein yield: `1 + ln(target / hash_int)` | A lucky gold strike yields more than a poor one. Vein yield models this: most blocks earn ~2x base reward, exceptional ones earn more. The math is natural, not scheduled. |
 | **Gold production rate is known** | BASE_REWARD derived from world gold production via genesis ceremony | 3,630 tonnes of gold are mined annually (~116.7 million troy ounces). Divided by 350,640 blocks per year = 332 OPL per block at minimum difficulty. BASE_REWARD is set from live LBMA/USGS/WGC data at the genesis ceremony. |
 | **Gold must be refined before use** | Difficulty must be overcome to earn reward | You can't just claim gold exists — you have to prove you did the work. EVO-OMAP requires a valid proof-of-work with at least D leading zero bits. |
-| **Gold held in vaults earns trust** | Validator staking with seniority | Bonded OPL gives validators block production rights. Senior validators earn slightly more (logarithmic weight), just as trusted vaults command higher fees. But the marginal bonus shrinks over time — no permanent aristocracy. |
+| **Gold held in vaults earns trust** | Refiner staking with seniority | Bonded OPL gives refiners block production rights when the chain stalls. Senior refiners earn slightly more weight logarithmically, just as trusted vaults command higher fees. But the marginal bonus shrinks over time — no permanent aristocracy. |
 | **Gold can be unvaulted** | FIFO unbonding with 1-epoch delay | Unbonding OPL is like withdrawing gold from a vault. It takes time (960 blocks = exactly 24 hours). During the delay, you still earn rewards. The oldest deposits are withdrawn first. |
 | **Gold bars are uniform** | Every OPL is identical. One sub-unit (Flake). No tokens, no assets, no governance tokens | There's no "pennyweight" gold or "grain" gold in Opolys. 1 OPL = 1,000,000 Flakes. Period. The chain tracks one asset. |
 | **Gold supply is self-regulating** | Natural equilibrium — no governance needed | When fees are burned faster than rewards are issued, supply shrinks. When mining is too easy, difficulty rises and issuance drops. The protocol never needs a vote. |
@@ -126,7 +126,7 @@ opl balance
 # Transfer OPL
 opl transfer --from-stdin <hex_object_id> <amount_opl> --fee <fee_opl>
 
-# Bond stake as validator
+# Bond stake as refiner
 opl bond --from-stdin <amount_opl> --fee <fee_opl>
 
 # Unbond stake (FIFO order)
@@ -195,7 +195,7 @@ Opolys/
 │   │   ├── difficulty.rs     # Adaptive retarget, consensus floor, PoW check
 │   │   ├── emission.rs       # Vein yield, difficulty_to_target(), suggested_fee, stake_coverage
 │   │   ├── mempool.rs        # Fee-priority mempool
-│   │   ├── pos.rs            # ValidatorSet, FIFO unbonding, seniority weights
+│   │   ├── refiner.rs        # RefinerSet, FIFO unbonding, seniority weights
 │   │   ├── pow.rs            # EVO-OMAP PowContext, mine_parallel, verify_light
 │   │   └── genesis.rs        # GenesisConfig, build_genesis_block()
 │   ├── execution/     — Transaction dispatcher (Transfer, Bond, Unbond)
@@ -254,13 +254,13 @@ core ← crypto ← consensus ← execution ← node → rpc
 | **Hashing** | Blake3-256 (32 bytes) | Block hashes, transaction IDs, ObjectIds, state roots, Merkle roots |
 | **PoW Inner** | Blake3 (XOF mode) | EVO-OMAP dataset generation, branch mixing |
 | **PoW Final** | SHA3-256 | EVO-OMAP final hash (different security margin from inner) |
-| **Signing** | ed25519 (via ed25519-dalek) | Transaction authentication and validator block signing |
+| **Signing** | ed25519 (via ed25519-dalek) | Transaction authentication and refiner block signing |
 | **Key Derivation** | SLIP-0010 + HMAC-SHA512 | BIP-44 path: `m/44'/999'/0'/0'` |
 | **Mnemonic** | BIP-39 (24-word, 256-bit entropy) | Wallet recovery |
 
 ### Single-Key Architecture
 
-A single ed25519 keypair — derived deterministically from the BIP-39 mnemonic via SLIP-0010 — handles both transaction signing and validator block signing. Full wallet recovery is possible from the mnemonic alone. No separate validator key file is needed (though a `--key-file` flag can load a raw seed for convenience).
+A single ed25519 keypair — derived deterministically from the BIP-39 mnemonic via SLIP-0010 — handles both transaction signing and refiner block signing. Full wallet recovery is possible from the mnemonic alone. No separate refiner key file is needed (though a `--key-file` flag can load a raw seed for convenience).
 
 ### ObjectId
 
@@ -270,8 +270,8 @@ Account addresses are **Blake3-256 hashes of ed25519 public keys** — not the p
 
 | Layer | Algorithm | Purpose |
 |---|---|---|
-| **Validator Signatures** | BLS12-381 | Signature aggregation for efficient PoS attestation |
-| **Block Producer Selection** | VRF | Unpredictable, verifiable validator selection |
+| **Refiner Signatures** | ed25519 | Per-block refiner signatures and attestations |
+| **Block Producer Selection** | Previous-block hash seed | Deterministic, verifiable refiner selection |
 | **Privacy (L1)** | Stealth addresses | Receiver privacy via one-time derived addresses |
 | **Privacy (L2)** | Viewing keys | Selective transaction disclosure |
 | **ZK Foundation** | Poseidon hash | ZK-friendly hash for future SNARKs/STARKs |
@@ -280,14 +280,14 @@ Account addresses are **Blake3-256 hashes of ed25519 public keys** — not the p
 
 ## Consensus
 
-Opolys uses **hybrid PoW/PoS** with a smooth, continuous transition — no thresholds, no governance votes, no hard switches.
+Opolys uses **hybrid miner/refiner consensus** with a smooth, continuous reward split — no thresholds, no governance votes, no hard switches.
 
 ### How It Works
 
 1. **Miners compete** to find EVO-OMAP proof-of-work solutions (like physical gold miners)
-2. **Validators bond stake** and earn the right to produce blocks proportional to bonded weight (like gold vaults earning trust)
-3. **Stake coverage** (`bonded_stake / total_issued`) continuously shifts rewards from miners to validators
-4. At 0% coverage, 100% of rewards go to miners. At 100% coverage, 100% go to validators. The split is smooth and mathematical — no vote needed
+2. **Refiners bond stake** and earn the right to produce stalled-chain blocks proportional to bonded weight (like gold vaults earning trust)
+3. **Stake coverage** (`bonded_stake / total_issued`) continuously shifts the base reward from miners to refiners
+4. At 0% coverage, the base reward goes to miners. At 100% coverage, the base reward goes to refiners. Miner vein bonuses always stay with miners. The split is smooth and mathematical — no vote needed
 
 ### Difficulty
 
@@ -365,9 +365,9 @@ vein_yield = 1 + ln(target / hash_int)
 
 Where:
 - `target = 2^(64-D) - 1` (from difficulty D)
-- `hash_int` = first 8 bytes of the EVO-OMAP PoW hash, interpreted as big-endian u64
+- `hash_int` = first 8 bytes of the EVO-OMAP PoW hash, interpreted as little-endian u64
 
-Most blocks earn ~2x BASE_REWARD. Exceptionally lucky blocks earn more. The math is natural: `ln(x)` is the same curve that describes ore concentration in a gold vein. Implementation uses `f64::ln()` with deterministic IEEE 754 rounding — identical results across all platforms.
+Most mined blocks earn above the 1.0x floor. Exceptionally lucky blocks earn more. The math is natural: `ln(x)` is the same curve that describes ore concentration in a gold vein. Implementation uses `f64::ln()` and `f64::sqrt()` with deterministic IEEE 754 behavior.
 
 ### Block Reward Formula
 
@@ -375,20 +375,21 @@ Most blocks earn ~2x BASE_REWARD. Exceptionally lucky blocks earn more. The math
 block_reward = (BASE_REWARD / effective_difficulty) × vein_yield
 ```
 
-At minimum difficulty (1), each block earns ~312 OPL. As difficulty rises, the per-block reward naturally declines — exactly like real gold mining where the easy veins are found first.
+At minimum difficulty (1), the base reward starts from the ceremony value, then mined blocks may add a vein bonus. As difficulty rises, the base reward naturally declines — exactly like real gold mining where the easy veins are found first.
 
-### Reward Distribution (PoW/PoS Split)
+### Reward Distribution (Miner/Refiner Split)
 
 ```
 coverage_milli = (bonded_stake × 1000) / total_issued    // integer, no float
-pow_share_amount = block_reward × (1000 - coverage_milli) / 1000
-pos_share_amount = block_reward - pow_share_amount
+base_reward_amount = BASE_REWARD / effective_difficulty
+miner_share_amount = base_reward_amount × (1000 - coverage_milli) / 1000 + vein_bonus
+refiner_share_amount = base_reward_amount × coverage_milli / 1000
 ```
 
-- PoW share goes to the block producer (miner)
-- PoS share is distributed among active validators proportional to their weight
-- At 0% coverage: 100% miner, 0% validators
-- At 100% coverage: 0% miner, 100% validators
+- Miner share goes to the block producer
+- Refiner share is distributed among active refiners proportional to their weight
+- At 0% coverage: base reward goes to miners, plus any miner vein bonus
+- At 100% coverage: base reward goes to refiners, while miner vein bonuses still stay with miners
 - This is the same continuum as gold: as more gold moves from mines to vaults, the vaults command more influence
 
 ### Suggested Fee (EMA)
@@ -401,14 +402,14 @@ Floored at `MIN_FEE` (1 Flake). Starts at 1 Flake. This is a *suggestion* — th
 
 ---
 
-## Validator Staking
+## Refiner Staking
 
 ### Bond Lifecycle
 
 Like depositing gold in a vault — you lock it up, it earns seniority, and you can withdraw it after a delay.
 
-1. **Bond**: `ValidatorBond { amount }` — Lock OPL as validator stake. Creates a new bond entry if the validator already exists (top-up)
-2. **Unbond**: `ValidatorUnbond { amount }` — Withdraw OPL using FIFO order (oldest first)
+1. **Bond**: `RefinerBond { amount }` — Lock OPL as refiner stake. Creates a new bond entry if the refiner already exists (top-up)
+2. **Unbond**: `RefinerUnbond { amount }` — Withdraw OPL using FIFO order (oldest first)
 3. **Slash**: Only for double-signing. All entries' stakes are **burned** (not confiscated). This is the only slashing condition
 
 ### Per-Entry Weight (Seniority)
@@ -422,25 +423,25 @@ Each bond entry has its own seniority clock. Logarithmic seniority means older e
 ### FIFO Unbonding
 
 ```
-ValidatorUnbond { amount: FlakeAmount }
+RefinerUnbond { amount: FlakeAmount }
 ```
 
 Oldest entries are consumed first. If the unbond amount exceeds an entry's stake, that entry is fully consumed and the remainder comes from the next entry. Residuals keep their original `bonded_at_timestamp` (preserving seniority). Entries with the same `bonded_at_timestamp` are auto-merged.
 
 After unbonding, stake enters the **unbonding queue** for `UNBONDING_DELAY_BLOCKS` (960 blocks = exactly 24 hours). During the delay, the unbonding stake still earns rewards. Once matured, it's automatically credited back to the sender.
 
-### Validator Activation
+### Refiner Activation
 
-Newly bonded validators start in `Bonding` status. They activate to `Active` after their earliest bond entry has been confirmed for at least one full epoch (960 blocks). Only `Active` validators are eligible for block production.
+Newly bonded refiners start in `Bonding` status. They activate to `Active` after their earliest bond entry has been confirmed for at least one full epoch (960 blocks). Only `Active` refiners are eligible for stalled-chain block production.
 
-**Validator caps:**
-- **Active set**: 5,000 validators maximum (can be raised via protocol upgrade)
-- **Total registered**: up to 524,288 validators can be in `Bonding`/`Waiting` status
-- New validators bond successfully and queue fairly — no `ValidatorBond` is ever rejected
+**Refiner caps:**
+- **Active set**: 5,000 refiners maximum (can be raised via protocol upgrade)
+- **Total registered**: up to 524,288 refiners can be in `Bonding`/`Waiting` status
+- New refiners bond successfully and queue fairly — no `RefinerBond` is ever rejected
 
 ### Block Producer Selection
 
-A deterministic seed derived from the previous block hash selects the PoS block producer. Weighted random sampling from active validators. Any node can verify the selection — no trust required.
+A deterministic seed derived from the previous block hash selects the refiner block producer after the chain stalls. Weighted random sampling from active refiners lets any node verify the selection — no trust required.
 
 ---
 
@@ -457,9 +458,9 @@ BlockHeader {
     difficulty: u64,                     // Effective difficulty (leading zero bits)
     suggested_fee: FlakeAmount,           // EMA of previous block's fees (1 Flake minimum)
     extension_root: Option<Hash>,         // Reserved for rollups
-    producer: ObjectId,                   // Miner or validator earning the block reward
-    pow_proof: Option<Vec<u8>>,            // EVO-OMAP nonce (None for PoS)
-    validator_signature: Option<Vec<u8>>,  // ed25519 signature (None for PoW)
+    producer: ObjectId,                   // Miner or refiner earning the producer share
+    pow_proof: Option<Vec<u8>>,            // EVO-OMAP nonce (None for refiner blocks)
+    refiner_signature: Option<Vec<u8>>,    // ed25519 signature (None for mined blocks)
 }
 
 Block {
@@ -470,11 +471,11 @@ Block {
 
 ### Block Hash
 
-`Blake3-256(header_bytes)` where `pow_proof` and `validator_signature` are set to `None` before hashing. The hash is determined before mining begins. The genesis block hash is computed from ceremony parameters, not hardcoded.
+`Blake3-256(header_bytes)` where `pow_proof` and `refiner_signature` are set to `None` before hashing. The hash is determined before mining begins. The genesis block hash is computed from ceremony parameters, not hardcoded.
 
 ### State Root
 
-After each block, `compute_state_root()` computes `Blake3-256(sorted Borsh-serialised state)` over both accounts and validators. This root makes the full application state a single 32-byte commitment.
+After each block, `compute_state_root()` computes `Blake3-256(sorted Borsh-serialised state)` over accounts, refiners, supply, burns, and height. This root makes the full application state a single 32-byte commitment.
 
 ---
 
@@ -485,8 +486,8 @@ After each block, `compute_state_root()` computes `Blake3-256(sorted Borsh-seria
 | Action | Description |
 |---|---|
 | `Transfer { recipient, amount }` | Move OPL from sender to recipient; fee is burned |
-| `ValidatorBond { amount }` | Lock OPL as validator stake (new entry or top-up, min 1 OPL per new entry) |
-| `ValidatorUnbond { amount }` | Withdraw OPL using FIFO order; fee is burned; 1,024-block delay |
+| `RefinerBond { amount }` | Lock OPL as refiner stake (new entry or top-up, min 1 OPL per new entry) |
+| `RefinerUnbond { amount }` | Withdraw OPL using FIFO order; fee is burned; 960-block delay |
 
 ### Transaction Structure
 
@@ -514,11 +515,11 @@ Invalid transactions (wrong nonce, insufficient balance, invalid unbond amount) 
 
 ### Fee Model
 
-All fees are **permanently burned** — not transferred to validators or miners. This is the gold attrition model: just as gold jewelry is lost, gold coins are melted, and gold bullion sinks, OPL fees are destroyed, reducing circulating supply.
+All fees are **permanently burned** — not transferred to refiners or miners. This is the gold attrition model: just as gold jewelry is lost, gold coins are melted, and gold bullion sinks, OPL fees are destroyed, reducing circulating supply.
 
 - **No minimum fee beyond 1 Flake**: The mempool accepts any transaction
 - **No fee schedule**: Markets determine inclusion priority
-- **Validator income**: Block rewards only, never fees
+- **Refiner income**: Block rewards only, never fees
 - **Deflationary**: Fee burning can make circulating supply decrease over time
 
 ---
@@ -532,7 +533,7 @@ JSON-RPC 2.0 server on port 4171 (default: `listen_port + 1`).
 | Method | Parameters | Description |
 |---|---|---|
 | `opl_getBlockHeight` | _(none)_ | Current chain height |
-| `opl_getChainInfo` | _(none)_ | Chain statistics (height, difficulty, supply, validators, suggested_fee) |
+| `opl_getChainInfo` | _(none)_ | Chain statistics (height, difficulty, supply, refiners, suggested_fee) |
 | `opl_getNetworkVersion` | _(none)_ | Protocol version string |
 | `opl_getBalance` | `["object_id_hex"]` | Account balance (flakes and OPL) |
 | `opl_getAccount` | `["object_id_hex"]` | Full account details (balance, nonce, public_key) |
@@ -543,7 +544,7 @@ JSON-RPC 2.0 server on port 4171 (default: `listen_port + 1`).
 | `opl_getMempoolStatus` | _(none)_ | Pending transaction count and size |
 | `opl_getSupply` | _(none)_ | Issued, burned, and circulating breakdown |
 | `opl_getDifficulty` | _(none)_ | Current difficulty and retarget info |
-| `opl_getValidators` | _(none)_ | Active validator set with per-entry bond details |
+| `opl_getRefiners` | _(none)_ | Active refiner set with per-entry bond details |
 
 ### Write
 
@@ -650,7 +651,7 @@ RocksDB with Borsh serialization. State is saved atomically after each block.
 |---|---|---|
 | `blocks` | `block_<height>` | Borsh-serialized `Block` |
 | `accounts` | `account_<hex_object_id>` | Borsh-serialized `Account` |
-| `validators` | `validator_<hex_object_id>` | Borsh-serialized `ValidatorInfo` |
+| `refiners` | `refiner_<hex_object_id>` | Borsh-serialized `RefinerInfo` |
 | `chain_state` | `chain_state` | Borsh-serialized `PersistedChainState` |
 
 ---
@@ -670,8 +671,9 @@ Every block applied to the chain must pass these checks:
 9. **No duplicate transactions** (each `tx_id` must be unique within the block)
 10. **Transaction data** must not exceed `MAX_TX_DATA_SIZE_BYTES` (1 KiB)
 11. **Fee minimum**: each transaction fee must be at least `MIN_FEE` (1 Flake)
-12. **PoW proof**: for PoW blocks, the EVO-OMAP proof must satisfy the difficulty target
-13. **PoS signature**: for PoS blocks, the validator signature must be valid and the producer must match deterministic selection
+12. **Mutual exclusivity**: non-genesis blocks must contain exactly one of `pow_proof` or `refiner_signature`
+13. **PoW proof**: for mined blocks, the EVO-OMAP proof must satisfy the difficulty target
+14. **Refiner signature**: for refiner blocks, the signature must be valid and the producer must match deterministic selection
 
 ---
 
@@ -694,10 +696,9 @@ Every block applied to the chain must pass these checks:
 | `SIGNATURE_TYPE_ED25519` | 0 | ed25519 signature type |
 | `EXTENSION_TYPE_NONE` | 0 | No extension data |
 | `EXTENSION_TYPE_ROLLUP` | 1 | Rollup data (reserved) |
-| `POS_FINALITY_BLOCKS` | 3 | PoS finality depth |
 | `BLOCK_TARGET_TIME_MS` | 90,000 | 90 seconds per block |
 | `BLOCK_TARGET_TIME_SECS` | 90 | 90 seconds per block |
-| `MAX_ACTIVE_VALIDATORS` | 5,000 | Active validator set cap |
+| `MAX_ACTIVE_REFINERS` | 5,000 | Active refiner set cap |
 | `NETWORK_PROTOCOL_VERSION` | `"1.0.0"` | Protocol identifier |
 | `DEFAULT_LISTEN_PORT` | 4170 | P2P listen port |
 | `MAX_TRANSACTIONS_PER_BLOCK` | 10,000 | Max transactions per block |
@@ -738,7 +739,7 @@ consensus_floor = total_issued / bonded_stake
 ### EVO-OMAP Difficulty Target
 ```
 target = 2^(64-D) - 1    where D = difficulty (leading zero bits)
-valid if: u64(pow_hash[..8]) ≤ target
+valid if: little_endian_u64(pow_hash[..8]) ≤ target
 ```
 
 ### Suggested Fee
@@ -746,7 +747,7 @@ valid if: u64(pow_hash[..8]) ≤ target
 suggested_fee = (current_fees + 9 × previous_suggested_fee) / 10, floored at MIN_FEE
 ```
 
-### Validator Weight
+### Refiner Weight
 ```
 entry_weight = stake × (1 + ln(1 + age_years))
 ```
@@ -754,8 +755,9 @@ entry_weight = stake × (1 + ln(1 + age_years))
 ### Stake Coverage & Reward Split
 ```
 coverage_milli = (bonded_stake × 1000) / total_issued        // integer, no float
-pow_share_amount = block_reward × (1000 - coverage_milli) / 1000
-pos_share_amount = block_reward - pow_share_amount
+base_reward_amount = BASE_REWARD / effective_difficulty
+miner_share_amount = base_reward_amount × (1000 - coverage_milli) / 1000 + vein_bonus
+refiner_share_amount = base_reward_amount × coverage_milli / 1000
 ```
 
 ---
@@ -785,10 +787,10 @@ Opolys implements layered P2P defenses to protect honest nodes from adversarial 
 | **Subnet diversity** | Max 3 peers per /24 IPv4 subnet. Prevents geographic concentration of adversarial peers from a single AS/datacenter. |
 | **Memory-hard challenge** | Every new Opolys peer must pass an EVO-OMAP memory challenge before gossip is accepted. Prevents Sybil flooding with lightweight fake nodes. |
 | **Immediate permanent ban** | Fake PoW blocks and invalid ed25519 signatures trigger permanent bans — zero tolerance for cryptographically invalid data. |
-| **Graduated strike system** | Anonymous peers banned after 2 invalid blocks; known validators after 3. Escalating ban durations (1h → 24h → 7d → permanent). |
+| **Graduated strike system** | Anonymous peers banned after 2 invalid blocks; known refiners after 3. Escalating ban durations (1h → 24h → 7d → permanent). |
 | **Fake PoW pre-check** | Vein yield pre-check filters gossip blocks before expensive `apply_block()` lock acquisition, preventing cheap CPU-waste attacks. |
 | **Wrong chain_id ban** | Transactions from a different chain (replay attacks) result in 24h ban. |
-| **Rate limiting** | Per-peer gossip rate limits: 10 blocks/sec and 50 txs/sec (doubled for known validators). |
+| **Rate limiting** | Per-peer gossip rate limits: 10 blocks/sec and 50 txs/sec (doubled for known refiners). |
 | **Fee-weighted relay** | Low-fee transactions are delayed 5 seconds before P2P relay to reduce low-cost mempool spam. |
 | **Mempool DoS protection** | 100 MiB cap, 50 tx/account limit, 24h expiry, nonce-gap filtering, epoch-boundary eviction. |
 | **Persistent ban list** | Bans survive node restarts (stored in `data/banned_peers.json`). |
@@ -828,14 +830,14 @@ Opolys implements layered P2P defenses to protect honest nodes from adversarial 
 |---|---|---|
 | Core types & constants | **DONE** | Hash, ObjectId, Transaction, Block, all constants |
 | Crypto | **DONE** | Blake3, SHA3-256, ed25519, key derivation |
-| Consensus engine | **DONE** | EVO-OMAP PoW, vein yield, difficulty, FIFO unbonding, PoS selection |
+| Consensus engine | **DONE** | EVO-OMAP PoW, vein yield, difficulty, FIFO unbonding, refiner selection |
 | Storage | **DONE** | RocksDB with all column families, atomic state saves |
 | Execution | **DONE** | Transaction dispatcher (Transfer, Bond, Unbond) with fee burning |
 | Wallet | **DONE** | BIP-39, SLIP-0010, ed25519 signing, CLI (`opl`) |
 | RPC | **DONE** | JSON-RPC 2.0 with mining endpoints, chain queries, API key auth |
 | Node | **DONE** | Full node with mining loop, block application, P2P event loop |
 | Networking | **DONE** | libp2p gossip/sync/discovery wired to node |
-| Staking & PoS | **DONE** | Validator bonding, graduated slash, PoS block production, `--validate` |
+| Refiner staking | **DONE** | Refiner bonding, 100% double-sign slash, stalled-chain block production, `--refine` |
 | Security hardening | **DONE** | Eclipse protection, subnet diversity, DoS limits, memory challenge |
 | Mainnet | **READY** | Genesis ceremony and launch |
 

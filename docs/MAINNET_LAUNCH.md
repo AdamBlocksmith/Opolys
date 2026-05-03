@@ -76,7 +76,7 @@ Only launch if verification returns `RESULT: PASS` with no unexpected warnings.
 
 ## 4. Start Mainnet Nodes
 
-Validator/miner key files are 32-byte ed25519 seeds. Keep them separate from the genesis operator signing key.
+Refiner/miner key files are 32-byte ed25519 seeds. Keep them separate from the genesis operator signing key.
 
 Private node, no RPC:
 

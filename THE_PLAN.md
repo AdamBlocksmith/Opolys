@@ -215,8 +215,8 @@ Key behavior:
 
 A block must have **exactly one** of: PoW proof or refiner signature.
 
-- PoW block: has `pow_proof`, no `refiner_signature`. Producer earns `pow_share` of block reward.
-- Refiner block: has `refiner_signature`, no `pow_proof`. Producer earns `pow_share` of block reward (refiners get pos_share distributed among all active refiners).
+- Miner block: has `pow_proof`, no `refiner_signature`. Producer earns the miner share: base coverage share plus any vein bonus.
+- Refiner block: has `refiner_signature`, no `pow_proof`. Producer is the selected refiner and earns the miner-share floor for producing the stalled block; the refiner share is distributed among active refiners by weight.
 - A block with both or neither is **rejected**.
 
 ---
@@ -493,10 +493,10 @@ The coverage-based reward split applies to **base_reward only**. The vein bonus 
 
 ```
 miner_share = base_share + vein_bonus
-refiner_share = coverage_milli × base_reward × vein_multiplier / 1000
+refiner_share = coverage_milli × base_reward / 1000
 ```
 
-Where `vein_multiplier = 1.0` for refiners (no vein yield) and `vein_yield` for miners.
+Where `base_reward = BASE_REWARD / difficulty`. Miner blocks may add `vein_bonus`; refiner blocks have no vein bonus. Attestation reliability is not a reward multiplier.
 
 Gold analogy: refineries charge per ounce processed, not per ore grade. The miner keeps the ore premium.
 
