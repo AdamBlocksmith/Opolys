@@ -18,6 +18,8 @@ pub use libp2p::request_response::InboundRequestId;
 pub const GOSSIP_TX_TOPIC: &str = "opolys/tx/v1";
 /// Gossip topic for block propagation.
 pub const GOSSIP_BLOCK_TOPIC: &str = "opolys/block/v1";
+/// Gossip topic for refiner block attestations.
+pub const GOSSIP_ATTESTATION_TOPIC: &str = "opolys/attestation/v1";
 
 /// The sync protocol name for request-response.
 pub const SYNC_PROTOCOL_NAME: &str = "/opolys/sync/1";
@@ -71,6 +73,14 @@ pub enum OpolysNetworkEvent {
         /// Borsh-serialized block bytes.
         data: Vec<u8>,
         /// The peer that sent this block.
+        source: libp2p::PeerId,
+    },
+
+    /// A refiner attestation was received via gossipsub.
+    GossipAttestation {
+        /// Borsh-serialized BlockAttestation bytes.
+        data: Vec<u8>,
+        /// The peer that sent this attestation.
         source: libp2p::PeerId,
     },
 

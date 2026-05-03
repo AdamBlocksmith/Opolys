@@ -14,7 +14,7 @@
 //! generation and variable-length operations, providing deterministic
 //! arbitrary-length output from a single seed.
 
-use opolys_core::{FlakeAmount, Hash, ObjectId, TransactionAction};
+use opolys_core::{BlockHeight, FlakeAmount, Hash, ObjectId, TransactionAction};
 
 /// Blake3 domain for transaction IDs.
 pub const DOMAIN_TX_ID: &[u8] = b"OPL_TX_ID_V1";
@@ -30,6 +30,8 @@ pub const DOMAIN_TX_ROOT: &[u8] = b"OPL_TX_ROOT_V1";
 pub const DOMAIN_TX_SIGNATURE: &[u8] = b"OPL_TX_V1";
 /// Ed25519 signing domain for refiner block signatures.
 pub const DOMAIN_REFINER_BLOCK_SIGNATURE: &[u8] = b"OPL_REF_BLOCK_V1";
+/// Ed25519 signing domain for refiner block attestations.
+pub const DOMAIN_BLOCK_ATTESTATION_SIGNATURE: &[u8] = b"OPL_BLOCK_ATTEST_V1";
 
 /// A streaming Blake3-256 hasher that incrementally absorbs input data.
 ///
@@ -143,6 +145,14 @@ pub fn refiner_block_signing_payload(block_hash: &Hash) -> Vec<u8> {
     payload
 }
 
+/// Build the exact bytes signed by refiners when attesting an observed block.
+pub fn block_attestation_signing_payload(height: BlockHeight, block_hash: &Hash) -> Vec<u8> {
+    let mut payload = DOMAIN_BLOCK_ATTESTATION_SIGNATURE.to_vec();
+    payload.extend_from_slice(&height.to_be_bytes());
+    payload.extend_from_slice(block_hash.as_bytes());
+    payload
+}
+
 /// Compute SHA3-256 of arbitrary data.
 ///
 /// Used for EVO-OMAP finalization (Blake3 inner, SHA3-256 outer) and
@@ -208,6 +218,16 @@ mod tests {
         let h1 = hash(b"data1");
         let h2 = hash(b"data2");
         assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn block_attestation_payload_is_domain_separated() {
+        let block_hash = Hash::from_bytes([9u8; 32]);
+        let payload = block_attestation_signing_payload(7, &block_hash);
+
+        assert!(payload.starts_with(DOMAIN_BLOCK_ATTESTATION_SIGNATURE));
+        assert_ne!(payload, refiner_block_signing_payload(&block_hash));
+        assert_ne!(payload, block_attestation_signing_payload(8, &block_hash));
     }
 
     #[test]

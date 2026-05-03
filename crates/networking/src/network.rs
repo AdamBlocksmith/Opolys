@@ -15,8 +15,8 @@
 //! receives events via `NetworkEvent`.
 
 use crate::behaviour::{
-    GOSSIP_BLOCK_TOPIC, GOSSIP_TX_TOPIC, OpolysBehaviour, OpolysBehaviourEvent,
-    opolys_agent_string, sync_protocol,
+    GOSSIP_ATTESTATION_TOPIC, GOSSIP_BLOCK_TOPIC, GOSSIP_TX_TOPIC, OpolysBehaviour,
+    OpolysBehaviourEvent, opolys_agent_string, sync_protocol,
 };
 use crate::challenge::{ChallengeRequest, ChallengeResponse, challenge_protocol};
 use crate::discovery::DiscoveryConfig;
@@ -46,6 +46,9 @@ pub enum NetworkCommand {
 
     /// Broadcast a block via gossipsub.
     BroadcastBlock { data: Vec<u8> },
+
+    /// Broadcast a refiner block attestation via gossipsub.
+    BroadcastAttestation { data: Vec<u8> },
 
     /// Request blocks from a specific peer for chain sync.
     RequestBlocks {
@@ -347,6 +350,14 @@ impl OpolysNetwork {
             .map_err(|_| NetworkError::ChannelClosed)
     }
 
+    /// Broadcast a refiner block attestation via gossipsub.
+    pub async fn broadcast_attestation(&self, data: Vec<u8>) -> Result<(), NetworkError> {
+        self.command_tx
+            .send(NetworkCommand::BroadcastAttestation { data })
+            .await
+            .map_err(|_| NetworkError::ChannelClosed)
+    }
+
     /// Request blocks from a peer for chain synchronization.
     /// The response will be delivered as a SyncResponseReceived event.
     pub async fn request_blocks(
@@ -451,12 +462,21 @@ impl SwarmTask {
         // Subscribe to gossip topics
         let tx_topic = libp2p::gossipsub::IdentTopic::new(GOSSIP_TX_TOPIC);
         let block_topic = libp2p::gossipsub::IdentTopic::new(GOSSIP_BLOCK_TOPIC);
+        let attestation_topic = libp2p::gossipsub::IdentTopic::new(GOSSIP_ATTESTATION_TOPIC);
 
         if let Err(e) = self.swarm.behaviour_mut().gossipsub.subscribe(&tx_topic) {
             tracing::error!("Failed to subscribe to tx topic: {}", e);
         }
         if let Err(e) = self.swarm.behaviour_mut().gossipsub.subscribe(&block_topic) {
             tracing::error!("Failed to subscribe to block topic: {}", e);
+        }
+        if let Err(e) = self
+            .swarm
+            .behaviour_mut()
+            .gossipsub
+            .subscribe(&attestation_topic)
+        {
+            tracing::error!("Failed to subscribe to attestation topic: {}", e);
         }
 
         // Start listening on QUIC (primary transport for P2P)
@@ -518,6 +538,12 @@ impl SwarmTask {
                 let topic = libp2p::gossipsub::IdentTopic::new(GOSSIP_BLOCK_TOPIC);
                 if let Err(e) = self.swarm.behaviour_mut().gossipsub.publish(topic, data) {
                     tracing::warn!("Failed to broadcast block: {}", e);
+                }
+            }
+            NetworkCommand::BroadcastAttestation { data } => {
+                let topic = libp2p::gossipsub::IdentTopic::new(GOSSIP_ATTESTATION_TOPIC);
+                if let Err(e) = self.swarm.behaviour_mut().gossipsub.publish(topic, data) {
+                    tracing::warn!("Failed to broadcast attestation: {}", e);
                 }
             }
             NetworkCommand::RequestBlocks { peer_id, request } => {
@@ -674,6 +700,13 @@ impl SwarmTask {
                     } else if topic == GOSSIP_BLOCK_TOPIC {
                         let _ = self.event_tx.try_send(
                             crate::behaviour::OpolysNetworkEvent::GossipBlock { data, source },
+                        );
+                    } else if topic == GOSSIP_ATTESTATION_TOPIC {
+                        let _ = self.event_tx.try_send(
+                            crate::behaviour::OpolysNetworkEvent::GossipAttestation {
+                                data,
+                                source,
+                            },
                         );
                     } else {
                         tracing::warn!(topic = %topic, "Unknown gossip topic");

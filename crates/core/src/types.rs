@@ -316,6 +316,24 @@ pub struct DoubleSignEvidence {
     pub signature_b: Vec<u8>,
 }
 
+/// A refiner's signed vote that a block was observed as valid at a height.
+///
+/// Attestations are gossiped off-chain first, then block producers can include
+/// them in later blocks once Pass 2 collection/verification is enabled.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize, Serialize, Deserialize)]
+pub struct BlockAttestation {
+    /// The refiner who attested the block.
+    pub refiner: ObjectId,
+    /// Refiner's ed25519 public key (32 bytes). Must Blake3-hash to `refiner`.
+    pub refiner_pubkey: Vec<u8>,
+    /// Height being attested.
+    pub height: BlockHeight,
+    /// Hash of the block being attested.
+    pub block_hash: Hash,
+    /// ed25519 signature over the domain-separated attestation payload.
+    pub signature: Vec<u8>,
+}
+
 /// Cryptographic proof from the genesis ceremony anchoring $OPL to gold.
 ///
 /// Present on the genesis block (height 0) only. `None` on all subsequent blocks.
@@ -437,6 +455,21 @@ mod tests {
         let bond = TransactionAction::RefinerBond { amount: 10_000_000 };
         let unbond = TransactionAction::RefinerUnbond { amount: 5_000_000 };
         assert_ne!(bond, unbond);
+    }
+
+    #[test]
+    fn block_attestation_borsh_roundtrip() {
+        let attestation = BlockAttestation {
+            refiner: ObjectId(Hash::from_bytes([1u8; 32])),
+            refiner_pubkey: vec![2u8; 32],
+            height: 42,
+            block_hash: Hash::from_bytes([3u8; 32]),
+            signature: vec![4u8; 64],
+        };
+
+        let bytes = borsh::to_vec(&attestation).unwrap();
+        let decoded = BlockAttestation::try_from_slice(&bytes).unwrap();
+        assert_eq!(decoded, attestation);
     }
 
     #[test]

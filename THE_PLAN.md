@@ -1334,7 +1334,7 @@ All comments updated from "1,024 blocks/epoch" to "960 blocks/epoch". Test param
 
 ### Phase G: Pass 2 (After Pass 1 is tested and working)
 
-47. Attestation struct and `opolys/attestation/v1` P2P topic
+47. DONE Attestation struct and `opolys/attestation/v1` P2P topic
 48. Attestation collection in block builder
 49. Attestation verification in `apply_block`
 50. Reliability score: `consecutive_correct_attestations` in `RefinerInfo`

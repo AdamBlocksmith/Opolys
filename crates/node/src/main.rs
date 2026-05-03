@@ -1115,6 +1115,13 @@ async fn handle_network_event(
                 }
             }
         }
+        opolys_networking::OpolysNetworkEvent::GossipAttestation { data, source } => {
+            tracing::debug!(
+                peer = %source,
+                size = data.len(),
+                "Received block attestation via gossip; collection not enabled yet"
+            );
+        }
         opolys_networking::OpolysNetworkEvent::PeerConnected { peer_id, addr } => {
             tracing::info!(peer = %peer_id, "Peer connected");
 
