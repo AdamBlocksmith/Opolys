@@ -125,12 +125,9 @@ pub struct Args {
 
     /// Path to the genesis ceremony attestation JSON file.
     ///
-    /// Required for mainnet operation. The JSON must contain the ceremony
-    /// attestation fields exported by the `genesis-ceremony` tool:
-    /// `base_reward_flakes`, `ceremony_timestamp`, `gold_spot_price_usd_cents`,
-    /// `annual_production_tonnes`, `total_above_ground_tonnes`,
-    /// `lbma_response_hash`, `usgs_response_hash`, `wgc_response_hash`,
-    /// and `derivation_formula`. Required before starting the node.
+    /// Required for mainnet operation. Generate it with `genesis-ceremony`.
+    /// The node verifies the ceremony master hash, operator signature, source
+    /// counts, manual evidence, and base-reward derivation before startup.
     #[arg(long)]
     pub genesis_params: Option<String>,
 
@@ -415,6 +412,13 @@ fn load_ban_list_from_disk(data_dir: &str) -> HashMap<String, BanRecord> {
 struct CeremonySourceResult {
     name: String,
     raw_response_hash: String,
+    extracted_value: Option<f64>,
+    #[serde(default)]
+    value_origin: String,
+    #[serde(default)]
+    evidence_note: Option<String>,
+    #[serde(default)]
+    evidence_timestamp_ms: Option<u64>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -432,6 +436,9 @@ struct CeremonyAttestationFile {
     master_hash: String,
 }
 
+const CEREMONY_TROY_OZ_PER_TONNE: f64 = 32_150.7;
+const MIN_CEREMONY_PRODUCTION_SOURCES: usize = 5;
+
 fn decode_hex_array<const N: usize>(field: &str, value: &str) -> Result<[u8; N], String> {
     let bytes = hex::decode(value).map_err(|e| format!("{} must be hex: {}", field, e))?;
     bytes
@@ -445,6 +452,80 @@ fn source_hash(sources: &[CeremonySourceResult], needle: &str) -> [u8; 32] {
         .find(|source| source.name.to_ascii_lowercase().contains(needle))
         .and_then(|source| decode_hex_array::<32>(&source.name, &source.raw_response_hash).ok())
         .unwrap_or([0u8; 32])
+}
+
+fn validate_ceremony_sources(attestation: &CeremonyAttestationFile) -> Result<(), String> {
+    let production_values = attestation
+        .production_sources
+        .iter()
+        .filter_map(|source| source.extracted_value)
+        .collect::<Vec<_>>();
+    if production_values.len() < MIN_CEREMONY_PRODUCTION_SOURCES {
+        return Err(format!(
+            "Genesis ceremony has only {} production sources; need at least {}",
+            production_values.len(),
+            MIN_CEREMONY_PRODUCTION_SOURCES
+        ));
+    }
+
+    if !attestation
+        .price_sources
+        .iter()
+        .any(|source| source.extracted_value.is_some())
+    {
+        return Err("Genesis ceremony must include at least one price source".to_string());
+    }
+
+    for source in attestation
+        .production_sources
+        .iter()
+        .chain(attestation.price_sources.iter())
+    {
+        if source.value_origin.starts_with("manual") && source.extracted_value.is_some() {
+            let has_evidence = source
+                .evidence_note
+                .as_deref()
+                .is_some_and(|note| note.trim().len() >= 12);
+            if !has_evidence || source.evidence_timestamp_ms.is_none() {
+                return Err(format!(
+                    "Genesis ceremony manual source '{}' is missing evidence",
+                    source.name
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_ceremony_reward_derivation(
+    attestation: &CeremonyAttestationFile,
+) -> Result<(), String> {
+    if !attestation.median_production_tonnes.is_finite()
+        || attestation.median_production_tonnes <= 0.0
+    {
+        return Err("Genesis ceremony median_production_tonnes must be positive".to_string());
+    }
+    if attestation.blocks_per_year == 0 {
+        return Err("Genesis ceremony blocks_per_year must be non-zero".to_string());
+    }
+    if attestation.base_reward_flakes == 0 {
+        return Err("Genesis ceremony base_reward_flakes must be non-zero".to_string());
+    }
+
+    let annual_oz = attestation.median_production_tonnes * CEREMONY_TROY_OZ_PER_TONNE;
+    let expected_base_reward_opl = (annual_oz / attestation.blocks_per_year as f64).floor() as u64;
+    let expected_base_reward_flakes = expected_base_reward_opl
+        .checked_mul(FLAKES_PER_OPL)
+        .ok_or_else(|| "Genesis ceremony base reward derivation overflowed".to_string())?;
+    if attestation.base_reward_flakes != expected_base_reward_flakes {
+        return Err(format!(
+            "Genesis ceremony base_reward_flakes mismatch: attestation {}, computed {}",
+            attestation.base_reward_flakes, expected_base_reward_flakes
+        ));
+    }
+
+    Ok(())
 }
 
 fn compute_ceremony_master_hash(attestation_json: &str) -> Result<[u8; 32], String> {
@@ -463,12 +544,8 @@ fn load_genesis_config_from_attestation(path: &str) -> Result<GenesisConfig, Str
     let attestation: CeremonyAttestationFile = serde_json::from_str(&contents)
         .map_err(|e| format!("Failed to parse genesis ceremony file {}: {}", path, e))?;
 
-    if attestation.base_reward_flakes == 0 {
-        return Err("Genesis ceremony base_reward_flakes must be non-zero".to_string());
-    }
-    if attestation.blocks_per_year == 0 {
-        return Err("Genesis ceremony blocks_per_year must be non-zero".to_string());
-    }
+    validate_ceremony_sources(&attestation)?;
+    validate_ceremony_reward_derivation(&attestation)?;
 
     let computed_master_hash = compute_ceremony_master_hash(&contents)?;
     let stated_master_hash = decode_hex_array::<32>("master_hash", &attestation.master_hash)?;
@@ -1883,6 +1960,9 @@ mod tests {
         let signing_key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
         let operator_public_key = hex::encode(signing_key.verifying_key().as_bytes());
         let hash_hex = hex::encode([9u8; 32]);
+        let base_reward_opl = base_reward_flakes / FLAKES_PER_OPL;
+        let median_production_tonnes =
+            ((base_reward_opl as f64 + 0.5) * 350_640.0) / CEREMONY_TROY_OZ_PER_TONNE;
         let mut attestation = serde_json::json!({
             "ceremony_start_ms": 1_000_000u64,
             "ceremony_end_ms": 1_001_000u64,
@@ -1897,16 +1977,45 @@ mod tests {
                     "url": "https://example.invalid/usgs",
                     "fetched_at_ms": 1_000_100u64,
                     "raw_response_hash": hash_hex,
-                    "extracted_value": 3672.0,
-                    "status": "ok"
+                    "extracted_value": median_production_tonnes,
+                    "status": "ok",
+                    "value_origin": "auto-parse"
                 },
                 {
                     "name": "World Gold Council",
                     "url": "https://example.invalid/wgc",
                     "fetched_at_ms": 1_000_200u64,
                     "raw_response_hash": hex::encode([8u8; 32]),
-                    "extracted_value": 3672.0,
-                    "status": "ok"
+                    "extracted_value": median_production_tonnes,
+                    "status": "ok",
+                    "value_origin": "auto-parse"
+                },
+                {
+                    "name": "Kitco Production",
+                    "url": "https://example.invalid/kitco",
+                    "fetched_at_ms": 1_000_300u64,
+                    "raw_response_hash": hex::encode([7u8; 32]),
+                    "extracted_value": median_production_tonnes,
+                    "status": "ok",
+                    "value_origin": "auto-parse"
+                },
+                {
+                    "name": "LBMA Annual Survey",
+                    "url": "https://example.invalid/lbma-survey",
+                    "fetched_at_ms": 1_000_400u64,
+                    "raw_response_hash": hex::encode([5u8; 32]),
+                    "extracted_value": median_production_tonnes,
+                    "status": "ok",
+                    "value_origin": "auto-parse"
+                },
+                {
+                    "name": "Metals Focus",
+                    "url": "https://example.invalid/metals-focus",
+                    "fetched_at_ms": 1_000_500u64,
+                    "raw_response_hash": hex::encode([4u8; 32]),
+                    "extracted_value": median_production_tonnes,
+                    "status": "ok",
+                    "value_origin": "auto-parse"
                 }
             ],
             "price_sources": [
@@ -1916,17 +2025,18 @@ mod tests {
                     "fetched_at_ms": 1_000_300u64,
                     "raw_response_hash": hex::encode([6u8; 32]),
                     "extracted_value": 2386.0,
-                    "status": "ok"
+                    "status": "ok",
+                    "value_origin": "auto-parse"
                 }
             ],
             "price_fetch_spread_ms": 0u64,
-            "median_production_tonnes": 3672.0,
+            "median_production_tonnes": median_production_tonnes,
             "median_price_usd_cents": 238600u64,
             "blocks_per_year": 350640u64,
-            "base_reward_opl": base_reward_flakes / FLAKES_PER_OPL,
+            "base_reward_opl": base_reward_opl,
             "base_reward_flakes": base_reward_flakes,
             "derivation_steps": [
-                "median_production = 3672.0",
+                format!("median_production = {:.4}", median_production_tonnes),
                 "blocks_per_year = 350640"
             ],
             "master_hash": ""
@@ -1941,6 +2051,18 @@ mod tests {
         let path = dir.path().join("genesis_attestation.json");
         fs::write(&path, serde_json::to_string_pretty(&attestation).unwrap()).unwrap();
         path.to_string_lossy().to_string()
+    }
+
+    fn resign_test_genesis_attestation(attestation: &mut serde_json::Value) {
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        attestation["master_hash"] = serde_json::Value::String(String::new());
+        attestation["operator_signature"] = serde_json::Value::String(String::new());
+        let unsigned = serde_json::to_string_pretty(attestation).unwrap();
+        let master_hash = compute_ceremony_master_hash(&unsigned).unwrap();
+        let signature = signing_key.sign(&master_hash);
+        attestation["master_hash"] = serde_json::Value::String(hex::encode(master_hash));
+        attestation["operator_signature"] =
+            serde_json::Value::String(hex::encode(signature.to_bytes()));
     }
 
     #[test]
@@ -1964,8 +2086,41 @@ mod tests {
         let config = load_genesis_config_from_attestation(&path).unwrap();
 
         assert_eq!(config.base_reward, 333 * FLAKES_PER_OPL);
-        assert_eq!(config.attestation.annual_production_tonnes, 3672);
+        assert_eq!(config.attestation.annual_production_tonnes, 3637);
         assert!(config.ceremony_data.is_some());
+    }
+
+    #[test]
+    fn genesis_attestation_rejects_bad_reward_derivation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_test_genesis_attestation(&dir, 333 * FLAKES_PER_OPL);
+        let mut attestation: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        attestation["base_reward_flakes"] = serde_json::Value::from(334 * FLAKES_PER_OPL);
+        attestation["base_reward_opl"] = serde_json::Value::from(334);
+        resign_test_genesis_attestation(&mut attestation);
+        fs::write(&path, serde_json::to_string_pretty(&attestation).unwrap()).unwrap();
+
+        let err = load_genesis_config_from_attestation(&path).unwrap_err();
+        assert!(err.contains("base_reward_flakes mismatch"), "{}", err);
+    }
+
+    #[test]
+    fn genesis_attestation_rejects_manual_source_without_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_test_genesis_attestation(&dir, 333 * FLAKES_PER_OPL);
+        let mut attestation: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        attestation["production_sources"][0]["status"] = serde_json::Value::String("manual".into());
+        attestation["production_sources"][0]["value_origin"] =
+            serde_json::Value::String("manual-after-auto-fail".into());
+        attestation["production_sources"][0]["evidence_note"] = serde_json::Value::Null;
+        attestation["production_sources"][0]["evidence_timestamp_ms"] = serde_json::Value::Null;
+        resign_test_genesis_attestation(&mut attestation);
+        fs::write(&path, serde_json::to_string_pretty(&attestation).unwrap()).unwrap();
+
+        let err = load_genesis_config_from_attestation(&path).unwrap_err();
+        assert!(err.contains("missing evidence"), "{}", err);
     }
 
     #[test]

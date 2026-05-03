@@ -1,10 +1,10 @@
 //! # Genesis block construction and validation.
 //!
 //! The Opolys genesis block anchors the chain to real-world gold data through
-//! a **ceremony attestation** — an immutable record of gold spot prices,
-//! annual production, and above-ground reserves sourced from the LBMA, USGS,
-//! and WGC. No governance vote can change these values; they are baked into
-//! the genesis state hash and validated by every full node on startup.
+//! a **ceremony attestation**: an immutable record of live gold spot price,
+//! annual mine production, source-response hashes, and the operator-signed
+//! ceremony master hash. No governance vote can change these values; they are
+//! baked into the genesis state hash and validated by every full node on startup.
 //!
 //! The genesis block has zero transactions, zero previous hash, and no PoW
 //! proof. Its `state_root` is a deterministic Blake3 hash over all protocol
@@ -24,9 +24,9 @@ use opolys_crypto::{Blake3Hasher, DOMAIN_STATE_ROOT};
 /// Cryptographic attestation from the Opolys genesis ceremony.
 ///
 /// Records the real-world data points that anchor the $OPL supply model to
-/// physical gold: LBMA spot price, USGS annual production, and WGC total
-/// above-ground reserves. Each source's response hash ensures data integrity
-/// without relying on ongoing oracle feeds.
+/// physical gold: live gold spot price, annual mine production, and the
+/// response hashes selected for audit visibility. Each source hash is part of
+/// genesis consensus; there is no ongoing oracle feed after launch.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct GenesisAttestation {
     /// Unix timestamp of the genesis ceremony.
@@ -35,13 +35,13 @@ pub struct GenesisAttestation {
     pub gold_spot_price_usd_cents: u64,
     /// Annual gold production in tonnes (from USGS).
     pub annual_production_tonnes: u64,
-    /// Total above-ground gold stock in tonnes (from WGC).
+    /// Legacy/reserved above-ground stock slot. Current ceremony files set this to 0.
     pub total_above_ground_tonnes: u64,
-    /// Blake3 hash of the LBMA API response for audit verification.
+    /// Blake3 hash of the selected LBMA/live-price response for audit verification.
     pub lbma_response_hash: [u8; 32],
-    /// Blake3 hash of the USGS API response for audit verification.
+    /// Blake3 hash of the selected USGS production response for audit verification.
     pub usgs_response_hash: [u8; 32],
-    /// Blake3 hash of the WGC API response for audit verification.
+    /// Blake3 hash of the selected WGC production response for audit verification.
     pub wgc_response_hash: [u8; 32],
     /// Human-readable formula describing how `BASE_REWARD` was derived from
     /// the attestation data (e.g., `floor(annual_production_tonnes * 32150.7 / 262980)`).
@@ -52,8 +52,7 @@ pub struct GenesisAttestation {
 ///
 /// Determines the initial difficulty and protocol version, plus the ceremony
 /// attestation that anchors the chain to real-world gold data. Defaults use
-/// `MIN_DIFFICULTY` and USGS/WGC 2024 figures for annual production and
-/// total above-ground reserves.
+/// `GENESIS_DIFFICULTY` and 2024 production defaults until a ceremony file is supplied.
 ///
 /// Genesis accounts can be specified to pre-fund wallets (e.g. foundation
 /// or team allocations). Each is credited in genesis state without a transaction.

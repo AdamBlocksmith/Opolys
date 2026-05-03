@@ -766,14 +766,15 @@ refiner_share_amount = base_reward_amount × coverage_milli / 1000
 
 ## Genesis Ceremony
 
-The genesis block is created from a `GenesisAttestation` containing:
+The genesis block is created from a signed `genesis_attestation.json` containing:
 
 - **ceremony_timestamp**: UNIX timestamp of the ceremony
-- **gold_spot_price_usd_cents**: LBMA gold price at ceremony time
-- **annual_production_tonnes**: USGS annual mine production (~3,630 t)
-- **total_above_ground_tonnes**: WGC above-ground stock (~219,891 t)
-- **Response hashes**: Blake3-256 hashes of the raw LBMA, USGS, and WGC responses
-- **Derivation formula**: The mathematical formula linking gold data to BASE_REWARD
+- **median_price_usd_cents**: live gold price captured at ceremony time
+- **median_production_tonnes**: trimmed median of annual mine production sources
+- **Response hashes**: Blake3-256 hashes of raw source responses for auditability
+- **Manual evidence**: required notes for any manual fallback value
+- **master_hash + operator_signature**: ed25519 attestation over the ceremony record
+- **base_reward_flakes**: the computed BASE_REWARD used by the node
 
 The genesis block has height 0, zero previous hash, no transactions, no PoW proof, and a state root computed from ceremony parameters and protocol constants.
 

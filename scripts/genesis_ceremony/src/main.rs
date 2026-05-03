@@ -1199,7 +1199,7 @@ fn write_params_rs(dir: &Path, a: &GenesisAttestation) -> std::io::Result<()> {
          // Prod year: {year} (most recent USGS/WGC annual figure)\n\
          // Master hash: {mh}\n\
          //\n\
-         // Paste these into crates/core/src/constants.rs and regenerate if needed.\n\n\
+         // Human-readable reference only. Nodes consume genesis_attestation.json at startup.\n\n\
          pub const BASE_REWARD: u64 = {fr}; // {opl} OPL derived from ceremony\n\
          pub const CEREMONY_TIMESTAMP: u64 = {ts};\n\
          pub const CEREMONY_MASTER_HASH: &str = \"{mh}\";\n\
@@ -1344,6 +1344,13 @@ fn write_verification_txt(dir: &Path, a: &GenesisAttestation) -> std::io::Result
     lines.push("               print(json.dumps(d, separators=(',',':')))\"".into());
     lines.push("  4. Compute Blake3-256 of that output".into());
     lines.push(format!("  5. Must equal: {}", a.master_hash));
+    lines.push(String::new());
+
+    lines.push("FAST VERIFIER COMMAND".into());
+    lines.push("-".repeat(40));
+    lines.push("  cargo run --release -p genesis-ceremony -- verify \\".into());
+    lines.push("    --attestation ./genesis_attestation.json".into());
+    lines.push("  Expected result: RESULT: PASS".into());
     lines.push(String::new());
 
     lines.push("STEP 5 — VERIFY OPERATOR SIGNATURE".into());
@@ -1553,7 +1560,10 @@ async fn run_ceremony(cli: Cli) {
                 sign_master_hash(&signing_key, &attestation.master_hash);
             write_outputs(&cli.output_dir, &attestation);
             println!("\nCeremony complete.");
-            println!("Verify with: genesis-ceremony --dry-run");
+            println!(
+                "Verify with: genesis-ceremony verify --attestation {}/genesis_attestation.json",
+                cli.output_dir.display()
+            );
         } else {
             println!("Ceremony aborted by operator.");
         }
