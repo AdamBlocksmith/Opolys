@@ -1236,8 +1236,8 @@ The hex-encoded sender preimage was removed from transaction ID computation befo
 
 #### L6: No SLIP-0010 reference test vectors
 **Location:** `wallet/bip39.rs:199-277`
-**Status:** OPEN
-Add official SLIP-0010 ed25519 test vectors as test cases. Verify derived keys match expected public keys.
+**Status:** **FIXED**
+Added the official SatoshiLabs SLIP-0010 ed25519 test vectors. Tests now verify master keys, hardened child private keys, chain codes, and ed25519 public keys for both published ed25519 vectors.
 
 #### ~~L7: Gossip max message (5 MiB) vs block max (10 MiB)~~ — **FIXD** (07da54b)
 **Location:** `constants.rs:210`
@@ -1323,7 +1323,7 @@ All comments updated from "1,024 blocks/epoch" to "960 blocks/epoch". Test param
 40. ✓ L1: Remove `#[derive(Debug)]` from `Bip39Mnemonic` and `KeyPair`; manual `Debug` impls that redact
 41. DONE L3: Constant-time `verify_ed25519` via `subtle`
 42. DONE L4/L5: Unify tx_id serialization before mainnet
-43. L6: Add SLIP-0010 reference test vectors
+43. DONE L6: Add SLIP-0010 reference test vectors
 44. L7: Raise gossip max message to match `MAX_BLOCK_SIZE_BYTES`
 45. DONE L8: Challenge protocol bind to PeerId
 46. L9: `Bip39Mnemonic::generate()` → return `Result`
