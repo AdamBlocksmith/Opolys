@@ -368,16 +368,16 @@ Newly bonded refiners start in `Bonding` status. They activate to `Active` once 
 - Promoted when a slot opens (via unbond or slash)
 - No `RefinerBond` transaction is ever rejected — all are queued fairly
 
-### Attestations (Pass 2 — Not Yet Implemented)
+### Attestations (Pass 2)
 
-Refiners sign block hashes using ed25519. Attestations are collected by the next block's producer and included in that block. Reliability is tracked as `consecutive_correct_attestations` per refiner:
+Refiners sign block hashes using ed25519. Attestations are collected by the next block's producer and included in that block. Reliability is tracked as `consecutive_correct_attestations` per refiner for block confidence and liveness, not as a refiner reward multiplier.
 
 ```
+confidence_weight = stake × seniority × reliability
 reliability = 1 + ln(1 + consecutive_correct / EPOCH)
-attestation_weight = stake × seniority × reliability
 ```
 
-Refiners who miss a block (were online but didn't attest) have their reliability reset to 0. Block confidence is derived on-chain from attestation weight vs total bonded stake.
+Refiner rewards remain distributed by bonded stake and seniority only. Miners keep the vein-yield luck upside. Attestations feed block confidence, and refiners who miss expected attestations can have reliability reset to 0 once miss detection is implemented.
 
 ---
 
@@ -1338,7 +1338,7 @@ All comments updated from "1,024 blocks/epoch" to "960 blocks/epoch". Test param
 48. DONE Attestation collection in block builder
 49. DONE Attestation verification in `apply_block`
 50. DONE Reliability score: `consecutive_correct_attestations` in `RefinerInfo`
-51. Attestation weight in reward distribution
+51. BY DESIGN: no attestation multiplier in refiner reward distribution
 52. Block confidence score derived on-chain
 53. `opl_getBlockConfidence` RPC endpoint
 
