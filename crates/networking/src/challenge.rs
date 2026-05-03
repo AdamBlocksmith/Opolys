@@ -1,9 +1,10 @@
 //! Memory-fingerprinting challenge/response protocol.
 //!
 //! When a new full-node peer connects, we send a ChallengeRequest containing a
-//! random (height, nonce) pair. The peer must compute the EVO-OMAP hash for that
-//! input and return it. Because EVO-OMAP requires the 256 MiB dataset to be loaded,
-//! a peer that cannot answer correctly cannot be running the real mining software.
+//! random (height, nonce) pair. Both sides bind the hash input to the
+//! challenger and responder PeerIds before computing the EVO-OMAP hash and
+//! returning it. Because EVO-OMAP requires the 256 MiB dataset to be loaded, a
+//! peer that cannot answer correctly cannot be running the real mining software.
 //!
 //! The challenge uses the same `/opolys/challenge/1` request-response protocol as
 //! the sync protocol. Both sides run the protocol — a node simultaneously challenges

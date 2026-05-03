@@ -565,7 +565,7 @@ enum TransactionAction {
 
 ```rust
 Transaction {
-    tx_id: ObjectId,           // Blake3-256(sender_hex || borsh(action) || fee || nonce || chain_id)
+    tx_id: ObjectId,           // Blake3-256(domain || borsh(sender, action, fee, nonce, chain_id))
     sender: ObjectId,          // Blake3-256(ed25519_pubkey)
     action: TransactionAction,
     fee: FlakeAmount,           // Burned, not collected
@@ -1245,9 +1245,9 @@ Add official SLIP-0010 ed25519 test vectors as test cases. Verify derived keys m
 `GOSSIP_MAX_MESSAGE_SIZE_BYTES` now equals `MAX_BLOCK_SIZE_BYTES` (10 MiB). Any valid block can be gossiped.
 
 #### L8: Challenge protocol doesn't bind to PeerId
-**Location:** `challenge.rs`, `main.rs:996-1022`
-**Status:** OPEN
-Challenge hash doesn't include PeerId, allowing precomputed answers. Fix: `blake3(format!("{}:{}", peer_id, nonce))`.
+**Location:** `consensus/pow.rs`, `node/main.rs`
+**Status:** **FIXED**
+Challenge hashes now include both challenger and responder PeerId bytes in the EVO-OMAP input, so a response computed for one connection cannot be replayed as another peer's response.
 
 #### L9: Bip39Mnemonic::generate() panics on entropy failure
 **Location:** `wallet/bip39.rs:47-48`
@@ -1325,7 +1325,7 @@ All comments updated from "1,024 blocks/epoch" to "960 blocks/epoch". Test param
 42. DONE L4/L5: Unify tx_id serialization before mainnet
 43. L6: Add SLIP-0010 reference test vectors
 44. L7: Raise gossip max message to match `MAX_BLOCK_SIZE_BYTES`
-45. L8: Challenge protocol bind to PeerId
+45. DONE L8: Challenge protocol bind to PeerId
 46. L9: `Bip39Mnemonic::generate()` → return `Result`
 47. L10: Update stale comments saying 1,024 blocks/epoch → 960
 

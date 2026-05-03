@@ -252,13 +252,25 @@ pub fn compute_pow_hash_value(header: &BlockHeader) -> Option<u64> {
 /// Compute a deterministic EVO-OMAP hash for the memory-fingerprinting challenge protocol.
 ///
 /// Uses light verification (on-demand node reconstruction) over synthetic input bytes
-/// derived from (height, nonce). Answering correctly requires the 256 MiB dataset.
-pub fn compute_challenge_hash(height: u64, nonce: u64) -> u64 {
+/// derived from (height, nonce, challenger peer id, responder peer id).
+/// Answering correctly requires the 256 MiB dataset, and binding both peer IDs
+/// prevents a response computed for one connection from being replayed as if it
+/// came from another peer.
+pub fn compute_challenge_hash(
+    height: u64,
+    nonce: u64,
+    challenger_peer_id: &[u8],
+    responder_peer_id: &[u8],
+) -> u64 {
     let epoch_seed = evo_omap::compute_epoch_seed_with_epoch_length(height, EPOCH);
     let mut dataset = evo_omap::LightDataset::new(&epoch_seed);
-    let mut input = [0u8; 16];
-    input[..8].copy_from_slice(&height.to_be_bytes());
-    input[8..].copy_from_slice(&nonce.to_be_bytes());
+    let mut input = Vec::with_capacity(32 + challenger_peer_id.len() + responder_peer_id.len());
+    input.extend_from_slice(&height.to_be_bytes());
+    input.extend_from_slice(&nonce.to_be_bytes());
+    input.extend_from_slice(&(challenger_peer_id.len() as u64).to_be_bytes());
+    input.extend_from_slice(challenger_peer_id);
+    input.extend_from_slice(&(responder_peer_id.len() as u64).to_be_bytes());
+    input.extend_from_slice(responder_peer_id);
     let hash = evo_omap::evo_omap_hash_light(&mut dataset, &input, height, nonce);
     u64::from_be_bytes(hash.0[..8].try_into().unwrap_or([0u8; 8]))
 }
@@ -391,6 +403,33 @@ mod tests {
         let b1 = serialize_header_for_pow(&h1);
         let b2 = serialize_header_for_pow(&h2);
         assert_ne!(b1, b2);
+    }
+
+    #[test]
+    fn challenge_hash_is_bound_to_peer_ids() {
+        let height = 7;
+        let nonce = 42;
+        let challenger = b"challenger-peer";
+        let responder = b"responder-peer";
+
+        let expected = compute_challenge_hash(height, nonce, challenger, responder);
+
+        assert_eq!(
+            expected,
+            compute_challenge_hash(height, nonce, challenger, responder)
+        );
+        assert_ne!(
+            expected,
+            compute_challenge_hash(height, nonce, b"other-challenger", responder)
+        );
+        assert_ne!(
+            expected,
+            compute_challenge_hash(height, nonce, challenger, b"other-responder")
+        );
+        assert_ne!(
+            expected,
+            compute_challenge_hash(height, nonce, responder, challenger)
+        );
     }
 
     #[test]

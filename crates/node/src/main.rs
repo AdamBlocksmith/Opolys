@@ -1136,7 +1136,12 @@ async fn handle_network_event(
             // FIX 7: send memory-fingerprinting challenge before accepting gossip
             let height = node.chain.read().await.current_height;
             let nonce: u64 = rand::random();
-            let expected_hash = opolys_consensus::compute_challenge_hash(height, nonce);
+            let expected_hash = opolys_consensus::compute_challenge_hash(
+                height,
+                nonce,
+                &net.local_peer_id().to_bytes(),
+                &peer_id.to_bytes(),
+            );
             pending_challenges.insert(peer_id, (expected_hash, std::time::Instant::now()));
             if let Err(e) = net.send_challenge(peer_id, height, nonce).await {
                 tracing::debug!(peer = %peer_id, error = %e, "Failed to send memory challenge");
@@ -1260,7 +1265,12 @@ async fn handle_network_event(
             nonce,
         } => {
             // FIX 7: compute EVO-OMAP hash and reply to prove we have the dataset
-            let hash_val = opolys_consensus::compute_challenge_hash(height, nonce);
+            let hash_val = opolys_consensus::compute_challenge_hash(
+                height,
+                nonce,
+                &peer_id.to_bytes(),
+                &net.local_peer_id().to_bytes(),
+            );
             if let Err(e) = net.respond_challenge(request_id, hash_val).await {
                 tracing::debug!(peer = %peer_id, error = %e, "Failed to respond to memory challenge");
             } else {
