@@ -1131,6 +1131,51 @@ impl OpolysNode {
             )
     }
 
+    fn verify_block_attestation_against_refiners(
+        attestation: &BlockAttestation,
+        canonical_hash: &Hash,
+        refiners: &RefinerSet,
+    ) -> Result<(), String> {
+        if attestation.refiner_pubkey.len() != 32 {
+            return Err("Attestation public key must be 32 bytes".to_string());
+        }
+        if attestation.signature.len() != 64 {
+            return Err("Attestation signature must be 64 bytes".to_string());
+        }
+        if &attestation.block_hash != canonical_hash {
+            return Err("Attestation block hash is not canonical".to_string());
+        }
+
+        let pk_arr: [u8; 32] = attestation
+            .refiner_pubkey
+            .as_slice()
+            .try_into()
+            .map_err(|_| "Attestation public key must be 32 bytes".to_string())?;
+        let expected_refiner = opolys_crypto::ed25519_public_key_to_object_id(&pk_arr);
+        if expected_refiner != attestation.refiner {
+            return Err("Attestation public key does not match refiner ObjectId".to_string());
+        }
+
+        let refiner = refiners
+            .get_refiner(&attestation.refiner)
+            .ok_or_else(|| "Attestation refiner is not bonded".to_string())?;
+        if refiner.status != RefinerStatus::Active {
+            return Err("Attestation refiner is not active".to_string());
+        }
+
+        let payload =
+            block_attestation_signing_payload(attestation.height, &attestation.block_hash);
+        if !opolys_crypto::verify_ed25519(
+            &attestation.refiner_pubkey,
+            &payload,
+            &attestation.signature,
+        ) {
+            return Err("Attestation signature verification failed".to_string());
+        }
+
+        Ok(())
+    }
+
     /// Apply a mined or received block to the chain state.
     ///
     /// This is the core state transition function:
@@ -1193,6 +1238,41 @@ impl OpolysNode {
                 chain.state_root.to_hex(),
                 block.header.state_root.to_hex()
             ));
+        }
+
+        let mut processed_attestation_keys: std::collections::HashSet<(u64, String)> =
+            std::collections::HashSet::new();
+        for attestation in &block.attestations {
+            if attestation.height >= block.header.height {
+                return Err(format!(
+                    "Attestation height {} must be below block height {}",
+                    attestation.height, block.header.height
+                ));
+            }
+            let dedup_key = (attestation.height, attestation.refiner.to_hex());
+            if !processed_attestation_keys.insert(dedup_key) {
+                return Err(format!(
+                    "Duplicate attestation from {} at height {}",
+                    attestation.refiner.to_hex(),
+                    attestation.height
+                ));
+            }
+            let canonical_hash = if attestation.height == chain.current_height {
+                chain.latest_block_hash.clone()
+            } else if let Some(store) = &self.store {
+                let attested_block = store
+                    .load_block(attestation.height)
+                    .map_err(|e| format!("Failed to load attested block: {}", e))?
+                    .ok_or_else(|| "Attested block is not known locally".to_string())?;
+                compute_block_hash(&attested_block.header)
+            } else {
+                return Err("Cannot verify historical attestation without storage".to_string());
+            };
+            Self::verify_block_attestation_against_refiners(
+                attestation,
+                &canonical_hash,
+                &refiners,
+            )?;
         }
 
         // Verify Refiner signature if present
@@ -1954,6 +2034,36 @@ mod tests {
             node.create_block_attestation(0, &block_hash)
                 .await
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_block_rejects_invalid_included_attestation() {
+        let (config, _dir) = test_config();
+        let node = OpolysNode::new(config);
+        register_test_miner_account(&node).await;
+        activate_test_refiner(&node).await;
+        node.chain.write().await.current_difficulty = MIN_DIFFICULTY;
+
+        let genesis_hash = node.chain.read().await.latest_block_hash.clone();
+        let mut attestation = node
+            .create_block_attestation(0, &genesis_hash)
+            .await
+            .expect("active refiner should sign attestations");
+        attestation.signature[0] ^= 0x01;
+
+        let mut block = node
+            .mine_block(1_000_000)
+            .await
+            .expect("Should mine block 1");
+        block.attestations.push(attestation);
+
+        let result = node.apply_block(&block).await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .contains("Attestation signature verification failed")
         );
     }
 
