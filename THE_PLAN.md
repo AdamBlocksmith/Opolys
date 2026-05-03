@@ -1117,6 +1117,16 @@ Every bug below includes: **What it is**, **Why it matters**, and **How to fix i
 
 ---
 
+#### H11: Non-Opolys identify strings bypassed memory challenge
+**Location:** `main.rs:1290-1300`
+**Status:** **FIXED**
+
+**What it is:** A peer whose identify agent string did not contain `/opolys/` was marked verified without passing the EVO-OMAP memory challenge. A malicious peer could spoof a non-Opolys agent string, bypass the challenge gate, and then send gossip or sync data.
+
+**How fixed:** Identify events now carry the peer's protocol version. Nodes disconnect peers whose protocol version does not exactly match `NETWORK_PROTOCOL_VERSION`, never auto-verify non-Opolys agents, request sync only after challenge success, and refuse sync requests/responses from unverified peers.
+
+---
+
 ### MEDIUM (23 — 3 fixed, 2 by design)
 
 #### ~~M1: Graduated slashing~~ — **FIXD** (ec0df9b)

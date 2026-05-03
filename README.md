@@ -629,6 +629,8 @@ m / 44' / 999' / account' / 0'
 - **Discovery**: Kademlia DHT (bucket size 20) + identify protocol
 - **Gossip**: Gossipsub for block/transaction propagation (`opolys/tx/v1`, `opolys/block/v1`)
 - **Sync**: CBOR request-response protocol for block download (`/opolys/sync/1`)
+- **Peer gate**: peers must advertise the exact Opolys protocol version and pass
+  the EVO-OMAP memory challenge before gossip or sync data is accepted
 - **Ping**: Liveness checks with 30s interval, 20s timeout
 
 | Parameter | Value |

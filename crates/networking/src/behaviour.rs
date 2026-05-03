@@ -95,6 +95,8 @@ pub enum OpolysNetworkEvent {
     /// Identify info received from a peer (agent string, protocol version, etc.).
     PeerIdentified {
         peer_id: libp2p::PeerId,
+        /// The peer's self-reported protocol version.
+        protocol_version: String,
         /// The peer's self-reported agent version string.
         /// Refiners embed their ObjectId here as "refiner:<hex_object_id>".
         agent_version: String,

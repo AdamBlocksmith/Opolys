@@ -199,6 +199,15 @@ mod tests {
         assert_eq!(key.len(), 64);
         assert!(key.chars().all(|c| c.is_ascii_hexdigit()));
     }
+
+    #[test]
+    fn only_exact_mainnet_protocol_version_is_compatible() {
+        assert!(is_compatible_opolys_protocol(
+            opolys_core::NETWORK_PROTOCOL_VERSION
+        ));
+        assert!(!is_compatible_opolys_protocol("/opolys/0.0"));
+        assert!(!is_compatible_opolys_protocol("not-opolys"));
+    }
 }
 
 fn clamp_sync_request_range(start_height: u64, count: u64, current_height: u64) -> (u64, u64) {
@@ -206,6 +215,10 @@ fn clamp_sync_request_range(start_height: u64, count: u64, current_height: u64) 
     let available = current_height.saturating_sub(start).saturating_add(1);
     let count = count.min(MAX_SYNC_BLOCKS).min(available);
     (start, count)
+}
+
+fn is_compatible_opolys_protocol(protocol_version: &str) -> bool {
+    protocol_version == opolys_core::NETWORK_PROTOCOL_VERSION
 }
 
 #[tokio::main]
@@ -1277,26 +1290,24 @@ async fn handle_network_event(
                 tracing::debug!(peer = %peer_id, error = %e, "Failed to send memory challenge");
             }
 
-            // Request blocks this peer has that we don't.
-            let current_height = node.chain.read().await.current_height;
-            let request = SyncRequest {
-                start_height: current_height + 1,
-                count: MAX_SYNC_BLOCKS,
-            };
-            if let Err(e) = net.request_blocks(peer_id, request).await {
-                tracing::debug!(peer = %peer_id, error = %e, "Failed to request sync blocks from peer");
-            }
+            // Sync is requested only after this peer passes the memory challenge.
         }
         opolys_networking::OpolysNetworkEvent::PeerIdentified {
             peer_id,
+            protocol_version,
             agent_version,
         } => {
-            // FIX 7: non-opolys peers (wallets, light clients) don't have the dataset;
-            // skip the challenge and add them to verified immediately.
-            if !agent_version.contains("/opolys/") {
-                verified_peers.insert(peer_id);
+            if !is_compatible_opolys_protocol(&protocol_version) {
+                tracing::warn!(
+                    peer = %peer_id,
+                    protocol = %protocol_version,
+                    agent = %agent_version,
+                    expected = opolys_core::NETWORK_PROTOCOL_VERSION,
+                    "Disconnecting peer with incompatible Opolys protocol"
+                );
                 pending_challenges.remove(&peer_id);
-                tracing::debug!(peer = %peer_id, agent = %agent_version, "Non-opolys peer verified (no challenge required)");
+                let _ = net.disconnect_peer(peer_id).await;
+                return;
             }
 
             // Check if the peer's agent string contains a refiner announcement.
@@ -1353,6 +1364,17 @@ async fn handle_network_event(
             request_id,
             request,
         } => {
+            if !verified_peers.contains(&peer_id) {
+                tracing::warn!(peer = %peer_id, "Refusing sync request from unverified peer");
+                let response = SyncResponse {
+                    blocks: Vec::new(),
+                    from_height: node.chain.read().await.current_height,
+                };
+                if let Err(e) = net.respond_sync_request(request_id, response).await {
+                    tracing::debug!(peer = %peer_id, error = %e, "Failed to send empty sync response to unverified peer");
+                }
+                return;
+            }
             tracing::info!(
                 peer = %peer_id,
                 start_height = request.start_height,
@@ -1413,6 +1435,14 @@ async fn handle_network_event(
                 if hash_val == expected_hash {
                     verified_peers.insert(peer_id);
                     tracing::info!(peer = %peer_id, "Peer passed memory challenge — verified");
+                    let current_height = node.chain.read().await.current_height;
+                    let request = SyncRequest {
+                        start_height: current_height + 1,
+                        count: MAX_SYNC_BLOCKS,
+                    };
+                    if let Err(e) = net.request_blocks(peer_id, request).await {
+                        tracing::debug!(peer = %peer_id, error = %e, "Failed to request sync blocks from verified peer");
+                    }
                 } else {
                     tracing::warn!(peer = %peer_id, "Peer failed memory challenge — wrong hash, permanent ban");
                     node.ban_peer(&peer_id.to_string(), "failed_memory_challenge", true)
@@ -1429,6 +1459,10 @@ async fn handle_network_event(
             }
         }
         opolys_networking::OpolysNetworkEvent::SyncResponseReceived { peer_id, response } => {
+            if !verified_peers.contains(&peer_id) {
+                tracing::warn!(peer = %peer_id, "Dropping sync response from unverified peer");
+                return;
+            }
             tracing::info!(
                 peer = %peer_id,
                 blocks = response.blocks.len(),

@@ -18,7 +18,9 @@ use crate::behaviour::{
     GOSSIP_ATTESTATION_TOPIC, GOSSIP_BLOCK_TOPIC, GOSSIP_TX_TOPIC, OpolysBehaviour,
     OpolysBehaviourEvent, opolys_agent_string, sync_protocol,
 };
-use crate::challenge::{ChallengeRequest, ChallengeResponse, challenge_protocol};
+use crate::challenge::{
+    CHALLENGE_TIMEOUT_SECS, ChallengeRequest, ChallengeResponse, challenge_protocol,
+};
 use crate::discovery::DiscoveryConfig;
 use crate::gossip::GossipConfig;
 use crate::sync::{SyncConfig, SyncRequest, SyncResponse};
@@ -278,7 +280,8 @@ impl OpolysNetwork {
                 challenge_protocol(),
                 request_response::ProtocolSupport::Full,
             )],
-            request_response::Config::default(),
+            request_response::Config::default()
+                .with_request_timeout(Duration::from_secs(CHALLENGE_TIMEOUT_SECS)),
         );
 
         let behaviour = OpolysBehaviour {
@@ -798,7 +801,12 @@ impl SwarmTask {
             OpolysBehaviourEvent::Identify(identify_event) => {
                 match identify_event {
                     libp2p::identify::Event::Received { peer_id, info, .. } => {
-                        tracing::debug!(peer = %peer_id, agent = %info.agent_version, "Identify received");
+                        tracing::debug!(
+                            peer = %peer_id,
+                            protocol = %info.protocol_version,
+                            agent = %info.agent_version,
+                            "Identify received"
+                        );
                         // Add peer addresses to Kademlia DHT for better routing
                         for addr in info.listen_addrs {
                             self.swarm
@@ -810,6 +818,7 @@ impl SwarmTask {
                         let _ = self.event_tx.try_send(
                             crate::behaviour::OpolysNetworkEvent::PeerIdentified {
                                 peer_id,
+                                protocol_version: info.protocol_version,
                                 agent_version: info.agent_version,
                             },
                         );
