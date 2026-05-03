@@ -1338,7 +1338,7 @@ All comments updated from "1,024 blocks/epoch" to "960 blocks/epoch". Test param
 48. DONE Attestation collection in block builder
 49. DONE Attestation verification in `apply_block`
 50. DONE Reliability score: `consecutive_correct_attestations` in `RefinerInfo`
-51. DONE Attestation weight in reward distribution
+51. Attestation weight in reward distribution
 52. Block confidence score derived on-chain
 53. `opl_getBlockConfidence` RPC endpoint
 

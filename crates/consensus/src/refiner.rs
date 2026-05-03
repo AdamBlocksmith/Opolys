@@ -157,25 +157,6 @@ impl RefinerInfo {
             .sum()
     }
 
-    /// Reliability multiplier in milli-units:
-    /// `1000 + ln_milli(1000 + consecutive_correct_attestations * 1000 / EPOCH)`.
-    pub fn reliability_multiplier_milli(&self) -> u64 {
-        let attested_epochs =
-            ((self.consecutive_correct_attestations as u128 * 1000) / EPOCH as u128) as u64;
-        1000u64.saturating_add(crate::emission::ln_milli(
-            1000u64.saturating_add(attested_epochs),
-        ))
-    }
-
-    /// Weight used for refiner reward distribution.
-    ///
-    /// This layers verified attestation reliability on top of the existing
-    /// stake × seniority weight without affecting refiner producer selection.
-    pub fn attestation_weight(&self, current_timestamp: u64) -> FlakeAmount {
-        ((self.weight(current_timestamp) as u128 * self.reliability_multiplier_milli() as u128)
-            / 1000) as FlakeAmount
-    }
-
     /// Add a new bond entry (top-up) to this refiner.
     ///
     /// Each new entry must meet the `MIN_BOND_STAKE` minimum (1 OPL).
@@ -658,15 +639,6 @@ impl RefinerSet {
             .sum()
     }
 
-    /// Compute total active refiner weight for reward distribution.
-    pub fn total_attestation_weight(&self, current_timestamp: u64) -> FlakeAmount {
-        self.active_set
-            .iter()
-            .filter_map(|id| self.cached_refiners.get(id))
-            .map(|v| v.attestation_weight(current_timestamp))
-            .sum()
-    }
-
     /// Number of refiners in the cache (may be less than total if some are on disk).
     pub fn refiner_count(&self) -> usize {
         self.cached_refiners.len()
@@ -1029,31 +1001,6 @@ mod tests {
                 .unwrap()
                 .consecutive_correct_attestations,
             2
-        );
-    }
-
-    #[test]
-    fn attestation_weight_adds_logarithmic_reliability_bonus() {
-        let mut vs = RefinerSet::new();
-        let id = test_id(b"reliable");
-        vs.bond(id.clone(), MIN_BOND_STAKE, 0, 100).unwrap();
-        vs.activate(&id, 1).unwrap();
-
-        let base = vs.get_refiner(&id).unwrap().weight(100);
-        let initial_attestation_weight = vs.get_refiner(&id).unwrap().attestation_weight(100);
-        assert_eq!(initial_attestation_weight, base);
-
-        for _ in 0..EPOCH {
-            vs.record_correct_attestation(&id).unwrap();
-        }
-
-        let refiner = vs.get_refiner(&id).unwrap();
-        assert!(refiner.reliability_multiplier_milli() > 1600);
-        assert!(refiner.reliability_multiplier_milli() < 1800);
-        assert!(refiner.attestation_weight(100) > base);
-        assert_eq!(
-            vs.total_attestation_weight(100),
-            refiner.attestation_weight(100)
         );
     }
 
