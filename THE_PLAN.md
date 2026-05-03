@@ -949,7 +949,7 @@ Every bug below includes: **What it is**, **Why it matters**, and **How to fix i
 
 **How to fix:** Add a `chain_id` field to `PersistedChainState`. On load, compare it against `MAINNET_CHAIN_ID`. If it doesn't match, refuse to load and start fresh with a warning. Also make the mainnet data directory explicit: use `data_dir/mainnet/`.
 
-**How fixed:** `PersistedChainState` now stores `chain_id`, `ChainState::to_persisted()` writes `MAINNET_CHAIN_ID`, and node startup ignores persisted state whose `chain_id` does not match the configured network. Runtime persistence, ban lists, and peer caches now use `NodeConfig::chain_data_dir()` (`<data_dir>/mainnet`) instead of the base data directory.
+**How fixed:** `PersistedChainState` now stores `chain_id`, `ChainState::to_persisted()` writes `MAINNET_CHAIN_ID`, and node startup refuses to open persisted state whose `chain_id` or ceremony-derived genesis hash does not match the configured mainnet identity. Runtime persistence, ban lists, and peer caches now use `NodeConfig::chain_data_dir()` (`<data_dir>/mainnet`) instead of the base data directory.
 
 ---
 

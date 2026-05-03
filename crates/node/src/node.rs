@@ -663,38 +663,18 @@ impl OpolysNode {
                 match store.load_chain_state() {
                     Ok(Some(persisted)) => {
                         if persisted.chain_id != chain_id {
-                            tracing::warn!(
-                                persisted_chain_id = persisted.chain_id,
-                                expected_chain_id = chain_id,
-                                "Ignoring persisted chain state for a non-mainnet chain id"
+                            panic!(
+                                "Refusing to open data directory {:?}: persisted chain_id {} does not match expected mainnet chain_id {}",
+                                data_path, persisted.chain_id, chain_id
                             );
-                            let chain = ChainState::new(&genesis_config);
-                            let mut accounts = AccountStore::new();
-                            let refiners = RefinerSet::new();
-                            let genesis_issued = opolys_consensus::genesis::apply_genesis_accounts(
-                                &genesis_config,
-                                &mut accounts,
-                            );
-                            let mut chain = chain;
-                            chain.total_issued = chain.total_issued.saturating_add(genesis_issued);
-                            (chain, accounts, refiners, Some(store))
                         } else if Hash::from_bytes(persisted.genesis_hash) != expected_genesis_hash
                         {
-                            tracing::warn!(
-                                persisted_genesis = %Hash::from_bytes(persisted.genesis_hash).to_hex(),
-                                expected_genesis = %expected_genesis_hash.to_hex(),
-                                "Ignoring persisted chain state for a different genesis ceremony"
+                            panic!(
+                                "Refusing to open data directory {:?}: persisted genesis {} does not match expected genesis {}",
+                                data_path,
+                                Hash::from_bytes(persisted.genesis_hash).to_hex(),
+                                expected_genesis_hash.to_hex()
                             );
-                            let chain = ChainState::new(&genesis_config);
-                            let mut accounts = AccountStore::new();
-                            let refiners = RefinerSet::new();
-                            let genesis_issued = opolys_consensus::genesis::apply_genesis_accounts(
-                                &genesis_config,
-                                &mut accounts,
-                            );
-                            let mut chain = chain;
-                            chain.total_issued = chain.total_issued.saturating_add(genesis_issued);
-                            (chain, accounts, refiners, Some(store))
                         } else {
                             tracing::info!(
                                 height = persisted.current_height,
@@ -731,17 +711,10 @@ impl OpolysNode {
                         (chain, accounts, refiners, Some(store))
                     }
                     Err(e) => {
-                        tracing::error!("Failed to load chain state: {}, starting fresh", e);
-                        let chain = ChainState::new(&genesis_config);
-                        let mut accounts = AccountStore::new();
-                        let refiners = RefinerSet::new();
-                        let genesis_issued = opolys_consensus::genesis::apply_genesis_accounts(
-                            &genesis_config,
-                            &mut accounts,
+                        panic!(
+                            "Refusing to open data directory {:?}: failed to load persisted chain state: {}",
+                            data_path, e
                         );
-                        let mut chain = chain;
-                        chain.total_issued = chain.total_issued.saturating_add(genesis_issued);
-                        (chain, accounts, refiners, Some(store))
                     }
                 }
             }
@@ -2137,7 +2110,8 @@ mod tests {
     }
 
     #[test]
-    fn node_rejects_persisted_state_from_different_genesis() {
+    #[should_panic(expected = "persisted genesis")]
+    fn node_refuses_persisted_state_from_different_genesis() {
         let (mut config, _node_dir) = test_config();
         let ceremony_a = tempfile::tempdir().unwrap();
         let ceremony_b = tempfile::tempdir().unwrap();
@@ -2160,11 +2134,26 @@ mod tests {
             &ceremony_b,
             334 * FLAKES_PER_OPL,
         ));
-        let node = OpolysNode::new(config);
-        let chain = node.chain.blocking_read();
+        let _node = OpolysNode::new(config);
+    }
 
-        assert_eq!(chain.base_reward, 334 * FLAKES_PER_OPL);
-        assert_eq!(chain.current_height, 0);
+    #[test]
+    #[should_panic(expected = "persisted chain_id")]
+    fn node_refuses_persisted_state_from_different_chain_id() {
+        let (mut config, _node_dir) = test_config();
+        let ceremony_dir = tempfile::tempdir().unwrap();
+        config.genesis_params_path = Some(write_test_genesis_attestation(
+            &ceremony_dir,
+            333 * FLAKES_PER_OPL,
+        ));
+
+        let mut persisted = ChainState::new(&genesis_config_for_node(&config)).to_persisted();
+        persisted.chain_id = MAINNET_CHAIN_ID + 1;
+        let store = BlockchainStore::open(&config.chain_data_dir()).unwrap();
+        store.save_chain_state(&persisted).unwrap();
+        drop(store);
+
+        let _node = OpolysNode::new(config);
     }
 
     #[test]
