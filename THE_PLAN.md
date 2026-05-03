@@ -243,7 +243,9 @@ Default derivation (2024 USGS/WGC data):
 ### Block Reward Formula
 
 ```
-block_reward = (BASE_REWARD / difficulty) × vein_yield
+gross_block_reward = (BASE_REWARD / difficulty) × vein_yield
+mine_assay = gross_block_reward × ANNUAL_ATTRITION_PERMILLE / 1000
+net_block_reward = gross_block_reward - mine_assay
 ```
 
 Where:
@@ -795,9 +797,10 @@ Every block applied to the chain must pass these checks:
 ```
 yield_milli = 1000 + sqrt(ln(target / hash_int)) × 1000   // integer, rounded to nearest milli
 vein_yield = yield_milli / 1000.0
-mine_assay = block_reward × ANNUAL_ATTRITION_PERMILLE / 1000  // burned at source
-block_reward = (BASE_REWARD / difficulty) × vein_yield
-miner_share = base_share + vein_bonus                   // vein bonus goes 100% to miner
+gross_block_reward = (BASE_REWARD / difficulty) × vein_yield
+mine_assay = gross_block_reward × ANNUAL_ATTRITION_PERMILLE / 1000  // burned at source
+net_block_reward = gross_block_reward - mine_assay
+miner_share = net_base_share + net_vein_bonus             // vein bonus goes 100% to miner
 ```
 
 ### Effective Difficulty
@@ -890,8 +893,9 @@ entry_weight = entry.stake × (1 + ln(1 + entry.age_years))
 ### Stake Coverage
 ```
 coverage_milli = (bonded_stake × 1000) / total_issued   // integer, no float
-miner_share_amount = block_reward × (1000 - coverage_milli) / 1000
-refiner_share_amount = block_reward - miner_share_amount
+net_base_reward = (BASE_REWARD / difficulty) after proportional assay
+miner_share_amount = net_base_reward × (1000 - coverage_milli) / 1000 + net_vein_bonus
+refiner_share_amount = net_base_reward × coverage_milli / 1000
 ```
 Miner share goes to the block producer. Refiner share is distributed among active refiners proportional to weight.
 

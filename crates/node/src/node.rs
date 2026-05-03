@@ -616,6 +616,53 @@ fn genesis_config_for_node(config: &NodeConfig) -> GenesisConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RewardDistribution {
+    gross_reward: FlakeAmount,
+    mine_assay: FlakeAmount,
+    net_reward: FlakeAmount,
+    miner_share: FlakeAmount,
+    refiner_share: FlakeAmount,
+}
+
+fn compute_reward_distribution(
+    gross_reward: FlakeAmount,
+    base_reward_amount: FlakeAmount,
+    coverage_milli: u64,
+) -> RewardDistribution {
+    if gross_reward == 0 {
+        return RewardDistribution {
+            gross_reward: 0,
+            mine_assay: 0,
+            net_reward: 0,
+            miner_share: 0,
+            refiner_share: 0,
+        };
+    }
+
+    let mine_assay =
+        ((gross_reward as u128 * ANNUAL_ATTRITION_PERMILLE as u128) / 1000) as FlakeAmount;
+    let net_reward = gross_reward.saturating_sub(mine_assay);
+
+    let net_base_reward =
+        ((base_reward_amount as u128 * net_reward as u128) / gross_reward as u128) as FlakeAmount;
+    let net_vein_bonus = net_reward.saturating_sub(net_base_reward);
+    let coverage_milli = coverage_milli.min(1000);
+
+    let miner_base_share =
+        ((net_base_reward as u128 * (1000 - coverage_milli) as u128) / 1000) as FlakeAmount;
+    let refiner_share = net_base_reward.saturating_sub(miner_base_share);
+    let miner_share = miner_base_share.saturating_add(net_vein_bonus);
+
+    RewardDistribution {
+        gross_reward,
+        mine_assay,
+        net_reward,
+        miner_share,
+        refiner_share,
+    }
+}
+
 impl OpolysNode {
     /// Create a new node, either loading persisted state from disk or
     /// initializing from genesis.
@@ -1619,46 +1666,21 @@ impl OpolysNode {
         } else {
             chain.base_reward / block.header.difficulty.max(MIN_DIFFICULTY)
         };
-        let yield_milli = if block.header.height == 0 {
-            1000
-        } else {
-            let pow_hash_value = if block.header.pow_proof.is_some() {
-                pow::compute_pow_hash_value(&block.header).unwrap_or(0u64)
-            } else {
-                0u64
-            };
-            emission::compute_vein_yield(block.header.difficulty, pow_hash_value)
-        };
-        // vein_bonus = base_reward × (yield_milli - 1000) / 1000
-        // For refiner blocks: yield_milli = 1000, so vein_bonus = 0
-        // For miner blocks: yield_milli > 1000, vein_bonus > 0
-        let vein_bonus = ((base_reward_amount as u128 * (yield_milli.saturating_sub(1000) as u128))
-            / 1000) as FlakeAmount;
-
-        // Mine assay: burn ANNUAL_ATTRITION_PERMILLE / 1000 of block reward at source.
-        // Mirrors gold processing waste — miners lose ~1.5% of what they extract.
-        let mine_assay = if block.header.height == 0 {
-            0
-        } else {
-            ((block_reward as u128 * ANNUAL_ATTRITION_PERMILLE as u128) / 1000) as FlakeAmount
-        };
-        let net_reward = block_reward.saturating_sub(mine_assay);
-
+        // Mine assay burns part of the gross ore before rewards are credited.
         // Split the net reward between miners and refiners based on stake coverage.
-        // The split is on base_reward only. Vein bonus goes to the producer.
+        // The split is on the net base reward only. The net vein bonus goes to the producer.
         // coverage_milli = (bonded_stake × 1000) / total_issued, avoiding floating point.
         let coverage_milli: u64 = if chain.total_issued > 0 {
             ((bonded_stake as u128 * 1000) / chain.total_issued as u128).min(1000) as u64
         } else {
             0
         };
-        // miner_share = base_reward × (1000 - coverage_milli) / 1000 + vein_bonus
-        // refiner_share = base_reward × coverage_milli / 1000
-        let miner_share_amount = ((base_reward_amount as u128 * (1000 - coverage_milli) as u128)
-            / 1000)
-            .saturating_add(vein_bonus as u128) as FlakeAmount;
-        let refiner_share_amount =
-            ((base_reward_amount as u128 * coverage_milli as u128) / 1000) as FlakeAmount;
+        // miner_share = net_base_reward * (1000 - coverage_milli) / 1000 + net_vein_bonus
+        // refiner_share = net_base_reward * coverage_milli / 1000
+        let reward_distribution =
+            compute_reward_distribution(block_reward, base_reward_amount, coverage_milli);
+        let miner_share_amount = reward_distribution.miner_share;
+        let refiner_share_amount = reward_distribution.refiner_share;
 
         // Credit the PoW share to the block producer (miner or selected refiner).
         // The producer is identified by block.header.producer.
@@ -1736,11 +1758,14 @@ impl OpolysNode {
         // which overstated the fee market signal when transactions failed.
         let next_suggested_fee = compute_suggested_fee(total_fees_burned, chain.suggested_fee);
 
-        // Update chain state
-        // total_issued increases by net_reward (after mine assay burn)
-        // total_burned increases by mine_assay (burned at source, never enters circulation)
-        chain.total_issued = chain.total_issued.saturating_add(net_reward);
-        chain.total_burned = chain.total_burned.saturating_add(mine_assay);
+        // Update chain state. total_issued tracks gross ore found; total_burned
+        // tracks assay waste. Their difference is the net amount distributed.
+        chain.total_issued = chain
+            .total_issued
+            .saturating_add(reward_distribution.gross_reward);
+        chain.total_burned = chain
+            .total_burned
+            .saturating_add(reward_distribution.mine_assay);
         chain.current_height = block.header.height;
         chain.current_difficulty = block.header.difficulty;
         chain.latest_block_hash = block_hash.clone();
@@ -2050,6 +2075,36 @@ mod tests {
         let (config, _dir) = test_config();
         assert!(config.chain_data_dir().ends_with("mainnet"));
         assert_eq!(config.chain_id(), MAINNET_CHAIN_ID);
+    }
+
+    #[test]
+    fn reward_distribution_credits_only_net_after_assay() {
+        let distribution = compute_reward_distribution(1_000_000, 800_000, 250);
+
+        assert_eq!(distribution.mine_assay, 15_000);
+        assert_eq!(distribution.net_reward, 985_000);
+        assert_eq!(
+            distribution.miner_share + distribution.refiner_share,
+            985_000
+        );
+        assert_eq!(
+            distribution.gross_reward - distribution.mine_assay,
+            distribution.miner_share + distribution.refiner_share
+        );
+    }
+
+    #[test]
+    fn reward_distribution_caps_coverage_and_preserves_vein_for_producer() {
+        let distribution = compute_reward_distribution(2_000_000, 1_000_000, 1_500);
+
+        assert_eq!(distribution.mine_assay, 30_000);
+        assert_eq!(distribution.net_reward, 1_970_000);
+        assert_eq!(distribution.miner_share, 985_000);
+        assert_eq!(distribution.refiner_share, 985_000);
+        assert_eq!(
+            distribution.miner_share + distribution.refiner_share,
+            1_970_000
+        );
     }
 
     #[test]

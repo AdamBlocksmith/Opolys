@@ -41,7 +41,7 @@ BASE_REWARD                      = floor(116,707,041 / 350,640) = 332 OPL
 
 For **mainnet**, `BASE_REWARD` is not hardcoded — it is derived during the genesis ceremony from live LBMA/USGS/WGC data at launch time and embedded in the genesis block attestation. This anchors the supply model to real gold market data on the exact day the network starts.
 
-At difficulty 1 (minimum), each block earns 332 OPL. As difficulty rises, the per-block reward naturally shrinks — `block_reward = (BASE_REWARD / difficulty) × vein_yield`. This mirrors real gold: the easy veins are found first, and every subsequent ounce costs more to extract.
+At difficulty 1 (minimum), each block starts from 332 OPL before vein yield and assay burn. As difficulty rises, the gross per-block reward naturally shrinks — `gross_block_reward = (BASE_REWARD / difficulty) × vein_yield`, then the mine assay is burned before net rewards are credited. This mirrors real gold: the easy veins are found first, and every subsequent ounce costs more to extract.
 
 The block time of 90,000 ms (90 seconds) is chosen so that exactly 960 blocks complete in 24 hours:
 
@@ -360,7 +360,7 @@ Block validation uses `verify_light()` to avoid allocating 256 MiB on every bloc
 Gold veins vary in richness. Opolys models this with vein yield:
 
 ```
-vein_yield = 1 + ln(target / hash_int)
+vein_yield = 1 + sqrt(ln(target / hash_int))
 ```
 
 Where:
@@ -372,7 +372,9 @@ Most mined blocks earn above the 1.0x floor. Exceptionally lucky blocks earn mor
 ### Block Reward Formula
 
 ```
-block_reward = (BASE_REWARD / effective_difficulty) × vein_yield
+gross_block_reward = (BASE_REWARD / effective_difficulty) × vein_yield
+mine_assay = gross_block_reward × ANNUAL_ATTRITION_PERMILLE / 1000
+net_block_reward = gross_block_reward - mine_assay
 ```
 
 At minimum difficulty (1), the base reward starts from the ceremony value, then mined blocks may add a vein bonus. As difficulty rises, the base reward naturally declines — exactly like real gold mining where the easy veins are found first.
@@ -381,9 +383,9 @@ At minimum difficulty (1), the base reward starts from the ceremony value, then 
 
 ```
 coverage_milli = (bonded_stake × 1000) / total_issued    // integer, no float
-base_reward_amount = BASE_REWARD / effective_difficulty
-miner_share_amount = base_reward_amount × (1000 - coverage_milli) / 1000 + vein_bonus
-refiner_share_amount = base_reward_amount × coverage_milli / 1000
+net_base_reward = (BASE_REWARD / effective_difficulty) after proportional assay
+miner_share_amount = net_base_reward × (1000 - coverage_milli) / 1000 + net_vein_bonus
+refiner_share_amount = net_base_reward × coverage_milli / 1000
 ```
 
 - Miner share goes to the block producer
@@ -718,8 +720,9 @@ Every block applied to the chain must pass these checks:
 
 ### Block Reward
 ```
-vein_yield = 1 + ln(target / hash_int)              // f64, rounded to nearest milli
-block_reward = (BASE_REWARD / effective_difficulty) × vein_yield
+vein_yield = 1 + sqrt(ln(target / hash_int))        // f64, rounded to nearest milli
+gross_block_reward = (BASE_REWARD / effective_difficulty) × vein_yield
+net_block_reward = gross_block_reward - mine_assay
 ```
 
 ### Effective Difficulty
@@ -757,9 +760,9 @@ entry_weight = stake × (1 + ln(1 + age_years))
 ### Stake Coverage & Reward Split
 ```
 coverage_milli = (bonded_stake × 1000) / total_issued        // integer, no float
-base_reward_amount = BASE_REWARD / effective_difficulty
-miner_share_amount = base_reward_amount × (1000 - coverage_milli) / 1000 + vein_bonus
-refiner_share_amount = base_reward_amount × coverage_milli / 1000
+net_base_reward = (BASE_REWARD / effective_difficulty) after proportional assay
+miner_share_amount = net_base_reward × (1000 - coverage_milli) / 1000 + net_vein_bonus
+refiner_share_amount = net_base_reward × coverage_milli / 1000
 ```
 
 ---
