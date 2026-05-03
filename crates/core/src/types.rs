@@ -374,6 +374,9 @@ pub struct Block {
     /// Each item is independently verified (ed25519 + pubkey→ObjectId check) before
     /// graduated slashing is applied. Empty for most blocks.
     pub slash_evidence: Vec<DoubleSignEvidence>,
+    /// Refiner attestations collected for prior canonical blocks.
+    /// Verification and confidence scoring are enabled in Pass 2.
+    pub attestations: Vec<BlockAttestation>,
     /// Ceremony attestation — present on the genesis block only, `None` everywhere else.
     /// Skipped in JSON serialization; stored on-chain via Borsh (RocksDB).
     #[serde(skip)]

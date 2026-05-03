@@ -232,6 +232,10 @@ pub const TX_MAX_SIZE_BYTES: usize = 100_000;
 /// transactions per block = ~83 tx/s, which is generous for a digital gold chain.
 pub const MAX_TRANSACTIONS_PER_BLOCK: usize = 10_000;
 
+/// Maximum number of refiner block attestations carried in one block.
+/// Keeps signature verification bounded once attestation finality is enabled.
+pub const MAX_ATTESTATIONS_PER_BLOCK: usize = 1_024;
+
 /// Maximum serialized size (in bytes) of a single block including all transactions.
 /// 10 MiB allows ~100 full-size transactions or many small ones.
 pub const MAX_BLOCK_SIZE_BYTES: usize = 10_485_760;

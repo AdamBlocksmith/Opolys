@@ -99,6 +99,7 @@ impl PowContext {
             header,
             transactions: vec![],
             slash_evidence: vec![],
+            attestations: vec![],
             genesis_ceremony: None,
         })
     }
@@ -139,6 +140,7 @@ impl PowContext {
             header,
             transactions: vec![],
             slash_evidence: vec![],
+            attestations: vec![],
             genesis_ceremony: None,
         })
     }

@@ -10,8 +10,9 @@
 //! keeping the fee market pure and deflationary.
 
 use opolys_core::{
-    BLOCK_VERSION, Block, BlockHeader, FLAKES_PER_OPL, Hash, MAX_BLOCK_SIZE_BYTES,
-    MAX_FUTURE_BLOCK_TIME_SECS, MAX_TRANSACTIONS_PER_BLOCK, MAX_TX_DATA_SIZE_BYTES, OpolysError,
+    BLOCK_VERSION, Block, BlockHeader, FLAKES_PER_OPL, Hash, MAX_ATTESTATIONS_PER_BLOCK,
+    MAX_BLOCK_SIZE_BYTES, MAX_FUTURE_BLOCK_TIME_SECS, MAX_TRANSACTIONS_PER_BLOCK,
+    MAX_TX_DATA_SIZE_BYTES, OpolysError,
 };
 
 /// Maximum slash evidence entries allowed per block.
@@ -219,6 +220,15 @@ pub fn validate_block(
             "Too many slash evidence entries: {} > {}",
             block.slash_evidence.len(),
             MAX_SLASH_EVIDENCE_PER_BLOCK
+        )));
+    }
+
+    // 6c. Attestation count check — signature verification is enabled in Pass 2.
+    if block.attestations.len() > MAX_ATTESTATIONS_PER_BLOCK {
+        return Err(OpolysError::BlockValidationFailed(format!(
+            "Too many attestations: {} > {}",
+            block.attestations.len(),
+            MAX_ATTESTATIONS_PER_BLOCK
         )));
     }
 
@@ -485,6 +495,7 @@ mod tests {
             header,
             transactions: vec![],
             slash_evidence: vec![],
+            attestations: vec![],
             genesis_ceremony: None,
         };
         let err = validate_block(&block, 1, &Hash::zero(), 1000, 1, 1001).unwrap_err();
@@ -507,6 +518,7 @@ mod tests {
             header,
             transactions: vec![],
             slash_evidence: vec![],
+            attestations: vec![],
             genesis_ceremony: None,
         };
         let err = validate_block(&block, 1, &Hash::zero(), 1000, 1, 1001).unwrap_err();

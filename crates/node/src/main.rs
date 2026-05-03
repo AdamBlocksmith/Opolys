@@ -52,6 +52,40 @@ const MAX_PEERS_PER_SUBNET: usize = 3;
 /// Path to the peer address cache file within the node's data directory.
 const KNOWN_PEERS_FILE: &str = "known_peers.txt";
 
+async fn queue_local_block_attestation(
+    node: &std::sync::Arc<OpolysNode>,
+    height: u64,
+    hash: &opolys_core::Hash,
+    tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
+) {
+    if let Some(attestation) = node.create_block_attestation(height, hash).await {
+        if let Err(e) = node.accept_block_attestation(attestation.clone()).await {
+            tracing::warn!(error = %e, "Failed to store local block attestation");
+        }
+        let attestation_bytes =
+            borsh::to_vec(&attestation).expect("Attestation serialization must not fail");
+        let _ = tx.try_send(attestation_bytes);
+    }
+}
+
+async fn broadcast_local_block_attestation(
+    node: &std::sync::Arc<OpolysNode>,
+    height: u64,
+    hash: &opolys_core::Hash,
+    net: &OpolysNetwork,
+) {
+    if let Some(attestation) = node.create_block_attestation(height, hash).await {
+        if let Err(e) = node.accept_block_attestation(attestation.clone()).await {
+            tracing::warn!(error = %e, "Failed to store local block attestation");
+        }
+        let attestation_bytes =
+            borsh::to_vec(&attestation).expect("Attestation serialization must not fail");
+        if let Err(e) = net.broadcast_attestation(attestation_bytes).await {
+            tracing::debug!("Failed to broadcast attestation: {}", e);
+        }
+    }
+}
+
 /// Generate a random RPC API key for write/mining methods.
 fn generate_rpc_api_key() -> Result<String, String> {
     let mut key = [0u8; 32];
@@ -372,6 +406,8 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
     // Channel for broadcasting blocks mined locally or received via RPC.
     // The P2P event loop reads from this channel and broadcasts via gossipsub.
     let (block_broadcast_tx, mut block_broadcast_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+    let (attestation_broadcast_tx, mut attestation_broadcast_rx) =
+        tokio::sync::mpsc::channel::<Vec<u8>>(256);
 
     // Optionally start the JSON-RPC server
     let mut rpc_handle: Option<tokio::task::JoinHandle<()>> = None;
@@ -412,6 +448,7 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
     let block_processor_chain_info = chain_info.clone();
     let block_processor_node = node.clone();
     let block_processor_broadcast = block_broadcast_tx.clone();
+    let block_processor_attestations = attestation_broadcast_tx.clone();
     let block_processor = tokio::spawn(async move {
         while let Some(submission) = block_receiver.recv().await {
             let height = submission.block.header.height;
@@ -440,6 +477,14 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
                         .expect("Block serialization must not fail after validation");
                     let _ = block_processor_broadcast.try_send(block_bytes);
 
+                    queue_local_block_attestation(
+                        &block_processor_node,
+                        height,
+                        &hash,
+                        &block_processor_attestations,
+                    )
+                    .await;
+
                     let _ = submission.reply.send(BlockSubmissionResult {
                         block_hash: Some(hash.to_hex()),
                         error: None,
@@ -462,6 +507,7 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
         let chain_info_clone = chain_info.clone();
         let mining_node = node.clone();
         let mining_broadcast = block_broadcast_tx.clone();
+        let mining_attestations = attestation_broadcast_tx.clone();
         mining_handle = Some(tokio::spawn(async move {
             // Mining parameters:
             // - RETRY_BACKOFF_MS: sleep between failed attempts to avoid CPU spinning
@@ -522,6 +568,14 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
                                 let block_bytes = borsh::to_vec(&block)
                                     .expect("Block serialization must not fail after validation");
                                 let _ = mining_broadcast.try_send(block_bytes);
+
+                                queue_local_block_attestation(
+                                    &mining_node,
+                                    height,
+                                    &hash,
+                                    &mining_attestations,
+                                )
+                                .await;
                             }
                             Err(e) => {
                                 tracing::error!(height, error = %e, "Failed to apply mined block");
@@ -546,6 +600,7 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
     {
         let refining_node = node.clone();
         let refining_broadcast = block_broadcast_tx.clone();
+        let refining_attestations = attestation_broadcast_tx.clone();
         let refining_chain_info = chain_info.clone();
         Some(tokio::spawn(async move {
             tracing::info!(miner_id = %refining_node.miner_id.to_hex(), "Refiner block production loop starting");
@@ -598,6 +653,14 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
                                 let block_bytes = borsh::to_vec(&block)
                                     .expect("Block serialization must not fail after validation");
                                 let _ = refining_broadcast.try_send(block_bytes);
+
+                                queue_local_block_attestation(
+                                    &refining_node,
+                                    height,
+                                    &hash,
+                                    &refining_attestations,
+                                )
+                                .await;
                             }
                             Err(e) => {
                                 tracing::error!(height, error = %e, "Failed to apply refiner block");
@@ -619,6 +682,7 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
 
     // Drop the remaining sender so block_broadcast_rx ends when all producers are done
     drop(block_broadcast_tx);
+    drop(attestation_broadcast_tx);
 
     // P2P network event loop — owns the OpolysNetwork exclusively.
     // Handles incoming blocks, transactions, and sync requests. Also broadcasts
@@ -718,6 +782,13 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
                             }
                             None => {
                                 // All broadcast senders dropped — mining/RPC stopped
+                            }
+                        }
+                    }
+                    attestation_data = attestation_broadcast_rx.recv() => {
+                        if let Some(data) = attestation_data {
+                            if let Err(e) = net.broadcast_attestation(data).await {
+                                tracing::warn!("Failed to broadcast attestation: {}", e);
                             }
                         }
                     }
@@ -951,6 +1022,13 @@ async fn handle_network_event(
                             if let Err(e) = net.broadcast_block(block_data).await {
                                 tracing::debug!("Failed to re-broadcast block: {}", e);
                             }
+                            broadcast_local_block_attestation(
+                                node,
+                                block.header.height,
+                                &hash,
+                                net,
+                            )
+                            .await;
                             // Refresh chain info
                             {
                                 let chain = node.chain.read().await;
@@ -1116,11 +1194,34 @@ async fn handle_network_event(
             }
         }
         opolys_networking::OpolysNetworkEvent::GossipAttestation { data, source } => {
-            tracing::debug!(
-                peer = %source,
-                size = data.len(),
-                "Received block attestation via gossip; collection not enabled yet"
-            );
+            if !verified_peers.contains(&source) {
+                tracing::debug!(peer = %source, "Dropping attestation gossip from unverified peer");
+                return;
+            }
+
+            match borsh::from_slice::<opolys_core::BlockAttestation>(&data) {
+                Ok(attestation) => match node.accept_block_attestation(attestation).await {
+                    Ok(true) => {
+                        tracing::debug!(
+                            peer = %source,
+                            size = data.len(),
+                            "Accepted refiner block attestation"
+                        );
+                        if let Err(e) = net.broadcast_attestation(data).await {
+                            tracing::debug!("Failed to re-broadcast attestation: {}", e);
+                        }
+                    }
+                    Ok(false) => {
+                        tracing::trace!(peer = %source, "Duplicate refiner attestation");
+                    }
+                    Err(e) => {
+                        tracing::warn!(peer = %source, error = %e, "Rejected refiner attestation");
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(peer = %source, error = %e, "Failed to deserialize attestation");
+                }
+            }
         }
         opolys_networking::OpolysNetworkEvent::PeerConnected { peer_id, addr } => {
             tracing::info!(peer = %peer_id, "Peer connected");

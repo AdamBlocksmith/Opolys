@@ -33,7 +33,9 @@ use opolys_consensus::{
     refiner::RefinerSet,
 };
 use opolys_core::*;
-use opolys_crypto::{DOMAIN_STATE_ROOT, refiner_block_signing_payload};
+use opolys_crypto::{
+    DOMAIN_STATE_ROOT, block_attestation_signing_payload, refiner_block_signing_payload,
+};
 use opolys_execution::TransactionDispatcher;
 use opolys_networking::PeerId;
 use opolys_storage::BlockchainStore;
@@ -386,6 +388,9 @@ pub struct OpolysNode {
     /// Double-sign evidence collected during mining or refiner block production.
     /// Drained into `Block.slash_evidence` by mine_block() and produce_refiner_block().
     pub pending_slash_evidence: Arc<RwLock<Vec<DoubleSignEvidence>>>,
+    /// Valid refiner attestations collected for future block inclusion.
+    /// Keyed by (height, refiner ObjectId hex) to deduplicate repeated gossip.
+    pub pending_attestations: Arc<RwLock<HashMap<(u64, String), BlockAttestation>>>,
     /// Peers that have announced an active refiner identity via the identify protocol.
     /// Keyed by libp2p PeerId; value is their on-chain ObjectId (used for look-ups).
     pub refiner_peers: Arc<RwLock<HashMap<PeerId, ObjectId>>>,
@@ -696,6 +701,7 @@ impl OpolysNode {
             miner_id: miner_id.clone(),
             signing_key,
             pending_slash_evidence: Arc::new(RwLock::new(Vec::new())),
+            pending_attestations: Arc::new(RwLock::new(HashMap::new())),
             refiner_peers: Arc::new(RwLock::new(HashMap::new())),
             banned_peers: Arc::new(RwLock::new(banned_peers)),
             outbound_peers: Arc::new(RwLock::new(HashSet::new())),
@@ -713,6 +719,129 @@ impl OpolysNode {
             }
         }
         false
+    }
+
+    /// Create a signed attestation for a block this node has accepted.
+    ///
+    /// Only active refiners with a local key sign attestations. Miners and
+    /// non-active refiners return None.
+    pub async fn create_block_attestation(
+        &self,
+        height: u64,
+        block_hash: &Hash,
+    ) -> Option<BlockAttestation> {
+        let signing_key = self.signing_key.as_ref()?;
+        {
+            let refiners = self.refiners.read().await;
+            let refiner = refiners.get_refiner(&self.miner_id)?;
+            if refiner.status != RefinerStatus::Active {
+                return None;
+            }
+        }
+
+        let payload = block_attestation_signing_payload(height, block_hash);
+        let signature: ed25519_dalek::Signature = signing_key.sign(&payload);
+        Some(BlockAttestation {
+            refiner: self.miner_id.clone(),
+            refiner_pubkey: signing_key.verifying_key().as_bytes().to_vec(),
+            height,
+            block_hash: block_hash.clone(),
+            signature: signature.to_bytes().to_vec(),
+        })
+    }
+
+    /// Verify and store a received refiner block attestation.
+    ///
+    /// Returns Ok(true) when a new attestation was accepted, Ok(false) when it
+    /// was valid but already known, and Err for invalid or non-canonical data.
+    pub async fn accept_block_attestation(
+        &self,
+        attestation: BlockAttestation,
+    ) -> Result<bool, String> {
+        if attestation.refiner_pubkey.len() != 32 {
+            return Err("Attestation public key must be 32 bytes".to_string());
+        }
+        if attestation.signature.len() != 64 {
+            return Err("Attestation signature must be 64 bytes".to_string());
+        }
+
+        let pk_arr: [u8; 32] = attestation
+            .refiner_pubkey
+            .as_slice()
+            .try_into()
+            .map_err(|_| "Attestation public key must be 32 bytes".to_string())?;
+        let expected_refiner = opolys_crypto::ed25519_public_key_to_object_id(&pk_arr);
+        if expected_refiner != attestation.refiner {
+            return Err("Attestation public key does not match refiner ObjectId".to_string());
+        }
+
+        {
+            let refiners = self.refiners.read().await;
+            let refiner = refiners
+                .get_refiner(&attestation.refiner)
+                .ok_or_else(|| "Attestation refiner is not bonded".to_string())?;
+            if refiner.status != RefinerStatus::Active {
+                return Err("Attestation refiner is not active".to_string());
+            }
+        }
+
+        let canonical_hash = if attestation.height == self.chain.read().await.current_height {
+            self.chain.read().await.latest_block_hash.clone()
+        } else if let Some(store) = &self.store {
+            let block = store
+                .load_block(attestation.height)
+                .map_err(|e| format!("Failed to load attested block: {}", e))?
+                .ok_or_else(|| "Attested block is not known locally".to_string())?;
+            compute_block_hash(&block.header)
+        } else {
+            return Err("Cannot verify historical attestation without storage".to_string());
+        };
+        if canonical_hash != attestation.block_hash {
+            return Err("Attestation block hash is not canonical".to_string());
+        }
+
+        let payload =
+            block_attestation_signing_payload(attestation.height, &attestation.block_hash);
+        if !opolys_crypto::verify_ed25519(
+            &attestation.refiner_pubkey,
+            &payload,
+            &attestation.signature,
+        ) {
+            return Err("Attestation signature verification failed".to_string());
+        }
+
+        let current_height = self.chain.read().await.current_height;
+        let min_height = current_height.saturating_sub(EPOCH);
+        let key = (attestation.height, attestation.refiner.to_hex());
+        let mut pending = self.pending_attestations.write().await;
+        pending.retain(|(height, _), _| *height >= min_height);
+        if pending.contains_key(&key) {
+            return Ok(false);
+        }
+        pending.insert(key, attestation);
+        Ok(true)
+    }
+
+    /// Drain collected attestations for inclusion in a newly produced block.
+    async fn drain_pending_attestations_for_block(
+        &self,
+        next_height: u64,
+    ) -> Vec<BlockAttestation> {
+        let min_height = next_height.saturating_sub(EPOCH);
+        let mut pending = self.pending_attestations.write().await;
+        pending.retain(|(height, _), _| *height >= min_height && *height < next_height);
+        let keys: Vec<(u64, String)> = pending
+            .keys()
+            .take(MAX_ATTESTATIONS_PER_BLOCK)
+            .cloned()
+            .collect();
+        let mut attestations = Vec::with_capacity(keys.len());
+        for key in keys {
+            if let Some(attestation) = pending.remove(&key) {
+                attestations.push(attestation);
+            }
+        }
+        attestations
     }
 
     /// Return true if `peer_id_str` is currently banned (permanent or unexpired temp ban).
@@ -816,11 +945,12 @@ impl OpolysNode {
         );
 
         let difficulty = diff_target.effective_difficulty();
+        let next_height = chain.current_height + 1;
 
         // Build the block header with all new fields
         let header = BlockHeader {
             version: BLOCK_VERSION,
-            height: chain.current_height + 1,
+            height: next_height,
             previous_hash: chain.latest_block_hash.clone(),
             state_root: chain.state_root.clone(),
             transaction_root,
@@ -841,6 +971,7 @@ impl OpolysNode {
             let mut pending = self.pending_slash_evidence.write().await;
             std::mem::take(&mut *pending)
         };
+        let pending_attestations = self.drain_pending_attestations_for_block(next_height).await;
 
         drop(chain);
         drop(accounts);
@@ -850,6 +981,7 @@ impl OpolysNode {
         let mut ctx = self.pow_context.write().await;
         let mut block = ctx.mine_parallel(header, difficulty, max_attempts, 0)?;
         block.slash_evidence = pending_evidence;
+        block.attestations = pending_attestations;
         Some(block)
     }
 
@@ -916,11 +1048,12 @@ impl OpolysNode {
             bonded_stake,
         );
         let difficulty = diff_target.effective_difficulty();
+        let next_height = chain.current_height + 1;
 
         // Build the block header (no PoW proof)
         let header = BlockHeader {
             version: BLOCK_VERSION,
-            height: chain.current_height + 1,
+            height: next_height,
             previous_hash: chain.latest_block_hash.clone(),
             state_root: chain.state_root.clone(),
             transaction_root,
@@ -941,6 +1074,7 @@ impl OpolysNode {
             let mut pending = self.pending_slash_evidence.write().await;
             std::mem::take(&mut *pending)
         };
+        let pending_attestations = self.drain_pending_attestations_for_block(next_height).await;
 
         // Compute the block hash and sign it with the refiner's ed25519 key
         let block_hash = compute_block_hash(&header);
@@ -955,6 +1089,7 @@ impl OpolysNode {
             },
             transactions,
             slash_evidence: pending_evidence,
+            attestations: pending_attestations,
             genesis_ceremony: None,
         };
 
@@ -1500,6 +1635,14 @@ mod tests {
         accounts.get_account_mut(&node.miner_id).unwrap().public_key = Some(public_key);
     }
 
+    async fn activate_test_refiner(node: &OpolysNode) {
+        let mut refiners = node.refiners.write().await;
+        refiners
+            .bond(node.miner_id.clone(), MIN_BOND_STAKE, 0, 0)
+            .unwrap();
+        refiners.activate(&node.miner_id, 1).unwrap();
+    }
+
     fn write_test_genesis_attestation(dir: &tempfile::TempDir, base_reward_flakes: u64) -> String {
         let signing_key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
         let operator_public_key = hex::encode(signing_key.verifying_key().as_bytes());
@@ -1768,6 +1911,50 @@ mod tests {
             "Re-applying a previously valid block must be rejected"
         );
         assert_eq!(node.chain.read().await.current_height, 1);
+    }
+
+    #[tokio::test]
+    async fn active_refiner_creates_and_accepts_block_attestation() {
+        let (config, _dir) = test_config();
+        let node = OpolysNode::new(config);
+        register_test_miner_account(&node).await;
+        activate_test_refiner(&node).await;
+
+        let block_hash = node.chain.read().await.latest_block_hash.clone();
+        let attestation = node
+            .create_block_attestation(0, &block_hash)
+            .await
+            .expect("active refiner should sign attestations");
+
+        assert_eq!(attestation.refiner, node.miner_id);
+        assert_eq!(attestation.height, 0);
+        assert_eq!(attestation.block_hash, block_hash);
+
+        assert!(
+            node.accept_block_attestation(attestation.clone())
+                .await
+                .unwrap()
+        );
+        assert!(!node.accept_block_attestation(attestation).await.unwrap());
+        assert_eq!(node.pending_attestations.read().await.len(), 1);
+
+        let included = node.drain_pending_attestations_for_block(1).await;
+        assert_eq!(included.len(), 1);
+        assert_eq!(node.pending_attestations.read().await.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn inactive_refiner_does_not_create_block_attestation() {
+        let (config, _dir) = test_config();
+        let node = OpolysNode::new(config);
+        register_test_miner_account(&node).await;
+
+        let block_hash = node.chain.read().await.latest_block_hash.clone();
+        assert!(
+            node.create_block_attestation(0, &block_hash)
+                .await
+                .is_none()
+        );
     }
 
     /// Supply accounting invariant: total_issued - total_burned == sum(account balances)
