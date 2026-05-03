@@ -191,7 +191,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     warn_if_insecure_rpc_url(&cli.rpc_url);
     match cli.command {
         Command::New { account } => {
-            let mnemonic = Bip39Mnemonic::generate();
+            let mnemonic = Bip39Mnemonic::generate()?;
             let phrase = mnemonic.phrase();
             eprintln!("Mnemonic (24 words):");
             eprintln!("{}", phrase);

@@ -51,10 +51,11 @@ impl fmt::Debug for Bip39Mnemonic {
 
 impl Bip39Mnemonic {
     /// Generate a new random 24-word mnemonic (256 bits of entropy).
-    pub fn generate() -> Self {
-        let inner =
-            bip39::Mnemonic::generate(MNEMONIC_WORDS).expect("Failed to generate 24-word mnemonic");
-        Bip39Mnemonic { inner }
+    pub fn generate() -> Result<Self, WalletError> {
+        let inner = bip39::Mnemonic::generate(MNEMONIC_WORDS).map_err(|e| {
+            WalletError::KeyGeneration(format!("Mnemonic generation failed: {}", e))
+        })?;
+        Ok(Bip39Mnemonic { inner })
     }
 
     /// Parse and validate an existing mnemonic phrase.
@@ -260,13 +261,13 @@ mod tests {
 
     #[test]
     fn generate_mnemonic() {
-        let mnemonic = Bip39Mnemonic::generate();
+        let mnemonic = Bip39Mnemonic::generate().expect("Should generate mnemonic");
         assert_eq!(mnemonic.words().len(), MNEMONIC_WORDS);
     }
 
     #[test]
     fn mnemonic_phrase_roundtrip() {
-        let mnemonic = Bip39Mnemonic::generate();
+        let mnemonic = Bip39Mnemonic::generate().expect("Should generate mnemonic");
         let phrase = mnemonic.phrase();
         let restored = Bip39Mnemonic::from_words(&phrase).expect("Should restore mnemonic");
         assert_eq!(restored.phrase(), phrase);
@@ -274,7 +275,7 @@ mod tests {
 
     #[test]
     fn debug_redacts_mnemonic_and_seed() {
-        let mnemonic = Bip39Mnemonic::generate();
+        let mnemonic = Bip39Mnemonic::generate().expect("Should generate mnemonic");
         let phrase = mnemonic.phrase();
         let seed = mnemonic.to_seed("");
 
@@ -289,7 +290,7 @@ mod tests {
 
     #[test]
     fn seed_determinism() {
-        let mnemonic = Bip39Mnemonic::generate();
+        let mnemonic = Bip39Mnemonic::generate().expect("Should generate mnemonic");
         let seed1 = mnemonic.to_seed("");
         let seed2 = mnemonic.to_seed("");
         assert_eq!(seed1.as_bytes(), seed2.as_bytes());
@@ -297,7 +298,7 @@ mod tests {
 
     #[test]
     fn different_passphrases_produce_different_seeds() {
-        let mnemonic = Bip39Mnemonic::generate();
+        let mnemonic = Bip39Mnemonic::generate().expect("Should generate mnemonic");
         let seed1 = mnemonic.to_seed("");
         let seed2 = mnemonic.to_seed("extra-passphrase");
         assert_ne!(seed1.as_bytes(), seed2.as_bytes());
@@ -305,7 +306,7 @@ mod tests {
 
     #[test]
     fn derive_keypair_deterministic() {
-        let mnemonic = Bip39Mnemonic::generate();
+        let mnemonic = Bip39Mnemonic::generate().expect("Should generate mnemonic");
         let seed = mnemonic.to_seed("");
         let key1 = seed.derive_keypair(0);
         let key2 = seed.derive_keypair(0);
@@ -314,7 +315,7 @@ mod tests {
 
     #[test]
     fn derive_different_accounts() {
-        let mnemonic = Bip39Mnemonic::generate();
+        let mnemonic = Bip39Mnemonic::generate().expect("Should generate mnemonic");
         let seed = mnemonic.to_seed("");
         let key0 = seed.derive_keypair(0);
         let key1 = seed.derive_keypair(1);
@@ -323,7 +324,7 @@ mod tests {
 
     #[test]
     fn derive_classical_keypair_deterministic() {
-        let mnemonic = Bip39Mnemonic::generate();
+        let mnemonic = Bip39Mnemonic::generate().expect("Should generate mnemonic");
         let seed = mnemonic.to_seed("");
         let key1 = seed.derive_classical_keypair(0);
         let key2 = seed.derive_classical_keypair(0);
@@ -340,7 +341,7 @@ mod tests {
 
     #[test]
     fn slip10_derivation_produces_valid_ed25519_keys() {
-        let mnemonic = Bip39Mnemonic::generate();
+        let mnemonic = Bip39Mnemonic::generate().expect("Should generate mnemonic");
         let seed = mnemonic.to_seed("");
         let key = seed.derive_keypair(0);
         let msg = b"test message";

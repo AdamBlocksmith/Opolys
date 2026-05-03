@@ -1251,8 +1251,8 @@ Challenge hashes now include both challenger and responder PeerId bytes in the E
 
 #### L9: Bip39Mnemonic::generate() panics on entropy failure
 **Location:** `wallet/bip39.rs:47-48`
-**Status:** OPEN
-`.expect()` on OsRng can panic. Change return type to `Result<Self, WalletError>`.
+**Status:** **FIXED**
+`Bip39Mnemonic::generate()` now returns `Result<Self, WalletError>` and `opl new` propagates entropy failures instead of panicking.
 
 #### ~~L10: Stale comments say 1,024 blocks/epoch~~ — **FIXD** (07da54b)
 **Location:** `difficulty.rs`, `refiner.rs`, `pow.rs`, `constants.rs`
@@ -1326,7 +1326,7 @@ All comments updated from "1,024 blocks/epoch" to "960 blocks/epoch". Test param
 43. DONE L6: Add SLIP-0010 reference test vectors
 44. L7: Raise gossip max message to match `MAX_BLOCK_SIZE_BYTES`
 45. DONE L8: Challenge protocol bind to PeerId
-46. L9: `Bip39Mnemonic::generate()` → return `Result`
+46. DONE L9: `Bip39Mnemonic::generate()` -> return `Result`
 47. L10: Update stale comments saying 1,024 blocks/epoch → 960
 
 ### Phase G: Pass 2 (After Pass 1 is tested and working)
