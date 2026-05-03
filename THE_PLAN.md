@@ -30,8 +30,10 @@ This document is the single source of truth for the entire project.
 21. [Test Count](#21-test-count)
 22. [Block & Transaction Validation](#22-block--transaction-validation)
 23. [Key Formulas Reference](#key-formulas-reference)
-24. [Security Audit & Bug Tracker](#24-security-audit--bug-tracker)
-25. [Implementation Plan — Pass 1](#25-implementation-plan--pass-1)
+24. [Launch Audit Sequence](#24-launch-audit-sequence)
+25. [Security Audit & Bug Tracker](#25-security-audit--bug-tracker)
+26. [Implementation Plan — Pass 1](#26-implementation-plan--pass-1)
+27. [Recent Changes](#27-recent-changes)
 
 ---
 
@@ -905,7 +907,33 @@ EVO-OMAP boundary byte order is little-endian: Opolys serializes the mining head
 
 ---
 
-## 24. Security Audit & Bug Tracker
+## 24. Launch Audit Sequence
+
+This is the mainnet readiness order from here forward. Each area should be reviewed in this sequence, with code, docs, and tests updated before moving to the next area.
+
+1. **Genesis Ceremony** — Validate data sources, manual fallback evidence, master hash, operator signature, ceremony output, verifier command, and node compatibility.
+2. **Chain Identity** — Verify mainnet-only behavior, chain id, genesis hash, data directories, restart behavior, and fork protection.
+3. **Consensus** — Review block validity, PoW, difficulty adjustment, emissions, supply accounting, producer signatures, and refiner-block finality.
+4. **Storage** — Check RocksDB layout, atomic writes, checksums, restart recovery, corruption handling, and migration risk.
+5. **Networking** — Review peer identity, bootstrapping, sync ranges, peer bans, DoS limits, and max message sizes.
+6. **RPC** — Recheck auth, CORS, body limits, public/private method split, and wallet/mining exposure.
+7. **Wallet** — Review mnemonic safety, key files, signing, HTTPS behavior, import/export, and user footguns.
+8. **Execution** — Verify transaction validation, transfers, burns, staking/refiner actions, overflow/underflow handling, and fee handling.
+9. **Economics** — Reconcile base reward, gold production analogy, supply model, fees, burn/refiner incentives, vein yield, and edge cases.
+10. **CLI / Operator UX** — Check launch commands, config defaults, unsafe flags, logs, errors, and docs.
+11. **Launch Rehearsal** — Run fresh ceremony -> fresh node -> restart -> mine -> sync -> wallet transaction -> persistence check.
+12. **Public Documentation** — Clean up whitepaper, README, launch guide, verification guide, and threat model.
+
+### Parked Items To Revisit
+
+- **Opolys byte order outside the EVO boundary** — EVO-OMAP integration now uses little-endian at the boundary, but Opolys canonical hashes and some block-header serialization choices should get a dedicated consensus review before launch.
+- **Attestation finality UX** — Attestations are now refiner-block only. Public docs and RPC examples should make clear that mined blocks are secured by PoW, not refiner attestation.
+- **Manual genesis fallback** — Manual entries are only for source outage recovery. The final dry run should prove automatic source fetching works; if it works reliably, manual fallback remains emergency-only.
+- **Whitepaper repair** — Treat the whitepaper as concept guidance, not current protocol truth, until it is rewritten to match the code and README.
+
+---
+
+## 25. Security Audit & Bug Tracker
 
 Every bug below includes: **What it is**, **Why it matters**, and **How to fix it**.
 
@@ -1267,7 +1295,7 @@ All comments updated from "1,024 blocks/epoch" to "960 blocks/epoch". Test param
 
 ---
 
-## 25. Implementation Plan — Pass 1
+## 26. Implementation Plan — Pass 1
 
 ### Phase A: Rename — ✓ DONE (commit ec0df9b)
 
@@ -1348,7 +1376,7 @@ All comments updated from "1,024 blocks/epoch" to "960 blocks/epoch". Test param
 
 ---
 
-## 26. Recent Changes
+## 27. Recent Changes
 
 ### ec0df9b — Refiner Rename & Protocol Simplification (Phase A)
 
