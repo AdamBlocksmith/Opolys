@@ -261,9 +261,9 @@ pub struct ChainState {
     /// Mainnet: read from the genesis ceremony attestation.
     /// Pre-ceremony development builds fall back to the BASE_REWARD constant (332 OPL).
     pub base_reward: FlakeAmount,
-    /// Height of the most recently finalized block (cannot be reverted).
-    /// Placeholder: always 0 until finality is implemented via attestations (Pass 2).
-    /// When finalized_height == 0, no block is considered finalized.
+    /// Height of the most recently finalized block.
+    /// Advances only when later on-chain attestations reach
+    /// `FINALITY_CONFIDENCE_MILLI` of active refiner weight.
     pub finalized_height: u64,
 }
 
@@ -314,7 +314,6 @@ impl ChainState {
                 BASE_REWARD
             },
             finalized_height: p.finalized_height,
-            // finalized_height reconstructed from block history; safe to start at 0
         }
     }
 
@@ -1176,6 +1175,83 @@ impl OpolysNode {
         Ok(())
     }
 
+    fn active_refiner_weight_milli_threshold(refiners: &RefinerSet, timestamp: u64) -> u128 {
+        let total_active_weight: u128 = refiners
+            .all_refiners()
+            .into_iter()
+            .filter(|refiner| refiner.status == RefinerStatus::Active)
+            .map(|refiner| refiner.weight(timestamp) as u128)
+            .sum();
+
+        (total_active_weight * FINALITY_CONFIDENCE_MILLI as u128).div_ceil(1000)
+    }
+
+    fn finalized_height_from_attestation_weights(
+        current_finalized_height: u64,
+        finality_weights: HashMap<u64, u128>,
+        finality_threshold: u128,
+    ) -> u64 {
+        if finality_threshold == 0 {
+            return current_finalized_height;
+        }
+
+        finality_weights
+            .into_iter()
+            .filter_map(|(height, weight)| {
+                (height > current_finalized_height && weight >= finality_threshold)
+                    .then_some(height)
+            })
+            .max()
+            .unwrap_or(current_finalized_height)
+    }
+
+    fn cumulative_attestation_weight_for_block(
+        target_height: u64,
+        target_hash: &Hash,
+        current_tip_height: u64,
+        current_block: &Block,
+        store: Option<&BlockchainStore>,
+        refiners: &RefinerSet,
+        timestamp: u64,
+    ) -> Result<(usize, u128), String> {
+        let mut seen_refiners: HashSet<ObjectId> = HashSet::new();
+        let mut weight: u128 = 0;
+
+        let mut record = |attestation: &BlockAttestation| {
+            if attestation.height != target_height || &attestation.block_hash != target_hash {
+                return;
+            }
+            if !seen_refiners.insert(attestation.refiner.clone()) {
+                return;
+            }
+            if let Some(refiner) = refiners.get_refiner(&attestation.refiner) {
+                if refiner.status == RefinerStatus::Active {
+                    weight = weight.saturating_add(refiner.weight(timestamp) as u128);
+                }
+            }
+        };
+
+        if let Some(store) = store {
+            for height in target_height.saturating_add(1)..=current_tip_height {
+                let Some(block) = store
+                    .load_block(height)
+                    .map_err(|e| format!("Failed to load attestation block: {}", e))?
+                else {
+                    break;
+                };
+                for attestation in &block.attestations {
+                    record(attestation);
+                }
+            }
+        }
+
+        for attestation in &current_block.attestations {
+            record(attestation);
+        }
+
+        Ok((seen_refiners.len(), weight))
+    }
+
     /// Apply a mined or received block to the chain state.
     ///
     /// This is the core state transition function:
@@ -1242,6 +1318,9 @@ impl OpolysNode {
 
         let mut processed_attestation_keys: std::collections::HashSet<(u64, String)> =
             std::collections::HashSet::new();
+        let finality_threshold =
+            Self::active_refiner_weight_milli_threshold(&refiners, block.header.timestamp);
+        let mut finality_candidates: HashMap<u64, Hash> = HashMap::new();
         for attestation in &block.attestations {
             if attestation.height >= block.header.height {
                 return Err(format!(
@@ -1273,7 +1352,39 @@ impl OpolysNode {
                 &canonical_hash,
                 &refiners,
             )?;
+            finality_candidates
+                .entry(attestation.height)
+                .or_insert(canonical_hash);
             refiners.record_correct_attestation(&attestation.refiner)?;
+        }
+
+        let mut finality_weights: HashMap<u64, u128> = HashMap::new();
+        for (height, hash) in finality_candidates {
+            let (_count, weight) = Self::cumulative_attestation_weight_for_block(
+                height,
+                &hash,
+                chain.current_height,
+                block,
+                self.store.as_deref(),
+                &refiners,
+                block.header.timestamp,
+            )?;
+            finality_weights.insert(height, weight);
+        }
+
+        let newly_finalized_height = Self::finalized_height_from_attestation_weights(
+            chain.finalized_height,
+            finality_weights,
+            finality_threshold,
+        );
+        if newly_finalized_height > chain.finalized_height {
+            tracing::info!(
+                old_finalized_height = chain.finalized_height,
+                new_finalized_height = newly_finalized_height,
+                threshold_weight = finality_threshold,
+                "Finalized height advanced from refiner attestations"
+            );
+            chain.finalized_height = newly_finalized_height;
         }
 
         // Verify Refiner signature if present
@@ -2099,6 +2210,49 @@ mod tests {
                 .unwrap()
                 .consecutive_correct_attestations,
             1
+        );
+    }
+
+    #[test]
+    fn finality_threshold_requires_two_thirds_active_weight() {
+        let mut refiners = RefinerSet::new();
+        let a = opolys_crypto::hash_to_object_id(b"a");
+        let b = opolys_crypto::hash_to_object_id(b"b");
+        refiners.bond(a.clone(), MIN_BOND_STAKE, 0, 0).unwrap();
+        refiners.bond(b.clone(), MIN_BOND_STAKE, 0, 0).unwrap();
+        refiners.activate(&a, 1).unwrap();
+        refiners.activate(&b, 1).unwrap();
+
+        assert_eq!(
+            OpolysNode::active_refiner_weight_milli_threshold(&refiners, 0),
+            1_334_000
+        );
+    }
+
+    #[test]
+    fn finalized_height_advances_only_past_threshold_and_never_regresses() {
+        let mut weights = HashMap::new();
+        weights.insert(1, 666);
+        weights.insert(2, 667);
+        weights.insert(3, 900);
+
+        assert_eq!(
+            OpolysNode::finalized_height_from_attestation_weights(1, weights, 667),
+            3
+        );
+
+        let mut stale_weights = HashMap::new();
+        stale_weights.insert(1, 1_000);
+        assert_eq!(
+            OpolysNode::finalized_height_from_attestation_weights(2, stale_weights, 667),
+            2
+        );
+
+        let mut no_threshold = HashMap::new();
+        no_threshold.insert(5, 1_000);
+        assert_eq!(
+            OpolysNode::finalized_height_from_attestation_weights(2, no_threshold, 0),
+            2
         );
     }
 
