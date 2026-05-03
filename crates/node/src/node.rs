@@ -261,8 +261,8 @@ pub struct ChainState {
     /// Mainnet: read from the genesis ceremony attestation.
     /// Pre-ceremony development builds fall back to the BASE_REWARD constant (332 OPL).
     pub base_reward: FlakeAmount,
-    /// Height of the most recently finalized block.
-    /// Advances only when later on-chain attestations reach
+    /// Height of the most recently finalized refiner-produced block.
+    /// Advances only when later on-chain refiner-block attestations reach
     /// `FINALITY_CONFIDENCE_MILLI` of active refiner weight.
     pub finalized_height: u64,
 }
@@ -738,6 +738,15 @@ impl OpolysNode {
             }
         }
 
+        let store = self.store.as_ref()?;
+        let block = store.load_block(height).ok()??;
+        if compute_block_hash(&block.header) != *block_hash {
+            return None;
+        }
+        if block.header.refiner_signature.is_none() || block.header.pow_proof.is_some() {
+            return None;
+        }
+
         let payload = block_attestation_signing_payload(height, block_hash);
         let signature: ed25519_dalek::Signature = signing_key.sign(&payload);
         Some(BlockAttestation {
@@ -784,17 +793,19 @@ impl OpolysNode {
             }
         }
 
-        let canonical_hash = if attestation.height == self.chain.read().await.current_height {
-            self.chain.read().await.latest_block_hash.clone()
-        } else if let Some(store) = &self.store {
-            let block = store
-                .load_block(attestation.height)
-                .map_err(|e| format!("Failed to load attested block: {}", e))?
-                .ok_or_else(|| "Attested block is not known locally".to_string())?;
-            compute_block_hash(&block.header)
-        } else {
-            return Err("Cannot verify historical attestation without storage".to_string());
+        let Some(store) = &self.store else {
+            return Err("Cannot verify attestation without storage".to_string());
         };
+        let canonical_block = store
+            .load_block(attestation.height)
+            .map_err(|e| format!("Failed to load attested block: {}", e))?
+            .ok_or_else(|| "Attested block is not known locally".to_string())?;
+        if canonical_block.header.refiner_signature.is_none()
+            || canonical_block.header.pow_proof.is_some()
+        {
+            return Err("Attestation target must be a refiner-produced block".to_string());
+        }
+        let canonical_hash = compute_block_hash(&canonical_block.header);
         if canonical_hash != attestation.block_hash {
             return Err("Attestation block hash is not canonical".to_string());
         }
@@ -1336,17 +1347,19 @@ impl OpolysNode {
                     attestation.height
                 ));
             }
-            let canonical_hash = if attestation.height == chain.current_height {
-                chain.latest_block_hash.clone()
-            } else if let Some(store) = &self.store {
-                let attested_block = store
-                    .load_block(attestation.height)
-                    .map_err(|e| format!("Failed to load attested block: {}", e))?
-                    .ok_or_else(|| "Attested block is not known locally".to_string())?;
-                compute_block_hash(&attested_block.header)
-            } else {
-                return Err("Cannot verify historical attestation without storage".to_string());
+            let Some(store) = &self.store else {
+                return Err("Cannot verify included attestation without storage".to_string());
             };
+            let attested_block = store
+                .load_block(attestation.height)
+                .map_err(|e| format!("Failed to load attested block: {}", e))?
+                .ok_or_else(|| "Attested block is not known locally".to_string())?;
+            if attested_block.header.refiner_signature.is_none()
+                || attested_block.header.pow_proof.is_some()
+            {
+                return Err("Attestation target must be a refiner-produced block".to_string());
+            }
+            let canonical_hash = compute_block_hash(&attested_block.header);
             Self::verify_block_attestation_against_refiners(
                 attestation,
                 &canonical_hash,
@@ -1835,6 +1848,37 @@ mod tests {
         refiners.activate(&node.miner_id, 1).unwrap();
     }
 
+    async fn produce_and_apply_test_refiner_block(node: &OpolysNode) -> (Block, Hash) {
+        {
+            let mut chain = node.chain.write().await;
+            chain.current_difficulty = MIN_DIFFICULTY;
+            if let Some(timestamp) = chain.block_timestamps.last_mut() {
+                *timestamp = 0;
+            }
+        }
+        let block = node
+            .produce_refiner_block()
+            .await
+            .expect("single active refiner should be selected");
+        let hash = node
+            .apply_block(&block)
+            .await
+            .expect("refiner block should apply");
+        (block, hash)
+    }
+
+    async fn produce_test_refiner_block(node: &OpolysNode) -> Block {
+        {
+            let mut chain = node.chain.write().await;
+            if let Some(timestamp) = chain.block_timestamps.last_mut() {
+                *timestamp = 0;
+            }
+        }
+        node.produce_refiner_block()
+            .await
+            .expect("single active refiner should be selected")
+    }
+
     fn write_test_genesis_attestation(dir: &tempfile::TempDir, base_reward_flakes: u64) -> String {
         let signing_key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
         let operator_public_key = hex::encode(signing_key.verifying_key().as_bytes());
@@ -2112,14 +2156,14 @@ mod tests {
         register_test_miner_account(&node).await;
         activate_test_refiner(&node).await;
 
-        let block_hash = node.chain.read().await.latest_block_hash.clone();
+        let (block, block_hash) = produce_and_apply_test_refiner_block(&node).await;
         let attestation = node
-            .create_block_attestation(0, &block_hash)
+            .create_block_attestation(block.header.height, &block_hash)
             .await
             .expect("active refiner should sign attestations");
 
         assert_eq!(attestation.refiner, node.miner_id);
-        assert_eq!(attestation.height, 0);
+        assert_eq!(attestation.height, block.header.height);
         assert_eq!(attestation.block_hash, block_hash);
 
         assert!(
@@ -2130,7 +2174,9 @@ mod tests {
         assert!(!node.accept_block_attestation(attestation).await.unwrap());
         assert_eq!(node.pending_attestations.read().await.len(), 1);
 
-        let included = node.drain_pending_attestations_for_block(1).await;
+        let included = node
+            .drain_pending_attestations_for_block(block.header.height + 1)
+            .await;
         assert_eq!(included.len(), 1);
         assert_eq!(node.pending_attestations.read().await.len(), 0);
     }
@@ -2150,6 +2196,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn active_refiner_does_not_attest_mined_block() {
+        let (config, _dir) = test_config();
+        let node = OpolysNode::new(config);
+        register_test_miner_account(&node).await;
+        activate_test_refiner(&node).await;
+        node.chain.write().await.current_difficulty = MIN_DIFFICULTY;
+
+        let mined_block = node
+            .mine_block(1_000_000)
+            .await
+            .expect("Should mine block 1");
+        let mined_hash = node
+            .apply_block(&mined_block)
+            .await
+            .expect("mined block should apply");
+
+        assert!(
+            node.create_block_attestation(mined_block.header.height, &mined_hash)
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
     async fn apply_block_rejects_invalid_included_attestation() {
         let (config, _dir) = test_config();
         let node = OpolysNode::new(config);
@@ -2157,17 +2227,14 @@ mod tests {
         activate_test_refiner(&node).await;
         node.chain.write().await.current_difficulty = MIN_DIFFICULTY;
 
-        let genesis_hash = node.chain.read().await.latest_block_hash.clone();
+        let (refiner_block, refiner_block_hash) = produce_and_apply_test_refiner_block(&node).await;
         let mut attestation = node
-            .create_block_attestation(0, &genesis_hash)
+            .create_block_attestation(refiner_block.header.height, &refiner_block_hash)
             .await
             .expect("active refiner should sign attestations");
         attestation.signature[0] ^= 0x01;
 
-        let mut block = node
-            .mine_block(1_000_000)
-            .await
-            .expect("Should mine block 1");
+        let mut block = produce_test_refiner_block(&node).await;
         block.attestations.push(attestation);
 
         let result = node.apply_block(&block).await;
@@ -2187,16 +2254,13 @@ mod tests {
         activate_test_refiner(&node).await;
         node.chain.write().await.current_difficulty = MIN_DIFFICULTY;
 
-        let genesis_hash = node.chain.read().await.latest_block_hash.clone();
+        let (refiner_block, refiner_block_hash) = produce_and_apply_test_refiner_block(&node).await;
         let attestation = node
-            .create_block_attestation(0, &genesis_hash)
+            .create_block_attestation(refiner_block.header.height, &refiner_block_hash)
             .await
             .expect("active refiner should sign attestations");
 
-        let mut block = node
-            .mine_block(1_000_000)
-            .await
-            .expect("Should mine block 1");
+        let mut block = produce_test_refiner_block(&node).await;
         block.attestations.push(attestation);
 
         node.apply_block(&block)

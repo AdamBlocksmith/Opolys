@@ -545,8 +545,8 @@ JSON-RPC 2.0 server on port 4171 (default: `listen_port + 1`).
 | `opl_getSupply` | _(none)_ | Issued, burned, and circulating breakdown |
 | `opl_getDifficulty` | _(none)_ | Current difficulty and retarget info |
 | `opl_getRefiners` | _(none)_ | Active refiner set with per-entry bond details |
-| `opl_getBlockConfidence` | `[height]` or `["block_hash_hex"]` | Refiner attestation confidence derived from later on-chain attestations |
-| `opl_getFinalizedHeight` | _(none)_ | Highest block finalized by at least 66.7% active refiner attestation weight |
+| `opl_getBlockConfidence` | `[height]` or `["block_hash_hex"]` | Refiner-block attestation confidence; mined blocks report PoW security |
+| `opl_getFinalizedHeight` | _(none)_ | Highest refiner-produced block finalized by at least 66.7% active refiner attestation weight |
 
 ### Write
 
@@ -807,7 +807,7 @@ Opolys implements layered P2P defenses to protect honest nodes from adversarial 
 - **Not scheduled** — no halvings, no emission calendar. Difficulty and rewards emerge from chain state.
 - **Not capped** — no maximum supply. OPL issuance naturally declines as difficulty rises, like real gold mining.
 - **Not reversible** — no reversal windows. Only double-signing gets slashed. Finality is final.
-- **Attestation finality** — blocks finalize after later on-chain attestations reach `FINALITY_CONFIDENCE_MILLI = 667` of active refiner weight.
+- **Refiner-block finality** — refiner-produced blocks finalize after later on-chain attestations reach `FINALITY_CONFIDENCE_MILLI = 667` of active refiner weight; mined blocks are secured by EVO-OMAP PoW.
 
 ---
 

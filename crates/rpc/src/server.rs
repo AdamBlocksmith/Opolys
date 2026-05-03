@@ -17,7 +17,7 @@
 //! - `opl_getSupply` — issued, burned, circulating supply breakdown
 //! - `opl_getDifficulty` — current difficulty + retarget info
 //! - `opl_getRefiners` — active refiner set with stakes and weights
-//! - `opl_getBlockConfidence` — on-chain refiner attestation confidence for a block
+//! - `opl_getBlockConfidence` — on-chain attestation confidence for refiner blocks
 //!
 //! # Write Endpoints (submit to chain)
 //!
@@ -578,6 +578,26 @@ async fn handle_get_block_confidence(
     let current_timestamp = chain.block_timestamps.last().copied().unwrap_or(0);
     drop(chain);
 
+    if target_block.header.refiner_signature.is_none() || target_block.header.pow_proof.is_some() {
+        return serde_json::to_value(BlockConfidenceResponse {
+            height: target_height,
+            block_hash: target_hash.to_hex(),
+            confirmations: current_height
+                .saturating_sub(target_height)
+                .saturating_add(1),
+            finalized: target_height <= finalized_height,
+            security_model: "pow".to_string(),
+            attestation_required: false,
+            attestation_count: 0,
+            attesting_weight: 0,
+            total_active_weight: 0,
+            confidence_milli: 0,
+            confidence_percent: "n/a".to_string(),
+            included_through_height: target_height,
+        })
+        .map_err(|e| JsonRpcError::internal_error(&e.to_string()));
+    }
+
     let mut included_attestations = Vec::new();
     let mut included_through_height = target_height;
 
@@ -609,6 +629,8 @@ async fn handle_get_block_confidence(
             .saturating_sub(target_height)
             .saturating_add(1),
         finalized: target_height <= finalized_height,
+        security_model: "refiner_attestation".to_string(),
+        attestation_required: true,
         attestation_count,
         attesting_weight: attesting_weight.min(u64::MAX as u128) as u64,
         total_active_weight: total_active_weight.min(u64::MAX as u128) as u64,
@@ -1135,6 +1157,8 @@ pub struct BlockConfidenceResponse {
     pub block_hash: String,
     pub confirmations: u64,
     pub finalized: bool,
+    pub security_model: String,
+    pub attestation_required: bool,
     pub attestation_count: usize,
     pub attesting_weight: u64,
     pub total_active_weight: u64,
@@ -1321,6 +1345,8 @@ mod tests {
             block_hash: Hash::zero().to_hex(),
             confirmations: 3,
             finalized: false,
+            security_model: "refiner_attestation".to_string(),
+            attestation_required: true,
             attestation_count: 2,
             attesting_weight: 250,
             total_active_weight: 1000,

@@ -370,15 +370,15 @@ Newly bonded refiners start in `Bonding` status. They activate to `Active` once 
 
 ### Attestations (Pass 2)
 
-Refiners sign block hashes using ed25519. Attestations are collected by the next block's producer and included in that block. Reliability is tracked as `consecutive_correct_attestations` per refiner for block confidence and liveness, not as a refiner reward multiplier.
+Refiners sign refiner-produced block hashes using ed25519. Miner-produced blocks stand on EVO-OMAP PoW and are not attestation targets. Refiner-block attestations are collected by later block producers and included on-chain. Reliability is tracked as `consecutive_correct_attestations` per refiner for liveness, not as a refiner reward multiplier.
 
 ```
 confidence_weight = stake × seniority
-final when attesting_weight ≥ active_refiner_weight × FINALITY_CONFIDENCE_MILLI / 1000
+refiner block final when attesting_weight ≥ active_refiner_weight × FINALITY_CONFIDENCE_MILLI / 1000
 FINALITY_CONFIDENCE_MILLI = 667
 ```
 
-Refiner rewards remain distributed by bonded stake and seniority only. Miners keep the vein-yield luck upside. Attestations feed block confidence and finality. `consecutive_correct_attestations` records liveness/reliability but is not currently a reward or finality multiplier.
+Refiner rewards remain distributed by bonded stake and seniority only. Miners keep the vein-yield luck upside. Attestations feed refiner-block confidence and refiner-block finality. `consecutive_correct_attestations` records liveness/reliability but is not currently a reward or finality multiplier.
 
 ---
 
@@ -601,7 +601,7 @@ JSON-RPC 2.0 server on port 4171 (default: listen_port + 1).
 | `opl_getChainInfo` | _(none)_ | Chain stats including `suggested_fee` |
 | `opl_getBalance` | `["object_id_hex"]` | Account balance |
 | `opl_getRefiners` | _(none)_ | Refiner set with FIFO bond entries |
-| `opl_getBlockConfidence` | `[height]` or `["block_hash_hex"]` | Refiner attestation confidence score |
+| `opl_getBlockConfidence` | `[height]` or `["block_hash_hex"]` | Refiner-block attestation confidence; mined blocks report PoW security |
 
 ### Write Endpoints
 
@@ -732,7 +732,7 @@ Opolys/
 | 10: Staking | **DONE** | `--refine`, 100% slash on double-sign, timeout-based refiner block production |
 | 11: Security | **DONE** | Eclipse protection, subnet diversity, DoS limits, memory challenge |
 | 12: Pass 1 | **IN PROGRESS** | Phase A DONE (ec0df9b), M19 DONE (2cf09c2), H3+H4 FIXED, L7+L10 FIXED, economic model (vein yield, assay, decay, two-state fees) DONE (07da54b). Phase B–E remaining security & protocol fixes |
-| 13: Pass 2 | **DONE** | Attestations, reliability score, block confidence, attestation finality |
+| 13: Pass 2 | **DONE** | Refiner-block attestations, reliability score, block confidence, attestation finality |
 | 14: Mainnet | **READY** | Genesis ceremony and launch (after dry-run validation) |
 
 ---
@@ -1344,7 +1344,7 @@ All comments updated from "1,024 blocks/epoch" to "960 blocks/epoch". Test param
 51. BY DESIGN: no attestation multiplier in refiner reward distribution
 52. DONE Block confidence score derived on-chain
 53. DONE `opl_getBlockConfidence` RPC endpoint
-54. DONE Attestation-weighted `finalized_height`
+54. DONE Refiner-block attestation-weighted `finalized_height`
 
 ---
 

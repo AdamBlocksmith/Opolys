@@ -236,11 +236,11 @@ pub const MAX_TRANSACTIONS_PER_BLOCK: usize = 10_000;
 /// Keeps signature verification bounded once attestation finality is enabled.
 pub const MAX_ATTESTATIONS_PER_BLOCK: usize = 1_024;
 
-/// Minimum active-refiner attestation weight required to finalize a block.
+/// Minimum active-refiner attestation weight required to finalize a refiner block.
 ///
 /// Expressed in milli-units: 667 = 66.7%, the standard 2/3+ Byzantine
-/// threshold. Finality only advances from attestations included on-chain in a
-/// later block; the tip is never finalized by its own production.
+/// threshold. Refiner-block finality only advances from attestations included
+/// on-chain in a later block; mined blocks are secured by EVO-OMAP PoW.
 pub const FINALITY_CONFIDENCE_MILLI: u64 = 667;
 
 /// Maximum serialized size (in bytes) of a single block including all transactions.
