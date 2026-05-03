@@ -120,6 +120,9 @@ pub struct RefinerInfo {
     /// Height of the most recent block this refiner signed, updated on
     /// each signature to track liveness.
     pub last_signed_height: u64,
+    /// Consecutive valid block attestations included on-chain for this refiner.
+    /// Reward weighting is introduced later; for now this records verified liveness.
+    pub consecutive_correct_attestations: u64,
 }
 
 impl RefinerInfo {
@@ -134,6 +137,7 @@ impl RefinerInfo {
             }],
             status: RefinerStatus::Bonding,
             last_signed_height: 0,
+            consecutive_correct_attestations: 0,
         }
     }
 
@@ -583,6 +587,21 @@ impl RefinerSet {
         self.cached_refiners.get(object_id)
     }
 
+    /// Record one verified on-chain attestation for an active refiner.
+    pub fn record_correct_attestation(&mut self, object_id: &ObjectId) -> Result<u64, String> {
+        let refiner = self
+            .cached_refiners
+            .get_mut(object_id)
+            .ok_or_else(|| "Attestation refiner not found".to_string())?;
+        if refiner.status != RefinerStatus::Active {
+            return Err("Attestation refiner is not active".to_string());
+        }
+        refiner.consecutive_correct_attestations =
+            refiner.consecutive_correct_attestations.saturating_add(1);
+        self.dirty_refiners.insert(object_id.clone());
+        Ok(refiner.consecutive_correct_attestations)
+    }
+
     /// Total stake across all Bonding, Waiting, and Active refiners. Used to
     /// compute stake coverage, which determines the PoW/refiner reward split.
     pub fn total_bonded_stake(&self) -> FlakeAmount {
@@ -965,6 +984,24 @@ mod tests {
 
         let burned = vs.slash_refiner(&id, 200).unwrap(); // idempotent
         assert_eq!(burned, 0);
+    }
+
+    #[test]
+    fn record_correct_attestation_increments_active_refiner() {
+        let mut vs = RefinerSet::new();
+        let id = test_id(b"attester");
+        vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0).unwrap();
+        vs.activate(&id, 1).unwrap();
+
+        assert_eq!(vs.record_correct_attestation(&id).unwrap(), 1);
+        assert_eq!(vs.record_correct_attestation(&id).unwrap(), 2);
+        assert!(vs.dirty_refiners.contains(&id));
+        assert_eq!(
+            vs.get_refiner(&id)
+                .unwrap()
+                .consecutive_correct_attestations,
+            2
+        );
     }
 
     #[test]

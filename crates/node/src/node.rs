@@ -1273,6 +1273,7 @@ impl OpolysNode {
                 &canonical_hash,
                 &refiners,
             )?;
+            refiners.record_correct_attestation(&attestation.refiner)?;
         }
 
         // Verify Refiner signature if present
@@ -2064,6 +2065,40 @@ mod tests {
             result
                 .unwrap_err()
                 .contains("Attestation signature verification failed")
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_block_counts_valid_included_attestation() {
+        let (config, _dir) = test_config();
+        let node = OpolysNode::new(config);
+        register_test_miner_account(&node).await;
+        activate_test_refiner(&node).await;
+        node.chain.write().await.current_difficulty = MIN_DIFFICULTY;
+
+        let genesis_hash = node.chain.read().await.latest_block_hash.clone();
+        let attestation = node
+            .create_block_attestation(0, &genesis_hash)
+            .await
+            .expect("active refiner should sign attestations");
+
+        let mut block = node
+            .mine_block(1_000_000)
+            .await
+            .expect("Should mine block 1");
+        block.attestations.push(attestation);
+
+        node.apply_block(&block)
+            .await
+            .expect("valid attestation should not reject the block");
+
+        let refiners = node.refiners.read().await;
+        assert_eq!(
+            refiners
+                .get_refiner(&node.miner_id)
+                .unwrap()
+                .consecutive_correct_attestations,
+            1
         );
     }
 
