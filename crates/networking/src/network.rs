@@ -35,6 +35,7 @@ use opolys_core::{DEFAULT_LISTEN_PORT, PING_INTERVAL_SECS, PING_TIMEOUT_SECS};
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -250,7 +251,15 @@ impl OpolysNetwork {
         .map_err(|e| format!("Gossipsub init error: {}", e))?;
 
         let store = MemoryStore::new(local_peer_id);
-        let kademlia_config = libp2p::kad::Config::new(StreamProtocol::new("/opolys/kad/1"));
+        let mut kademlia_config = libp2p::kad::Config::new(StreamProtocol::new("/opolys/kad/1"));
+        kademlia_config
+            .set_kbucket_size(
+                NonZeroUsize::new(config.discovery_config.bucket_size.max(1))
+                    .expect("Kademlia bucket size is clamped to at least 1"),
+            )
+            .set_query_timeout(Duration::from_secs(
+                config.discovery_config.query_timeout_secs,
+            ));
         let kademlia = libp2p::kad::Behaviour::with_config(local_peer_id, store, kademlia_config);
 
         let identify = libp2p::identify::Behaviour::new(

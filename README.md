@@ -645,7 +645,7 @@ m / 44' / 999' / account' / 0'
 | `KAD_BUCKET_SIZE` | 20 |
 | `PING_INTERVAL_SECS` | 30 |
 | `PING_TIMEOUT_SECS` | 20 |
-| `GOSSIP_MAX_MESSAGE_SIZE` | 5 MiB |
+| `GOSSIP_MAX_MESSAGE_SIZE` | 10 MiB |
 
 ---
 

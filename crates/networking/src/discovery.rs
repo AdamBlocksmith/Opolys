@@ -4,7 +4,7 @@
 //! from known peers and then use the DHT to discover additional peers
 //! on the network.
 
-use opolys_core::KAD_BUCKET_SIZE;
+use opolys_core::{KAD_BUCKET_SIZE, KAD_QUERY_TIMEOUT_SECS};
 
 /// Configuration for Kademlia DHT peer discovery.
 pub struct DiscoveryConfig {
@@ -18,7 +18,7 @@ impl Default for DiscoveryConfig {
     fn default() -> Self {
         DiscoveryConfig {
             bucket_size: KAD_BUCKET_SIZE,
-            query_timeout_secs: 60,
+            query_timeout_secs: KAD_QUERY_TIMEOUT_SECS,
         }
     }
 }

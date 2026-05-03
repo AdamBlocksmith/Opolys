@@ -1127,6 +1127,16 @@ Every bug below includes: **What it is**, **Why it matters**, and **How to fix i
 
 ---
 
+#### H12: P2P connection and discovery constants were not enforced
+**Location:** `main.rs:103-130`, `main.rs:1240-1280`, `network.rs:250-255`
+**Status:** **FIXED**
+
+**What it is:** `MAX_INBOUND_CONNECTIONS`, `MAX_OUTBOUND_CONNECTIONS`, `MAX_PEER_COUNT`, `KAD_BUCKET_SIZE`, and `KAD_QUERY_TIMEOUT_SECS` were documented as live networking limits, but only some were actually wired into runtime behavior.
+
+**How fixed:** Peer connection handling now refuses inbound, outbound, and total peer counts above their configured caps. The peer cache now validates multiaddrs, deduplicates entries, and bounds itself to `MAX_PEER_COUNT`. Kademlia now applies the configured bucket size and query timeout instead of relying on libp2p defaults.
+
+---
+
 ### MEDIUM (23 — 3 fixed, 2 by design)
 
 #### ~~M1: Graduated slashing~~ — **FIXD** (ec0df9b)

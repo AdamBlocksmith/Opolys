@@ -103,12 +103,18 @@ fn generate_rpc_api_key() -> Result<String, String> {
 fn load_known_peers(data_dir: &str) -> Vec<String> {
     let path = std::path::Path::new(data_dir).join(KNOWN_PEERS_FILE);
     match std::fs::read_to_string(&path) {
-        Ok(contents) => contents
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .map(String::from)
-            .collect(),
+        Ok(contents) => {
+            let mut seen = std::collections::HashSet::new();
+            contents
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .filter(|line| line.parse::<opolys_networking::Multiaddr>().is_ok())
+                .filter(|line| seen.insert((*line).to_string()))
+                .take(opolys_core::MAX_PEER_COUNT)
+                .map(String::from)
+                .collect()
+        }
         Err(_) => Vec::new(),
     }
 }
@@ -116,19 +122,30 @@ fn load_known_peers(data_dir: &str) -> Vec<String> {
 /// Append a successfully-dialed peer address to the cache file.
 /// Creates the file if it does not exist. Errors are logged and ignored.
 fn save_peer_to_cache(data_dir: &str, addr: &str) {
+    if addr.parse::<opolys_networking::Multiaddr>().is_err() {
+        tracing::debug!(addr, "Not caching invalid peer address");
+        return;
+    }
+
     let path = std::path::Path::new(data_dir).join(KNOWN_PEERS_FILE);
-    use std::io::Write;
-    match std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-    {
-        Ok(mut file) => {
-            if let Err(e) = writeln!(file, "{}", addr) {
-                tracing::debug!(error = %e, "Failed to write peer to cache");
-            }
+    let mut peers = load_known_peers(data_dir);
+    if peers.iter().any(|peer| peer == addr) {
+        return;
+    }
+    if peers.len() >= opolys_core::MAX_PEER_COUNT {
+        peers.remove(0);
+    }
+    peers.push(addr.to_string());
+
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            tracing::debug!(error = %e, "Failed to create peer cache directory");
+            return;
         }
-        Err(e) => tracing::debug!(error = %e, "Failed to open peer cache for writing"),
+    }
+    let contents = peers.join("\n") + "\n";
+    if let Err(e) = std::fs::write(&path, contents) {
+        tracing::debug!(error = %e, "Failed to write peer cache");
     }
 }
 
@@ -207,6 +224,33 @@ mod tests {
         ));
         assert!(!is_compatible_opolys_protocol("/opolys/0.0"));
         assert!(!is_compatible_opolys_protocol("not-opolys"));
+    }
+
+    #[test]
+    fn peer_cache_deduplicates_valid_addresses_and_drops_invalid() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(KNOWN_PEERS_FILE);
+        std::fs::write(
+            &path,
+            "/ip4/127.0.0.1/udp/4170/quic-v1\nbad-address\n/ip4/127.0.0.1/udp/4170/quic-v1\n",
+        )
+        .unwrap();
+
+        let peers = load_known_peers(&dir.path().to_string_lossy());
+        assert_eq!(peers, vec!["/ip4/127.0.0.1/udp/4170/quic-v1"]);
+    }
+
+    #[test]
+    fn peer_cache_rewrites_without_duplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().to_string_lossy();
+        let addr = "/ip4/127.0.0.1/udp/4170/quic-v1";
+
+        save_peer_to_cache(&data_dir, addr);
+        save_peer_to_cache(&data_dir, addr);
+
+        let peers = load_known_peers(&data_dir);
+        assert_eq!(peers, vec![addr]);
     }
 }
 
@@ -1246,10 +1290,34 @@ async fn handle_network_event(
                 return;
             }
 
+            let inbound_count = node.inbound_peers.read().await.len();
+            let outbound_count = node.outbound_peers.read().await.len();
+            let total_count = inbound_count.saturating_add(outbound_count);
+            if total_count >= opolys_core::MAX_PEER_COUNT {
+                tracing::warn!(
+                    peer = %peer_id,
+                    total = total_count,
+                    max = opolys_core::MAX_PEER_COUNT,
+                    "Refusing connection: max peer count reached"
+                );
+                let _ = net.disconnect_peer(peer_id).await;
+                return;
+            }
+
             // Subnet diversity: refuse if > MAX_PEERS_PER_SUBNET share the same /24.
             // addr is Some when we dialed them (outbound), None when they dialed us (inbound).
             match &addr {
                 Some(multiaddr) => {
+                    if outbound_count >= opolys_core::MAX_OUTBOUND_CONNECTIONS {
+                        tracing::warn!(
+                            peer = %peer_id,
+                            outbound = outbound_count,
+                            max = opolys_core::MAX_OUTBOUND_CONNECTIONS,
+                            "Refusing outbound connection: outbound peer cap reached"
+                        );
+                        let _ = net.disconnect_peer(peer_id).await;
+                        return;
+                    }
                     let addr_str = multiaddr.to_string();
                     if let Some(subnet) = extract_subnet_24(&addr_str) {
                         let count = subnet_counts.get(&subnet).copied().unwrap_or(0);
@@ -1271,6 +1339,16 @@ async fn handle_network_event(
                     save_peer_to_cache(data_dir, &addr_str);
                 }
                 None => {
+                    if inbound_count >= opolys_core::MAX_INBOUND_CONNECTIONS {
+                        tracing::warn!(
+                            peer = %peer_id,
+                            inbound = inbound_count,
+                            max = opolys_core::MAX_INBOUND_CONNECTIONS,
+                            "Refusing inbound connection: inbound peer cap reached"
+                        );
+                        let _ = net.disconnect_peer(peer_id).await;
+                        return;
+                    }
                     // Inbound: they initiated the connection to us
                     node.inbound_peers.write().await.insert(peer_id);
                 }
