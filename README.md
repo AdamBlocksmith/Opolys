@@ -563,6 +563,10 @@ JSON-RPC 2.0 server on port 4171 (default: `listen_port + 1`).
 | `opl_getMiningJob` | _(none)_ | Block template for external miners (includes `header_bytes`, `producer`, `target`) |
 | `opl_submitSolution` | `["borsh_hex_string"]` | Submit mined block |
 
+RPC request bodies are bounded, but the limit is large enough to carry one
+hex-encoded max-size block. Decoded transactions and blocks are still checked
+against their protocol byte limits before deserialization.
+
 ### Examples
 
 ```bash

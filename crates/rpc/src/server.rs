@@ -35,7 +35,7 @@
 use axum::{
     Json, Router,
     extract::{ConnectInfo, DefaultBodyLimit, State},
-    http::{HeaderMap, HeaderValue, StatusCode},
+    http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header},
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
@@ -44,7 +44,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use subtle::ConstantTimeEq;
 use tokio::sync::RwLock;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::CorsLayer;
 
 use opolys_consensus::account::AccountStore;
 use opolys_consensus::block::compute_block_hash;
@@ -62,7 +62,11 @@ use opolys_storage::BlockchainStore;
 use crate::jsonrpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse, RateLimiter};
 
 /// Maximum accepted JSON-RPC request body size.
-pub const MAX_RPC_REQUEST_BODY_BYTES: usize = 1_048_576;
+///
+/// `opl_submitSolution` carries a hex-encoded block inside JSON, so the outer
+/// HTTP body must fit roughly 2x `MAX_BLOCK_SIZE_BYTES` plus envelope overhead.
+/// Method handlers still enforce decoded tx/block limits before deserializing.
+pub const MAX_RPC_REQUEST_BODY_BYTES: usize = (MAX_BLOCK_SIZE_BYTES * 2) + 16_384;
 
 /// Simplified chain info snapshot for RPC responses.
 ///
@@ -223,6 +227,20 @@ pub async fn handle_jsonrpc(
     headers: HeaderMap,
     Json(req): Json<JsonRpcRequest>,
 ) -> (StatusCode, Json<JsonRpcResponse>) {
+    if req.jsonrpc != "2.0" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                result: None,
+                error: Some(JsonRpcError::invalid_request(
+                    "jsonrpc must be exactly \"2.0\"",
+                )),
+                id: req.id,
+            }),
+        );
+    }
+
     let ip = client_addr.ip().to_string();
     let (tier, max_per_min, needs_auth) = classify_method(&req.method);
 
@@ -1264,8 +1282,12 @@ pub fn build_router(state: RpcState) -> Router {
             HeaderValue::from_static("http://localhost:4171"),
             HeaderValue::from_static("http://127.0.0.1:4171"),
         ])
-        .allow_methods(Any)
-        .allow_headers(Any);
+        .allow_methods([Method::GET, Method::POST])
+        .allow_headers([
+            header::AUTHORIZATION,
+            header::CONTENT_TYPE,
+            HeaderName::from_static("x-api-key"),
+        ]);
 
     Router::new()
         .route("/rpc", post(handle_jsonrpc))
@@ -1497,5 +1519,11 @@ mod tests {
 
         let err = decode_verified_rpc_transaction(&encoded).unwrap_err();
         assert!(err.message.contains("Invalid transaction"));
+    }
+
+    #[test]
+    fn rpc_body_limit_fits_hex_encoded_max_block() {
+        assert!(MAX_RPC_REQUEST_BODY_BYTES > MAX_BLOCK_SIZE_BYTES * 2);
+        assert!(MAX_RPC_REQUEST_BODY_BYTES < (MAX_BLOCK_SIZE_BYTES * 2) + 65_536);
     }
 }

@@ -1147,6 +1147,26 @@ Every bug below includes: **What it is**, **Why it matters**, and **How to fix i
 
 ---
 
+#### H14: RPC body cap blocked valid block submissions
+**Location:** `rpc/server.rs:64-65`, `rpc/server.rs:1269`
+**Status:** **FIXED**
+
+**What it is:** The JSON-RPC HTTP body limit was 1 MiB, but `opl_submitSolution` submits a hex-encoded block. A valid max-size 10 MiB block can require just over 20 MiB of JSON request body, so the HTTP layer could reject valid mined blocks before method-level validation ran.
+
+**How fixed:** The outer JSON-RPC body cap now allows a hex-encoded `MAX_BLOCK_SIZE_BYTES` block plus JSON envelope overhead. Method handlers still enforce decoded transaction and block byte limits before Borsh deserialization.
+
+---
+
+#### H15: RPC envelope and CORS policy were too loose
+**Location:** `rpc/jsonrpc.rs`, `rpc/server.rs:224-265`, `rpc/server.rs:1260-1265`
+**Status:** **FIXED**
+
+**What it is:** The RPC handler accepted requests whose `jsonrpc` field was not exactly `"2.0"` after deserialization. CORS was origin-restricted, but still allowed any method and any header from approved origins.
+
+**How fixed:** RPC now rejects non-`"2.0"` envelopes with JSON-RPC `-32600 Invalid request`. CORS is narrowed to `GET`/`POST` and the headers Opolys actually uses: `Authorization`, `Content-Type`, and `X-Api-Key`.
+
+---
+
 ### MEDIUM (23 — 3 fixed, 2 by design)
 
 #### ~~M1: Graduated slashing~~ — **FIXD** (ec0df9b)
@@ -1208,7 +1228,7 @@ Replaced 10%/33%/100% graduated slash with 100% burn on any double-sign. No offe
 **What it is:** No limit on JSON-RPC request body size. Multi-gigabyte hex strings cause OOM.
 **How to fix:** Use Axum's `DefaultBodyLimit::max(1_048_576)` (1 MiB).
 
-**How fixed:** The JSON-RPC router now applies `DefaultBodyLimit::max(1_048_576)`, capping request bodies to 1 MiB by default.
+**How fixed:** The JSON-RPC router now applies `DefaultBodyLimit::max(MAX_RPC_REQUEST_BODY_BYTES)`, enough for a hex-encoded max-size block submission while still bounded. Method handlers enforce decoded transaction and block limits before deserialization.
 
 #### M10: Key file world-readable
 **Location:** `wallet/key.rs:190-193`

@@ -48,6 +48,7 @@ pub struct JsonRpcResponse {
 /// JSON-RPC error object with standard error codes.
 ///
 /// Opolys uses standard JSON-RPC error codes:
+/// - `-32600` Invalid request
 /// - `-32601` Method not found
 /// - `-32602` Invalid params
 /// - `-32603` Internal error
@@ -61,6 +62,14 @@ pub struct JsonRpcError {
 }
 
 impl JsonRpcError {
+    /// `-32600` — the request envelope is not a valid JSON-RPC 2.0 request.
+    pub fn invalid_request(msg: &str) -> Self {
+        JsonRpcError {
+            code: -32600,
+            message: msg.to_string(),
+        }
+    }
+
     /// `-32601` — the requested method does not exist.
     pub fn method_not_found() -> Self {
         JsonRpcError {
@@ -192,5 +201,12 @@ mod tests {
         let json = r#"{"jsonrpc":"2.0","method":"opl_getBalance","params":["abc123"],"id":2}"#;
         let req: JsonRpcRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.method, "opl_getBalance");
+    }
+
+    #[test]
+    fn invalid_request_error_uses_json_rpc_standard_code() {
+        let err = JsonRpcError::invalid_request("bad envelope");
+        assert_eq!(err.code, -32600);
+        assert_eq!(err.message, "bad envelope");
     }
 }
