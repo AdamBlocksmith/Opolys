@@ -1137,6 +1137,16 @@ Every bug below includes: **What it is**, **Why it matters**, and **How to fix i
 
 ---
 
+#### H13: RPC sendTransaction accepted unverified transactions into mempool
+**Location:** `rpc/server.rs:648-690`
+**Status:** **FIXED**
+
+**What it is:** `opl_sendTransaction` decoded a signed transaction and passed it directly to the mempool. The P2P path verified transaction ID, signature, and chain id before mempool insertion, but the RPC path did not.
+
+**How fixed:** RPC transaction submission now rejects oversized transaction bytes before deserialization, verifies transaction ID/signature/`MAINNET_CHAIN_ID` with the execution verifier, and only then inserts into the mempool. `opl_submitSolution` also rejects oversized block bytes before deserializing.
+
+---
+
 ### MEDIUM (23 — 3 fixed, 2 by design)
 
 #### ~~M1: Graduated slashing~~ — **FIXD** (ec0df9b)

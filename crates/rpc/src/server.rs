@@ -52,9 +52,11 @@ use opolys_consensus::difficulty::compute_next_difficulty;
 use opolys_consensus::mempool::Mempool;
 use opolys_consensus::refiner::RefinerSet;
 use opolys_core::{
-    Block, BlockAttestation, EPOCH, FLAKES_PER_OPL, FlakeAmount, Hash, MAX_ACTIVE_REFINERS,
-    ObjectId, RefinerStatus, Transaction,
+    Block, BlockAttestation, EPOCH, FLAKES_PER_OPL, FlakeAmount, Hash, MAINNET_CHAIN_ID,
+    MAX_ACTIVE_REFINERS, MAX_BLOCK_SIZE_BYTES, ObjectId, RefinerStatus, TX_MAX_SIZE_BYTES,
+    Transaction,
 };
+use opolys_execution::verify_transaction;
 use opolys_storage::BlockchainStore;
 
 use crate::jsonrpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse, RateLimiter};
@@ -648,10 +650,7 @@ async fn handle_send_transaction(
     params: &serde_json::Value,
 ) -> Result<serde_json::Value, JsonRpcError> {
     let hex_data = require_string_param(params, "data")?;
-    let bytes = hex::decode(&hex_data)
-        .map_err(|e| JsonRpcError::invalid_params(&format!("Invalid hex: {}", e)))?;
-    let tx: Transaction = borsh::from_slice(&bytes)
-        .map_err(|e| JsonRpcError::invalid_params(&format!("Invalid transaction: {}", e)))?;
+    let (tx, tx_size) = decode_verified_rpc_transaction(&hex_data)?;
 
     let tx_id = tx.tx_id.clone();
     let fee = tx.fee;
@@ -659,7 +658,7 @@ async fn handle_send_transaction(
 
     // Insert into mempool with priority based on fee/size ratio
     let priority = if fee > 0 {
-        fee as f64 / bytes.len().max(1) as f64
+        fee as f64 / tx_size.max(1) as f64
     } else {
         0.0
     };
@@ -693,6 +692,23 @@ async fn handle_send_transaction(
         status: "pending".to_string(),
     })
     .map_err(|e| JsonRpcError::internal_error(&e.to_string()))
+}
+
+fn decode_verified_rpc_transaction(hex_data: &str) -> Result<(Transaction, usize), JsonRpcError> {
+    let bytes = hex::decode(hex_data)
+        .map_err(|e| JsonRpcError::invalid_params(&format!("Invalid hex: {}", e)))?;
+    if bytes.len() > TX_MAX_SIZE_BYTES {
+        return Err(JsonRpcError::invalid_params(&format!(
+            "Transaction too large: {} bytes (max {})",
+            bytes.len(),
+            TX_MAX_SIZE_BYTES
+        )));
+    }
+    let tx: Transaction = borsh::from_slice(&bytes)
+        .map_err(|e| JsonRpcError::invalid_params(&format!("Invalid transaction: {}", e)))?;
+    verify_transaction(&tx, MAINNET_CHAIN_ID)
+        .map_err(|e| JsonRpcError::invalid_params(&format!("Invalid transaction: {}", e)))?;
+    Ok((tx, bytes.len()))
 }
 
 // ─── Mining endpoint handlers ──────────────────────────────────────
@@ -775,6 +791,13 @@ async fn handle_submit_solution(
     let hex_data = require_string_param(params, "block")?;
     let bytes = hex::decode(&hex_data)
         .map_err(|e| JsonRpcError::invalid_params(&format!("Invalid hex: {}", e)))?;
+    if bytes.len() > MAX_BLOCK_SIZE_BYTES {
+        return Err(JsonRpcError::invalid_params(&format!(
+            "Block too large: {} bytes (max {})",
+            bytes.len(),
+            MAX_BLOCK_SIZE_BYTES
+        )));
+    }
     let block: Block = borsh::from_slice(&bytes)
         .map_err(|e| JsonRpcError::invalid_params(&format!("Invalid block: {}", e)))?;
 
@@ -1449,5 +1472,30 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("x-api-key", "secret".parse().unwrap());
         assert!(!check_api_key(&headers, "secret-key"));
+    }
+
+    #[test]
+    fn rpc_transaction_decode_rejects_invalid_signature() {
+        let sender = opolys_crypto::hash_to_object_id(b"sender");
+        let recipient = opolys_crypto::hash_to_object_id(b"recipient");
+        let tx = Transaction {
+            tx_id: sender.clone(),
+            sender,
+            action: opolys_core::TransactionAction::Transfer {
+                recipient,
+                amount: 1,
+            },
+            fee: opolys_core::MIN_FEE,
+            signature: vec![0; 64],
+            signature_type: opolys_core::SIGNATURE_TYPE_ED25519,
+            nonce: 0,
+            chain_id: MAINNET_CHAIN_ID,
+            data: vec![],
+            public_key: vec![0; 32],
+        };
+        let encoded = hex::encode(borsh::to_vec(&tx).unwrap());
+
+        let err = decode_verified_rpc_transaction(&encoded).unwrap_err();
+        assert!(err.message.contains("Invalid transaction"));
     }
 }
