@@ -545,6 +545,7 @@ JSON-RPC 2.0 server on port 4171 (default: `listen_port + 1`).
 | `opl_getSupply` | _(none)_ | Issued, burned, and circulating breakdown |
 | `opl_getDifficulty` | _(none)_ | Current difficulty and retarget info |
 | `opl_getRefiners` | _(none)_ | Active refiner set with per-entry bond details |
+| `opl_getBlockConfidence` | `[height]` or `["block_hash_hex"]` | Refiner attestation confidence derived from later on-chain attestations |
 
 ### Write
 

@@ -1341,8 +1341,8 @@ All comments updated from "1,024 blocks/epoch" to "960 blocks/epoch". Test param
 49. DONE Attestation verification in `apply_block`
 50. DONE Reliability score: `consecutive_correct_attestations` in `RefinerInfo`
 51. BY DESIGN: no attestation multiplier in refiner reward distribution
-52. Block confidence score derived on-chain
-53. `opl_getBlockConfidence` RPC endpoint
+52. DONE Block confidence score derived on-chain
+53. DONE `opl_getBlockConfidence` RPC endpoint
 
 ---
 

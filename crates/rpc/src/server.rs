@@ -17,6 +17,7 @@
 //! - `opl_getSupply` — issued, burned, circulating supply breakdown
 //! - `opl_getDifficulty` — current difficulty + retarget info
 //! - `opl_getRefiners` — active refiner set with stakes and weights
+//! - `opl_getBlockConfidence` — on-chain refiner attestation confidence for a block
 //!
 //! # Write Endpoints (submit to chain)
 //!
@@ -38,6 +39,7 @@ use axum::{
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use subtle::ConstantTimeEq;
@@ -50,7 +52,8 @@ use opolys_consensus::difficulty::compute_next_difficulty;
 use opolys_consensus::mempool::Mempool;
 use opolys_consensus::refiner::RefinerSet;
 use opolys_core::{
-    Block, EPOCH, FLAKES_PER_OPL, FlakeAmount, Hash, MAX_ACTIVE_REFINERS, ObjectId, Transaction,
+    Block, EPOCH, FLAKES_PER_OPL, FlakeAmount, Hash, MAX_ACTIVE_REFINERS, ObjectId, RefinerStatus,
+    Transaction,
 };
 use opolys_storage::BlockchainStore;
 
@@ -270,6 +273,7 @@ pub async fn handle_jsonrpc(
         "opl_getSupply" => handle_get_supply(&state).await,
         "opl_getDifficulty" => handle_get_difficulty(&state).await,
         "opl_getRefiners" => handle_get_refiners(&state).await,
+        "opl_getBlockConfidence" => handle_get_block_confidence(&state, &req.params).await,
         "opl_getFinalizedHeight" => handle_get_finalized_height(&state).await,
         // ── Write endpoints ──
         "opl_sendTransaction" => handle_send_transaction(&state, &req.params).await,
@@ -560,6 +564,79 @@ async fn handle_get_refiners(state: &RpcState) -> Result<serde_json::Value, Json
     serde_json::to_value(result).map_err(|e| JsonRpcError::internal_error(&e.to_string()))
 }
 
+async fn handle_get_block_confidence(
+    state: &RpcState,
+    params: &serde_json::Value,
+) -> Result<serde_json::Value, JsonRpcError> {
+    let target_block = load_confidence_target_block(state, params)?;
+    let target_height = target_block.header.height;
+    let target_hash = compute_block_hash(&target_block.header);
+
+    let chain = state.chain.read().await;
+    let current_height = chain.height;
+    let finalized_height = chain.finalized_height;
+    let current_timestamp = chain.block_timestamps.last().copied().unwrap_or(0);
+    drop(chain);
+
+    let refiners = state.refiners.read().await;
+    let mut total_active_weight: u128 = 0;
+    for refiner in refiners.all_refiners() {
+        if refiner.status == RefinerStatus::Active {
+            total_active_weight =
+                total_active_weight.saturating_add(refiner.weight(current_timestamp) as u128);
+        }
+    }
+
+    let mut seen_refiners: HashSet<ObjectId> = HashSet::new();
+    let mut attesting_weight: u128 = 0;
+    let mut included_through_height = target_height;
+
+    for height in target_height.saturating_add(1)..=current_height {
+        let block = match state.store.load_block(height) {
+            Ok(Some(block)) => block,
+            Ok(None) => break,
+            Err(e) => return Err(JsonRpcError::internal_error(&e.to_string())),
+        };
+        included_through_height = height;
+        for attestation in &block.attestations {
+            if attestation.height != target_height || attestation.block_hash != target_hash {
+                continue;
+            }
+            if !seen_refiners.insert(attestation.refiner.clone()) {
+                continue;
+            }
+            if let Some(refiner) = refiners.get_refiner(&attestation.refiner) {
+                if refiner.status == RefinerStatus::Active {
+                    attesting_weight =
+                        attesting_weight.saturating_add(refiner.weight(current_timestamp) as u128);
+                }
+            }
+        }
+    }
+
+    let confidence_milli = if total_active_weight > 0 {
+        ((attesting_weight.saturating_mul(1000)) / total_active_weight).min(1000) as u64
+    } else {
+        0
+    };
+
+    serde_json::to_value(BlockConfidenceResponse {
+        height: target_height,
+        block_hash: target_hash.to_hex(),
+        confirmations: current_height
+            .saturating_sub(target_height)
+            .saturating_add(1),
+        finalized: target_height <= finalized_height,
+        attestation_count: seen_refiners.len(),
+        attesting_weight: attesting_weight.min(u64::MAX as u128) as u64,
+        total_active_weight: total_active_weight.min(u64::MAX as u128) as u64,
+        confidence_milli,
+        confidence_percent: format!("{:.1}", confidence_milli as f64 / 10.0),
+        included_through_height,
+    })
+    .map_err(|e| JsonRpcError::internal_error(&e.to_string()))
+}
+
 // ─── Write endpoint handlers ───────────────────────────────────────
 
 async fn handle_send_transaction(
@@ -819,6 +896,46 @@ fn parse_hash(hex_str: &str) -> Result<Hash, JsonRpcError> {
     Ok(Hash::from_bytes(arr))
 }
 
+fn load_confidence_target_block(
+    state: &RpcState,
+    params: &serde_json::Value,
+) -> Result<Block, JsonRpcError> {
+    let arr = match params {
+        serde_json::Value::Array(a) => a,
+        _ => {
+            return Err(JsonRpcError::invalid_params(
+                "Expected params array with block height or hash",
+            ));
+        }
+    };
+    let Some(first) = arr.first() else {
+        return Err(JsonRpcError::invalid_params("Missing block height or hash"));
+    };
+
+    if let Some(height) = first.as_u64() {
+        return match state.store.load_block(height) {
+            Ok(Some(block)) => Ok(block),
+            Ok(None) => Err(JsonRpcError::not_found(&format!(
+                "Block at height {} not found",
+                height
+            ))),
+            Err(e) => Err(JsonRpcError::internal_error(&e.to_string())),
+        };
+    }
+
+    let Some(hash_hex) = first.as_str() else {
+        return Err(JsonRpcError::invalid_params(
+            "Block selector must be a height number or 32-byte hash hex string",
+        ));
+    };
+    let hash = parse_hash(hash_hex)?;
+    match state.store.load_block_by_hash(&hash) {
+        Ok(Some(block)) => Ok(block),
+        Ok(None) => Err(JsonRpcError::not_found("Block not found")),
+        Err(e) => Err(JsonRpcError::internal_error(&e.to_string())),
+    }
+}
+
 /// Parse an ObjectId from a hex string.
 fn parse_object_id(hex_str: &str) -> Result<ObjectId, JsonRpcError> {
     let bytes = hex::decode(hex_str)
@@ -986,6 +1103,20 @@ pub struct RefinerResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockConfidenceResponse {
+    pub height: u64,
+    pub block_hash: String,
+    pub confirmations: u64,
+    pub finalized: bool,
+    pub attestation_count: usize,
+    pub attesting_weight: u64,
+    pub total_active_weight: u64,
+    pub confidence_milli: u64,
+    pub confidence_percent: String,
+    pub included_through_height: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SendTransactionResponse {
     pub tx_id: String,
     pub fee_flakes: u64,
@@ -1013,7 +1144,7 @@ pub struct MiningJobResponse {
     pub difficulty: u64,
     /// u64 hash target derived from difficulty using leading-zero-bits model:
     /// `target = 2^(64-D) - 1`. A valid block has SHA3-256 hash where the
-    /// first 8 bytes (as u64 big-endian) are <= this target.
+    /// first 8 bytes (as u64 little-endian) are <= this target.
     pub target: u64,
     /// Suggested fee for the next block (Flakes), computed via EMA.
     pub suggested_fee: u64,
@@ -1122,6 +1253,23 @@ mod tests {
     fn object_id_from_invalid_hex() {
         assert!(parse_object_id("not_hex").is_err());
         assert!(parse_object_id("0123").is_err());
+    }
+
+    #[test]
+    fn block_confidence_percent_formats_milli() {
+        let response = BlockConfidenceResponse {
+            height: 7,
+            block_hash: Hash::zero().to_hex(),
+            confirmations: 3,
+            finalized: false,
+            attestation_count: 2,
+            attesting_weight: 250,
+            total_active_weight: 1000,
+            confidence_milli: 250,
+            confidence_percent: format!("{:.1}", 250f64 / 10.0),
+            included_through_height: 9,
+        };
+        assert_eq!(response.confidence_percent, "25.0");
     }
 
     #[test]
