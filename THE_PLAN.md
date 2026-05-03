@@ -1194,6 +1194,7 @@ Deleted. The actual reward split uses integer `coverage_milli` in `node.rs`. The
 **Status:** **FIXED**
 **What it is:** `if let Ok(bytes) = borsh::to_vec(account)` silently excludes failed serializations from the state root, causing chain divergence.
 **How to fix:** Replace with `expect("Account serialization must not fail — this is a consensus bug")`.
+**How fixed:** State-root serialization now uses `expect()` for account/refiner hashing, and node block broadcast/sync serialization paths now fail loudly instead of silently dropping blocks if Borsh serialization ever breaks.
 
 #### M22: apply_bond refund discards errors
 **Location:** `dispatcher.rs:218`
@@ -1294,9 +1295,9 @@ All comments updated from "1,024 blocks/epoch" to "960 blocks/epoch". Test param
 19. ✓ H1/H2: Domain separation for hashes and signatures
 20. ✓ M3/M4: Mutual exclusivity check in `validate_block()`
 20. ✓ M1/M2: Replace `graduated_slash` with 100% burn on any double-sign (done in ec0df9b, merged with Phase A)
-21. M6: Zero-miner-id — reject blocks with zero producer at height > 0
-22. H4: Unbond fee — reject if `balance < fee`, don't skip burn
-23. H3: Suggested fee — compute from `total_fees_burned`, not `total_fees`
+21. ✓ M6: Zero-miner-id — reject blocks with zero producer at height > 0
+22. ✓ H4: Unbond fee — reject if `balance < fee`, don't skip burn
+23. ✓ H3: Suggested fee — compute from `total_fees_burned`, not `total_fees`
 24. ✓ M5: Validate producer field on PoW blocks (reject zero-id producer)
 
 ### Phase D: Storage & P2P Fixes
@@ -1314,9 +1315,9 @@ All comments updated from "1,024 blocks/epoch" to "960 blocks/epoch". Test param
 32. ✓ M8: CORS restrict to localhost origins only
 33. ✓ M9: Request body size limit (1 MiB default)
 34. ✓ M10: Key file permissions `chmod 600`
-35. M21: Silent Borsh errors → `expect()` instead of `if let Ok()`
-36. M22: Propagate `apply_bond` credit errors
-37. M23: Wallet RPC default to `https://`
+35. DONE M21: Silent Borsh errors → `expect()` instead of `if let Ok()`
+36. DONE M22: Propagate `apply_bond` credit errors
+37. DONE M23: Wallet RPC default to `https://`
 38. DONE M14: Apply-block height/parent validation under write lock
 39. ~~M19: Delete dead `compute_pow_share`/`compute_pos_share` f64 functions~~ — **DONE** (2cf09c2)
 
@@ -1326,10 +1327,10 @@ All comments updated from "1,024 blocks/epoch" to "960 blocks/epoch". Test param
 41. DONE L3: Constant-time `verify_ed25519` via `subtle`
 42. DONE L4/L5: Unify tx_id serialization before mainnet
 43. DONE L6: Add SLIP-0010 reference test vectors
-44. L7: Raise gossip max message to match `MAX_BLOCK_SIZE_BYTES`
+44. DONE L7: Raise gossip max message to match `MAX_BLOCK_SIZE_BYTES`
 45. DONE L8: Challenge protocol bind to PeerId
 46. DONE L9: `Bip39Mnemonic::generate()` -> return `Result`
-47. L10: Update stale comments saying 1,024 blocks/epoch → 960
+47. DONE L10: Update stale comments saying 1,024 blocks/epoch → 960
 
 ### Phase G: Pass 2 (After Pass 1 is tested and working)
 

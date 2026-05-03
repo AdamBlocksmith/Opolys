@@ -436,9 +436,9 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
                     }
 
                     // Queue block for P2P broadcast (non-blocking)
-                    if let Ok(block_bytes) = borsh::to_vec(&submission.block) {
-                        let _ = block_processor_broadcast.try_send(block_bytes);
-                    }
+                    let block_bytes = borsh::to_vec(&submission.block)
+                        .expect("Block serialization must not fail after validation");
+                    let _ = block_processor_broadcast.try_send(block_bytes);
 
                     let _ = submission.reply.send(BlockSubmissionResult {
                         block_hash: Some(hash.to_hex()),
@@ -519,9 +519,9 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
                                 }
 
                                 // Queue block for P2P broadcast (non-blocking)
-                                if let Ok(block_bytes) = borsh::to_vec(&block) {
-                                    let _ = mining_broadcast.try_send(block_bytes);
-                                }
+                                let block_bytes = borsh::to_vec(&block)
+                                    .expect("Block serialization must not fail after validation");
+                                let _ = mining_broadcast.try_send(block_bytes);
                             }
                             Err(e) => {
                                 tracing::error!(height, error = %e, "Failed to apply mined block");
@@ -595,9 +595,9 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
                                 }
 
                                 // Queue block for P2P broadcast (non-blocking)
-                                if let Ok(block_bytes) = borsh::to_vec(&block) {
-                                    let _ = refining_broadcast.try_send(block_bytes);
-                                }
+                                let block_bytes = borsh::to_vec(&block)
+                                    .expect("Block serialization must not fail after validation");
+                                let _ = refining_broadcast.try_send(block_bytes);
                             }
                             Err(e) => {
                                 tracing::error!(height, error = %e, "Failed to apply refiner block");
@@ -946,10 +946,10 @@ async fn handle_network_event(
                         Ok(hash) => {
                             tracing::info!(height = block.header.height, hash = %hash.to_hex(), "P2P block applied");
                             // Re-broadcast the block to peers
-                            if let Ok(block_data) = borsh::to_vec(&block) {
-                                if let Err(e) = net.broadcast_block(block_data).await {
-                                    tracing::debug!("Failed to re-broadcast block: {}", e);
-                                }
+                            let block_data = borsh::to_vec(&block)
+                                .expect("Block serialization must not fail after validation");
+                            if let Err(e) = net.broadcast_block(block_data).await {
+                                tracing::debug!("Failed to re-broadcast block: {}", e);
                             }
                             // Refresh chain info
                             {
@@ -1260,9 +1260,9 @@ async fn handle_network_event(
                 for height in from_height..from_height.saturating_add(count) {
                     match store.load_block(height) {
                         Ok(Some(block)) => {
-                            if let Ok(block_bytes) = borsh::to_vec(&block) {
-                                blocks.push(block_bytes);
-                            }
+                            let block_bytes = borsh::to_vec(&block)
+                                .expect("Stored block serialization must not fail");
+                            blocks.push(block_bytes);
                         }
                         Ok(None) => break, // No more blocks
                         Err(e) => {
