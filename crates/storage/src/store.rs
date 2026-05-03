@@ -67,8 +67,8 @@ pub struct PersistedChainState {
     /// Persisted double-sign detection map: (height, producer_hex, block_hash, signature).
     /// Survives node restarts so evidence can still be built after a reboot.
     pub producer_signatures: Vec<(u64, String, Hash, Vec<u8>)>,
-    /// Height of the latest finalized block.
-    /// 0 means no block is finalized yet. Placeholder until finality via attestations (Pass 2).
+    /// Height of the latest finalized refiner-produced block.
+    /// 0 means no refiner block has reached attestation finality yet.
     pub finalized_height: u64,
 }
 
@@ -593,7 +593,11 @@ impl BlockchainStore {
         Ok(())
     }
 
-    /// Load chain state from disk. Returns None if no state exists (fresh database).
+    /// Load chain state from disk.
+    ///
+    /// Returns `None` only for a truly fresh database. If block progress exists
+    /// without the canonical chain-state snapshot, the database is partial or
+    /// corrupt and startup must fail closed.
     pub fn load_chain_state(&self) -> Result<Option<PersistedChainState>, String> {
         let cf = self
             .db
@@ -607,7 +611,15 @@ impl BlockchainStore {
                     .map_err(|e| format!("Chain state deserialization failed: {}", e))?;
                 Ok(Some(state))
             }
-            Ok(None) => Ok(None),
+            Ok(None) => {
+                if let Some(height) = self.latest_block_height()? {
+                    return Err(format!(
+                        "Chain state missing while latest block height {} exists; database is partial or corrupt",
+                        height
+                    ));
+                }
+                Ok(None)
+            }
             Err(e) => Err(format!("Chain state get failed: {}", e)),
         }
     }
@@ -818,6 +830,90 @@ mod tests {
 
         let err = store.load_chain_state().unwrap_err();
         assert!(err.contains("checksum mismatch"));
+    }
+
+    #[test]
+    fn missing_chain_state_with_latest_height_is_rejected() {
+        let dir = temp_dir();
+        let store = BlockchainStore::open(dir.path()).unwrap();
+
+        let genesis_config = GenesisConfig::default();
+        let block = opolys_consensus::build_genesis_block(&genesis_config);
+        store.save_block(&block).unwrap();
+
+        let err = store.load_chain_state().unwrap_err();
+        assert!(err.contains("Chain state missing"));
+        assert!(err.contains("partial or corrupt"));
+    }
+
+    #[test]
+    fn corrupted_latest_height_checksum_is_rejected() {
+        let dir = temp_dir();
+        let store = BlockchainStore::open(dir.path()).unwrap();
+
+        let genesis_config = GenesisConfig::default();
+        let block = opolys_consensus::build_genesis_block(&genesis_config);
+        store.save_block(&block).unwrap();
+
+        let cf = store.db.cf_handle("chain_state").unwrap();
+        store
+            .db
+            .put_cf(&cf, b"latest_block_height", b"bad")
+            .unwrap();
+
+        let err = store.load_chain_state().unwrap_err();
+        assert!(err.contains("Latest block height checksum"));
+    }
+
+    #[test]
+    fn corrupted_accounts_checksum_is_rejected() {
+        let dir = temp_dir();
+        let store = BlockchainStore::open(dir.path()).unwrap();
+
+        let mut accounts = AccountStore::new();
+        let id = opolys_crypto::hash_to_object_id(b"alice");
+        accounts.create_account(id).unwrap();
+        store.save_accounts(&accounts).unwrap();
+
+        let cf = store.db.cf_handle("accounts").unwrap();
+        store.db.put_cf(&cf, b"all_accounts", b"bad").unwrap();
+
+        let err = store.load_accounts().unwrap_err();
+        assert!(err.contains("Accounts checksum"));
+    }
+
+    #[test]
+    fn corrupted_refiners_checksum_is_rejected() {
+        let dir = temp_dir();
+        let store = BlockchainStore::open(dir.path()).unwrap();
+
+        let mut refiners = RefinerSet::new();
+        let id = opolys_crypto::hash_to_object_id(b"refiner1");
+        refiners
+            .bond(id, opolys_core::MIN_BOND_STAKE, 0, 0)
+            .unwrap();
+        store.save_refiners(&refiners).unwrap();
+
+        let cf = store.db.cf_handle("refiners").unwrap();
+        store.db.put_cf(&cf, b"all_refiners", b"bad").unwrap();
+
+        let err = store.load_refiners().unwrap_err();
+        assert!(err.contains("Refiners checksum"));
+    }
+
+    #[test]
+    fn corrupted_unbonding_queue_checksum_is_rejected() {
+        let dir = temp_dir();
+        let store = BlockchainStore::open(dir.path()).unwrap();
+
+        let refiners = RefinerSet::new();
+        store.save_refiners(&refiners).unwrap();
+
+        let cf = store.db.cf_handle("refiners").unwrap();
+        store.db.put_cf(&cf, b"unbonding_queue", b"bad").unwrap();
+
+        let err = store.load_refiners().unwrap_err();
+        assert!(err.contains("Unbonding queue checksum"));
     }
 
     #[test]

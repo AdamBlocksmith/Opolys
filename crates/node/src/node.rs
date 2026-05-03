@@ -732,12 +732,16 @@ impl OpolysNode {
                             );
                             let chain = ChainState::from_persisted(&persisted);
                             let accs = store.load_accounts().unwrap_or_else(|e| {
-                                tracing::warn!("Failed to load accounts, starting fresh: {}", e);
-                                AccountStore::new()
+                                panic!(
+                                    "Refusing to open data directory {:?}: failed to load persisted accounts: {}",
+                                    data_path, e
+                                );
                             });
                             let vals = store.load_refiners().unwrap_or_else(|e| {
-                                tracing::warn!("Failed to load refiners, starting fresh: {}", e);
-                                RefinerSet::new()
+                                panic!(
+                                    "Refusing to open data directory {:?}: failed to load persisted refiners: {}",
+                                    data_path, e
+                                );
                             });
                             (chain, accs, vals, Some(store))
                         }
@@ -766,21 +770,10 @@ impl OpolysNode {
                 }
             }
             Err(e) => {
-                tracing::warn!(
-                    "Could not open database at {:?}: {}, running without persistence",
-                    data_path,
-                    e
+                panic!(
+                    "Refusing to start without persistence: failed to open database at {:?}: {}",
+                    data_path, e
                 );
-                let chain_state = ChainState::new(&genesis_config);
-                let mut accounts = AccountStore::new();
-                let refiners = RefinerSet::new();
-                let genesis_issued = opolys_consensus::genesis::apply_genesis_accounts(
-                    &genesis_config,
-                    &mut accounts,
-                );
-                let mut chain_state = chain_state;
-                chain_state.total_issued = chain_state.total_issued.saturating_add(genesis_issued);
-                (chain_state, accounts, refiners, None)
             }
         };
 

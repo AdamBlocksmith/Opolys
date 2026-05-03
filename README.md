@@ -649,13 +649,16 @@ m / 44' / 999' / account' / 0'
 
 ## Storage
 
-RocksDB with Borsh serialization. State is saved atomically after each block.
+RocksDB with Borsh serialization and BLAKE3 value checksums. Block, account,
+refiner, transaction-index, latest-height, and chain-state updates are saved in
+one synced atomic batch after each applied block. Startup treats missing or
+corrupt state as fatal once any block progress exists.
 
 | Column Family | Key | Value |
 |---|---|---|
-| `blocks` | `block_<height>` | Borsh-serialized `Block` |
-| `accounts` | `account_<hex_object_id>` | Borsh-serialized `Account` |
-| `refiners` | `refiner_<hex_object_id>` | Borsh-serialized `RefinerInfo` |
+| `blocks` | height bytes / `hash_<hex_block_hash>` | Borsh-serialized `Block` / height index |
+| `accounts` | `all_accounts` | Borsh-serialized `Vec<Account>` |
+| `refiners` | `all_refiners`, `active_refiner_ids`, `unbonding_queue` | Borsh-serialized refiner snapshots |
 | `chain_state` | `chain_state` | Borsh-serialized `PersistedChainState` |
 
 ---

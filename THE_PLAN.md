@@ -1107,6 +1107,16 @@ Every bug below includes: **What it is**, **Why it matters**, and **How to fix i
 
 ---
 
+#### H10: Partial RocksDB state could restart as fresh
+**Location:** `store.rs:597-616`, `node.rs:710-750`
+**Status:** **FIXED**
+
+**What it is:** If block progress or `latest_block_height` existed but the canonical `chain_state` snapshot was missing, startup could treat the database as fresh. Separately, account/refiner load failures could fall back to empty stores after a valid chain state was loaded.
+
+**How fixed:** `load_chain_state()` now returns `None` only for a truly fresh database. If `latest_block_height` exists without `chain_state`, storage reports a partial/corrupt database. Node startup now refuses corrupted account/refiner snapshots and refuses to run without persistence if RocksDB cannot open.
+
+---
+
 ### MEDIUM (23 — 3 fixed, 2 by design)
 
 #### ~~M1: Graduated slashing~~ — **FIXD** (ec0df9b)
