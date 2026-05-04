@@ -76,6 +76,25 @@ impl ApplyResult {
 pub struct TransactionDispatcher;
 
 impl TransactionDispatcher {
+    fn checked_add_amounts(
+        context: &str,
+        a: FlakeAmount,
+        b: FlakeAmount,
+    ) -> Result<FlakeAmount, String> {
+        a.checked_add(b)
+            .ok_or_else(|| format!("{} overflow: {} + {}", context, a, b))
+    }
+
+    fn checked_total_cost(
+        context: &str,
+        amount: FlakeAmount,
+        fee: FlakeAmount,
+        assay: FlakeAmount,
+    ) -> Result<FlakeAmount, String> {
+        let amount_plus_fee = Self::checked_add_amounts(context, amount, fee)?;
+        Self::checked_add_amounts(context, amount_plus_fee, assay)
+    }
+
     /// Apply a transaction against the current account and refiner state.
     ///
     /// This is the single entry point for all transaction execution in Opolys.
@@ -120,6 +139,9 @@ impl TransactionDispatcher {
                     "Invalid nonce: expected {}, got {}",
                     account.nonce, tx.nonce
                 ));
+            }
+            if account.nonce.checked_add(1).is_none() {
+                return ApplyResult::err("Nonce overflow");
             }
         } else {
             return ApplyResult::err(&format!("Sender account not found: {}", sender.to_hex()));
@@ -209,7 +231,10 @@ impl TransactionDispatcher {
         // Gold analogy: assay fee to enter the vault
         let bond_assay =
             (stake as u128 * ANNUAL_ATTRITION_PERMILLE as u128 / 4 / 1000) as FlakeAmount;
-        let total_needed = stake.saturating_add(tx.fee).saturating_add(bond_assay);
+        let total_needed = match Self::checked_total_cost("Bond cost", stake, tx.fee, bond_assay) {
+            Ok(total) => total,
+            Err(e) => return ApplyResult::err(&e),
+        };
         if let Some(account) = accounts.get_account(sender) {
             if account.balance < total_needed {
                 return ApplyResult::err(&format!(
@@ -243,7 +268,10 @@ impl TransactionDispatcher {
 
         // Fee + bond assay are both burned (debited from sender, not credited to anyone)
         // Bond assay mirrors gold: assay fee to enter the vault
-        ApplyResult::ok(tx.fee.saturating_add(bond_assay))
+        match Self::checked_add_amounts("Bond burned amount", tx.fee, bond_assay) {
+            Ok(burned) => ApplyResult::ok(burned),
+            Err(e) => ApplyResult::err(&e),
+        }
     }
 
     /// Unbond `amount` Flakes from the refiner using FIFO order.
@@ -269,6 +297,9 @@ impl TransactionDispatcher {
         if refiners.get_refiner(sender).is_none() {
             return ApplyResult::err("Refiner not bonded");
         }
+        if amount == 0 {
+            return ApplyResult::err("Unbond amount must be greater than zero");
+        }
 
         // Pre-check fees before unbonding. Both the transaction fee and the unbond
         // assay must be payable. This fixes H4: zero-balance accounts can no longer
@@ -276,7 +307,10 @@ impl TransactionDispatcher {
         // We use the requested amount as an upper bound for the assay pre-check.
         let max_assay =
             (amount as u128 * ANNUAL_ATTRITION_PERMILLE as u128 / 4 / 1000) as FlakeAmount;
-        let total_fee = tx.fee.saturating_add(max_assay);
+        let total_fee = match Self::checked_add_amounts("Unbond fee", tx.fee, max_assay) {
+            Ok(total) => total,
+            Err(e) => return ApplyResult::err(&e),
+        };
         if let Some(account) = accounts.get_account(sender) {
             if account.balance < total_fee {
                 return ApplyResult::err(&format!(
@@ -304,7 +338,10 @@ impl TransactionDispatcher {
         // Gold analogy: assay fee to exit the vault
         let unbond_assay =
             (unbonded as u128 * ANNUAL_ATTRITION_PERMILLE as u128 / 4 / 1000) as FlakeAmount;
-        let total_fee = tx.fee.saturating_add(unbond_assay);
+        let total_fee = match Self::checked_add_amounts("Unbond fee", tx.fee, unbond_assay) {
+            Ok(total) => total,
+            Err(e) => return ApplyResult::err(&e),
+        };
 
         // Deduct fees from sender's balance (already pre-checked above)
         if let Some(account) = accounts.get_account_mut(sender) {
@@ -351,17 +388,26 @@ pub fn validate_transaction_basic(
     }
 
     // Total cost depends on the transaction type (including assay fees)
+    let checked_add = |context: &str, a: FlakeAmount, b: FlakeAmount| {
+        a.checked_add(b).ok_or_else(|| {
+            OpolysError::InvalidParams(format!("{} overflow: {} + {}", context, a, b))
+        })
+    };
+
     let total_cost = match &tx.action {
-        TransactionAction::Transfer { amount, .. } => amount.saturating_add(tx.fee),
+        TransactionAction::Transfer { amount, .. } => {
+            checked_add("Transfer cost", *amount, tx.fee)?
+        }
         TransactionAction::RefinerBond { amount } => {
             let bond_assay =
                 (*amount as u128 * ANNUAL_ATTRITION_PERMILLE as u128 / 4 / 1000) as FlakeAmount;
-            amount.saturating_add(tx.fee).saturating_add(bond_assay)
+            let amount_plus_fee = checked_add("Bond cost", *amount, tx.fee)?;
+            checked_add("Bond cost", amount_plus_fee, bond_assay)?
         }
         TransactionAction::RefinerUnbond { amount } => {
             let max_unbond_assay =
                 (*amount as u128 * ANNUAL_ATTRITION_PERMILLE as u128 / 4 / 1000) as FlakeAmount;
-            tx.fee.saturating_add(max_unbond_assay)
+            checked_add("Unbond fee", tx.fee, max_unbond_assay)?
         }
     };
 
@@ -674,6 +720,36 @@ mod tests {
         assert!(!result.success);
     }
 
+    #[test]
+    fn transfer_nonce_overflow_rejected_before_mutation() {
+        let mut accounts = AccountStore::new();
+        let mut refiners = RefinerSet::new();
+        let (sk, alice, pk) = test_keypair(1);
+        let (_, bob, _) = test_keypair(2);
+
+        accounts.create_account(alice.clone()).unwrap();
+        accounts.credit(&alice, opl_to_flake(100)).unwrap();
+        accounts.get_account_mut(&alice).unwrap().nonce = u64::MAX;
+
+        let tx = signed_transfer(&sk, &alice, pk, &bob, opl_to_flake(1), MIN_FEE, u64::MAX);
+        let result = TransactionDispatcher::apply_transaction(
+            &tx,
+            &mut accounts,
+            &mut refiners,
+            1,
+            100,
+            MAINNET_CHAIN_ID,
+        );
+
+        assert!(!result.success);
+        assert_eq!(result.error.as_deref(), Some("Nonce overflow"));
+        assert_eq!(
+            accounts.get_account(&alice).unwrap().balance,
+            opl_to_flake(100)
+        );
+        assert!(accounts.get_account(&bob).is_none());
+    }
+
     /// Bond refiner with sufficient stake — should succeed.
     /// Alice bonds 1 OPL (MIN_BOND_STAKE) with a 1 OPL fee.
     #[test]
@@ -910,11 +986,15 @@ mod tests {
             200,
             MAINNET_CHAIN_ID,
         );
-        assert!(result.success);
-        // Refiner removed because all stake unbonded
-        assert_eq!(refiners.refiner_count(), 0);
-        // But the unbonded stake is in the queue, not immediately credited
-        assert_eq!(refiners.unbonding_queue.len(), 1);
+        assert!(!result.success);
+        assert!(
+            result
+                .error
+                .unwrap()
+                .contains("Cannot unbond more than total stake")
+        );
+        assert_eq!(refiners.refiner_count(), 1);
+        assert!(refiners.unbonding_queue.is_empty());
     }
 
     /// Unbond a non-existent refiner — should fail.

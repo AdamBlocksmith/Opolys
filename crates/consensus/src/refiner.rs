@@ -163,15 +163,20 @@ impl RefinerInfo {
     /// The entry gets its own seniority clock starting from zero.
     /// If an entry with the same `bonded_at_timestamp` already exists,
     /// stakes are merged (auto-merge) to reduce entry count.
-    fn add_entry(&mut self, stake: FlakeAmount, height: u64, timestamp: u64) {
+    fn add_entry(&mut self, stake: FlakeAmount, height: u64, timestamp: u64) -> Result<(), String> {
         // Auto-merge: if an entry with the same timestamp exists, combine stakes
         if let Some(existing) = self
             .entries
             .iter_mut()
             .find(|e| e.bonded_at_timestamp == timestamp)
         {
-            existing.stake = existing.stake.saturating_add(stake);
-            return;
+            existing.stake = existing.stake.checked_add(stake).ok_or_else(|| {
+                format!(
+                    "Bond entry stake overflow: existing {} + new {}",
+                    existing.stake, stake
+                )
+            })?;
+            return Ok(());
         }
         // Otherwise, insert in sorted order by timestamp (FIFO)
         let entry = BondEntry {
@@ -185,6 +190,7 @@ impl RefinerInfo {
             .position(|e| e.bonded_at_timestamp > timestamp)
             .unwrap_or(self.entries.len());
         self.entries.insert(pos, entry);
+        Ok(())
     }
 
     /// Unbond `amount` Flakes from this refiner using FIFO order.
@@ -316,7 +322,7 @@ impl RefinerSet {
             if refiner.status == RefinerStatus::Slashed {
                 return Err("Slashed refiners cannot re-bond".to_string());
             }
-            refiner.add_entry(stake, height, timestamp);
+            refiner.add_entry(stake, height, timestamp)?;
             self.dirty_refiners.insert(object_id);
         } else {
             // New refiner: create with first bond entry
@@ -339,7 +345,8 @@ impl RefinerSet {
     /// next oldest. The unbonded stake enters the unbonding queue and will
     /// mature after `UNBONDING_DELAY_BLOCKS` (960 blocks = one epoch).
     ///
-    /// If the refiner has no remaining entries after unbonding, they are
+    /// Requests must be non-zero and cannot exceed the refiner's current total
+    /// stake. If the refiner has no remaining entries after unbonding, they are
     /// removed from the refiner set but not slashed.
     pub fn unbond_amount(
         &mut self,
@@ -356,10 +363,17 @@ impl RefinerSet {
         if total_stake == 0 {
             return Err("Refiner has no stake".to_string());
         }
+        if amount == 0 {
+            return Err("Unbond amount must be greater than zero".to_string());
+        }
+        if amount > total_stake {
+            return Err(format!(
+                "Cannot unbond more than total stake: requested {}, available {}",
+                amount, total_stake
+            ));
+        }
 
-        // Unbond up to the amount available
-        let actual_amount = amount.min(total_stake);
-        let unbonded = refiner.unbond_fifo(actual_amount);
+        let unbonded = refiner.unbond_fifo(amount);
 
         // Enqueue the unbonding entry with a maturation height
         let matures_at = current_height.saturating_add(EPOCH);
@@ -857,9 +871,15 @@ mod tests {
         vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0).unwrap();
 
         // Try to unbond more than total stake
-        let unbonded = vs.unbond_amount(&id, MIN_BOND_STAKE * 10, 100).unwrap();
-        assert_eq!(unbonded, MIN_BOND_STAKE); // Only unbond what's available
-        assert_eq!(vs.refiner_count(), 0);
+        let result = vs.unbond_amount(&id, MIN_BOND_STAKE * 10, 100);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .contains("Cannot unbond more than total stake")
+        );
+        assert_eq!(vs.refiner_count(), 1);
+        assert!(vs.unbonding_queue.is_empty());
     }
 
     #[test]

@@ -128,14 +128,20 @@ impl AccountStore {
         self.accounts.get_mut(object_id)
     }
 
-    /// Add `amount` flakes to the account's balance. Uses saturating arithmetic
-    /// to prevent overflow.
+    /// Add `amount` flakes to the account's balance. Fails on overflow so
+    /// consensus cannot silently mint by saturating at `u64::MAX`.
     pub fn credit(&mut self, object_id: &ObjectId, amount: FlakeAmount) -> Result<(), OpolysError> {
         let account = self
             .accounts
             .get_mut(object_id)
             .ok_or_else(|| OpolysError::AccountNotFound(object_id.to_hex()))?;
-        account.balance = account.balance.saturating_add(amount);
+        account.balance = account.balance.checked_add(amount).ok_or_else(|| {
+            OpolysError::InvalidParams(format!(
+                "Balance overflow when crediting {} flakes to {}",
+                amount,
+                object_id.to_hex()
+            ))
+        })?;
         Ok(())
     }
 
@@ -172,7 +178,12 @@ impl AccountStore {
         fee: FlakeAmount,
     ) -> Result<TransferResult, OpolysError> {
         // The sender must cover both the transfer amount and the burned fee.
-        let total_needed = amount.saturating_add(fee);
+        let total_needed = amount.checked_add(fee).ok_or_else(|| {
+            OpolysError::InvalidParams(format!(
+                "Transfer cost overflow: amount {} + fee {}",
+                amount, fee
+            ))
+        })?;
         let from_account = self
             .accounts
             .get(from)
@@ -186,6 +197,9 @@ impl AccountStore {
         }
 
         let from_nonce = from_account.nonce;
+        from_nonce
+            .checked_add(1)
+            .ok_or_else(|| OpolysError::InvalidParams("Nonce overflow".to_string()))?;
 
         // Auto-create the recipient account if it doesn't exist yet.
         let to_exists = self.accounts.contains_key(to);
@@ -193,19 +207,32 @@ impl AccountStore {
             self.accounts.insert(to.clone(), Account::new(to.clone()));
         }
 
+        if from != to {
+            let recipient_balance = self.accounts.get(to).unwrap().balance;
+            recipient_balance.checked_add(amount).ok_or_else(|| {
+                OpolysError::InvalidParams(format!(
+                    "Recipient balance overflow when crediting {} flakes to {}",
+                    amount,
+                    to.to_hex()
+                ))
+            })?;
+        }
+
         // Debit the sender (amount + fee) and increment nonce for replay protection.
         let from_balance_before = self.accounts.get(from).unwrap().balance;
-        self.accounts.get_mut(from).unwrap().balance =
-            from_balance_before.saturating_sub(total_needed);
-        self.accounts.get_mut(from).unwrap().nonce += 1;
+        self.accounts.get_mut(from).unwrap().balance = from_balance_before - total_needed;
+        self.accounts.get_mut(from).unwrap().nonce = from_nonce + 1;
 
         // Credit only the transfer amount to the recipient; the fee is burned.
-        self.accounts.get_mut(to).unwrap().balance = self
-            .accounts
-            .get(to)
-            .unwrap()
-            .balance
-            .saturating_add(amount);
+        let recipient_balance = self.accounts.get(to).unwrap().balance;
+        self.accounts.get_mut(to).unwrap().balance =
+            recipient_balance.checked_add(amount).ok_or_else(|| {
+                OpolysError::InvalidParams(format!(
+                    "Recipient balance overflow when crediting {} flakes to {}",
+                    amount,
+                    to.to_hex()
+                ))
+            })?;
 
         Ok(TransferResult {
             amount,
@@ -336,5 +363,59 @@ mod tests {
         store.credit(&alice, 100).unwrap();
 
         assert!(store.transfer(&alice, &bob, 200, 0).is_err());
+    }
+
+    #[test]
+    fn credit_overflow_fails() {
+        let mut store = AccountStore::new();
+        let alice = test_id(b"alice");
+        store.create_account(alice.clone()).unwrap();
+        store.credit(&alice, u64::MAX).unwrap();
+
+        assert!(store.credit(&alice, 1).is_err());
+    }
+
+    #[test]
+    fn transfer_total_cost_overflow_fails() {
+        let mut store = AccountStore::new();
+        let alice = test_id(b"alice");
+        let bob = test_id(b"bob");
+        store.create_account(alice.clone()).unwrap();
+        store.credit(&alice, u64::MAX).unwrap();
+
+        assert!(store.transfer(&alice, &bob, u64::MAX, 1).is_err());
+        assert_eq!(store.get_account(&alice).unwrap().balance, u64::MAX);
+        assert_eq!(store.get_account(&alice).unwrap().nonce, 0);
+    }
+
+    #[test]
+    fn transfer_recipient_overflow_fails_without_debit() {
+        let mut store = AccountStore::new();
+        let alice = test_id(b"alice");
+        let bob = test_id(b"bob");
+        store.create_account(alice.clone()).unwrap();
+        store.create_account(bob.clone()).unwrap();
+        store.credit(&alice, 100).unwrap();
+        store.credit(&bob, u64::MAX).unwrap();
+
+        assert!(store.transfer(&alice, &bob, 1, 1).is_err());
+        assert_eq!(store.get_account(&alice).unwrap().balance, 100);
+        assert_eq!(store.get_account(&alice).unwrap().nonce, 0);
+        assert_eq!(store.get_account(&bob).unwrap().balance, u64::MAX);
+    }
+
+    #[test]
+    fn transfer_nonce_overflow_fails_without_side_effects() {
+        let mut store = AccountStore::new();
+        let alice = test_id(b"alice");
+        let bob = test_id(b"bob");
+        store.create_account(alice.clone()).unwrap();
+        store.credit(&alice, 100).unwrap();
+        store.get_account_mut(&alice).unwrap().nonce = u64::MAX;
+
+        assert!(store.transfer(&alice, &bob, 1, 1).is_err());
+        assert_eq!(store.get_account(&alice).unwrap().balance, 100);
+        assert_eq!(store.get_account(&alice).unwrap().nonce, u64::MAX);
+        assert!(store.get_account(&bob).is_none());
     }
 }

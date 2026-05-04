@@ -1495,4 +1495,16 @@ A comprehensive audit of all consensus-critical formulas and constants in the co
 
 ---
 
+### Recent Execution Hardening
+
+#### H16: Execution amount overflow and partial unbond edge cases
+**Location:** `consensus/account.rs`, `consensus/refiner.rs`, `execution/dispatcher.rs`
+**Status:** **FIXED**
+
+**What it is:** Consensus-critical amount math used saturating addition in transfer costs, bond costs, unbond fees, account credits, and same-timestamp refiner top-ups. Saturation can hide an impossible amount instead of rejecting the transaction. Unbond requests above total stake also silently unbonded only the available stake.
+
+**How fixed:** Execution and account/refiner state now use checked arithmetic and fail closed on overflow before mutation. Refiner top-up merges fail on stake overflow. Unbond requests must be non-zero and no greater than total bonded stake, so the transaction does exactly what it asks for or fails with no state change.
+
+---
+
 *This document is the single source of truth for Opolys development. Update it with every design decision and implementation change.*
