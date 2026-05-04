@@ -14,13 +14,14 @@
 use clap::{Args, Parser};
 use opolys_core::{FLAKES_PER_OPL, FlakeAmount, MAINNET_CHAIN_ID};
 use opolys_wallet::{Bip39Mnemonic, TransactionSigner};
+use reqwest::Url;
 
-const DEFAULT_RPC_URL: &str = "https://localhost:4171";
+const DEFAULT_RPC_URL: &str = "http://127.0.0.1:4171";
 
 #[derive(Parser, Debug)]
 #[command(name = "opl", about = "Opolys wallet CLI", version)]
 struct Cli {
-    /// RPC server URL (default: https://localhost:4171)
+    /// RPC server URL (default: http://127.0.0.1:4171)
     #[arg(long, default_value = DEFAULT_RPC_URL)]
     rpc_url: String,
 
@@ -188,7 +189,7 @@ async fn main() {
 
 async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let chain_id = MAINNET_CHAIN_ID;
-    warn_if_insecure_rpc_url(&cli.rpc_url);
+    validate_rpc_url(&cli.rpc_url)?;
     match cli.command {
         Command::New { account } => {
             let mnemonic = Bip39Mnemonic::generate()?;
@@ -363,16 +364,32 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn is_insecure_rpc_url(rpc_url: &str) -> bool {
-    rpc_url
-        .get(..7)
-        .map(|prefix| prefix.eq_ignore_ascii_case("http://"))
-        .unwrap_or(false)
+fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host == "127.0.0.1"
+        || host == "::1"
+        || host == "[::1]"
 }
 
-fn warn_if_insecure_rpc_url(rpc_url: &str) {
-    if is_insecure_rpc_url(rpc_url) {
-        eprintln!("Warning: RPC URL uses http://. Use https:// for mainnet wallet operations.");
+fn validate_rpc_url(rpc_url: &str) -> Result<(), String> {
+    let url = Url::parse(rpc_url).map_err(|e| format!("Invalid RPC URL: {}", e))?;
+    match url.scheme() {
+        "https" => Ok(()),
+        "http" => {
+            let host = url.host_str().ok_or("RPC URL is missing a host")?;
+            if is_loopback_host(host) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "Refusing non-loopback http:// RPC URL '{}'. Use https:// for remote RPC endpoints.",
+                    rpc_url
+                ))
+            }
+        }
+        scheme => Err(format!(
+            "Unsupported RPC URL scheme '{}'. Use http:// for local loopback or https:// for remote RPC.",
+            scheme
+        )),
     }
 }
 
@@ -404,17 +421,31 @@ mod tests {
     use clap::Parser;
 
     #[test]
-    fn cli_defaults_to_https_rpc_url() {
+    fn cli_defaults_to_loopback_rpc_url() {
         let cli = Cli::parse_from(["opl", "new"]);
 
         assert_eq!(cli.rpc_url, DEFAULT_RPC_URL);
     }
 
     #[test]
-    fn insecure_rpc_detection_is_scheme_based() {
-        assert!(is_insecure_rpc_url("http://localhost:4171"));
-        assert!(is_insecure_rpc_url("HTTP://localhost:4171"));
-        assert!(!is_insecure_rpc_url("https://localhost:4171"));
-        assert!(!is_insecure_rpc_url("httpx://localhost:4171"));
+    fn rpc_url_validation_allows_loopback_http_and_https() {
+        assert!(validate_rpc_url("http://localhost:4171").is_ok());
+        assert!(validate_rpc_url("http://127.0.0.1:4171").is_ok());
+        assert!(validate_rpc_url("http://[::1]:4171").is_ok());
+        assert!(validate_rpc_url("https://rpc.opolys.example").is_ok());
+    }
+
+    #[test]
+    fn rpc_url_validation_rejects_remote_http() {
+        let err = validate_rpc_url("http://192.0.2.10:4171").unwrap_err();
+
+        assert!(err.contains("Refusing non-loopback http:// RPC URL"));
+    }
+
+    #[test]
+    fn rpc_url_validation_rejects_unsupported_schemes() {
+        let err = validate_rpc_url("ws://localhost:4171").unwrap_err();
+
+        assert!(err.contains("Unsupported RPC URL scheme"));
     }
 }

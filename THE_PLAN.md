@@ -1300,8 +1300,9 @@ Deleted. The actual reward split uses integer `coverage_milli` in `node.rs`. The
 #### M23: Wallet HTTP default
 **Location:** `wallet/main.rs:22`
 **Status:** **FIXED**
-**What it is:** Default RPC URL is `http://localhost:4171` — signed transactions traverse network in plaintext.
-**How to fix:** Change default to `https://localhost:4171` and warn on `http://` URLs.
+**What it is:** Wallet RPC must be safe for mainnet without breaking default local node usage.
+**How to fix:** Default to loopback `http://127.0.0.1:4171`, allow local loopback HTTP only, allow HTTPS, and reject non-loopback `http://` RPC URLs.
+**Update:** The node RPC server is local HTTP by default, so the wallet now keeps the fresh-node path working while failing closed on remote plaintext RPC.
 
 ---
 
@@ -1412,7 +1413,7 @@ All comments updated from "1,024 blocks/epoch" to "960 blocks/epoch". Test param
 34. ✓ M10: Key file permissions `chmod 600`
 35. DONE M21: Silent Borsh errors → `expect()` instead of `if let Ok()`
 36. DONE M22: Propagate `apply_bond` credit errors
-37. DONE M23: Wallet RPC default to `https://`
+37. DONE M23: Wallet RPC allows loopback HTTP only and rejects remote HTTP
 38. DONE M14: Apply-block height/parent validation under write lock
 39. ~~M19: Delete dead `compute_pow_share`/`compute_pos_share` f64 functions~~ — **DONE** (2cf09c2)
 

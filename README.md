@@ -110,8 +110,9 @@ For the full ceremony, verification, and launch checklist, see
 
 ### Wallet CLI (`opl`)
 
-`opl` defaults to `https://localhost:4171` for RPC. If you explicitly pass an
-`http://` RPC URL, the wallet prints a warning before making RPC calls.
+`opl` defaults to local loopback RPC at `http://127.0.0.1:4171`, matching the
+default node. Remote wallet RPC endpoints must use `https://`; the wallet refuses
+non-loopback `http://` URLs.
 
 ```bash
 # Generate a new wallet (BIP-39 24-word mnemonic)
