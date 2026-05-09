@@ -16,6 +16,8 @@
 //!
 //! Opolys ($OPL) is a blockchain built as decentralized digital gold with no hard cap.
 //! Difficulty and rewards emerge from chain state. Fees are market-driven and burned.
+
+#![allow(clippy::items_after_test_module)]
 //! Refiners earn from block rewards only.
 
 use clap::Parser;
@@ -137,11 +139,11 @@ fn save_peer_to_cache(data_dir: &str, addr: &str) {
     }
     peers.push(addr.to_string());
 
-    if let Some(parent) = path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            tracing::debug!(error = %e, "Failed to create peer cache directory");
-            return;
-        }
+    if let Some(parent) = path.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        tracing::debug!(error = %e, "Failed to create peer cache directory");
+        return;
     }
     let contents = peers.join("\n") + "\n";
     if let Err(e) = std::fs::write(&path, contents) {
@@ -154,15 +156,15 @@ fn save_peer_to_cache(data_dir: &str, addr: &str) {
 fn extract_subnet_24(addr_str: &str) -> Option<[u8; 3]> {
     let parts: Vec<&str> = addr_str.split('/').collect();
     for i in 0..parts.len() {
-        if parts[i] == "ip4" {
-            if let Some(ip_str) = parts.get(i + 1) {
-                let octets: Vec<u8> = ip_str
-                    .split('.')
-                    .filter_map(|o| o.parse::<u8>().ok())
-                    .collect();
-                if octets.len() == 4 {
-                    return Some([octets[0], octets[1], octets[2]]);
-                }
+        if parts[i] == "ip4"
+            && let Some(ip_str) = parts.get(i + 1)
+        {
+            let octets: Vec<u8> = ip_str
+                .split('.')
+                .filter_map(|o| o.parse::<u8>().ok())
+                .collect();
+            if octets.len() == 4 {
+                return Some([octets[0], octets[1], octets[2]]);
             }
         }
     }
@@ -311,14 +313,12 @@ async fn main() {
         );
     }
 
-    if generated_rpc_api_key {
-        if let Some(key) = &rpc_api_key {
-            tracing::warn!(
-                rpc_api_key = %key,
-                "Generated RPC API key for write/mining endpoints. \
-                 Pass --rpc-api-key to reuse a stable key across restarts."
-            );
-        }
+    if generated_rpc_api_key && let Some(key) = &rpc_api_key {
+        tracing::warn!(
+            rpc_api_key = %key,
+            "Generated RPC API key for write/mining endpoints. \
+             Pass --rpc-api-key to reuse a stable key across restarts."
+        );
     }
 
     let config = NodeConfig {
@@ -468,13 +468,15 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
 
     // Optionally start the JSON-RPC server
     let mut rpc_handle: Option<tokio::task::JoinHandle<()>> = None;
-    if !config.no_rpc && node.store.is_some() {
+    if !config.no_rpc
+        && let Some(store) = node.store.as_ref()
+    {
         let rpc_state = RpcState::new(
             chain_info.clone(),
             node.accounts.clone(),
             node.refiners.clone(),
             node.mempool.clone(),
-            node.store.as_ref().unwrap().clone(),
+            store.clone(),
             block_sender,
             node.miner_id.clone(),
             config.rpc_api_key.clone(),
@@ -808,11 +810,11 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
                         match event {
                             Some(event) => {
                                 // Signal the no-peers checker on the first connection.
-                                if !first_peer_seen {
-                                    if let opolys_networking::OpolysNetworkEvent::PeerConnected { .. } = &event {
-                                        first_peer_notify.notify_one();
-                                        first_peer_seen = true;
-                                    }
+                                if !first_peer_seen
+                                    && let opolys_networking::OpolysNetworkEvent::PeerConnected { .. } = &event
+                                {
+                                    first_peer_notify.notify_one();
+                                    first_peer_seen = true;
                                 }
                                 handle_network_event(
                                     event, &net_node, &net_chain_info, &net, &net_data_dir,
@@ -843,10 +845,10 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
                         }
                     }
                     attestation_data = attestation_broadcast_rx.recv() => {
-                        if let Some(data) = attestation_data {
-                            if let Err(e) = net.broadcast_attestation(data).await {
-                                tracing::warn!("Failed to broadcast attestation: {}", e);
-                            }
+                        if let Some(data) = attestation_data
+                            && let Err(e) = net.broadcast_attestation(data).await
+                        {
+                            tracing::warn!("Failed to broadcast attestation: {}", e);
                         }
                     }
                     _ = low_fee_drain_interval.tick() => {
@@ -958,6 +960,7 @@ impl PeerRateLimit {
 /// - **SyncRequestReceived**: Serve blocks from storage if available
 /// - **SyncResponseReceived**: Apply received blocks to catch up to chain tip
 /// - **PeerConnected/Disconnected**: Log for visibility, save address to peer cache
+#[allow(clippy::too_many_arguments)]
 async fn handle_network_event(
     event: opolys_networking::OpolysNetworkEvent,
     node: &std::sync::Arc<OpolysNode>,
@@ -1398,17 +1401,17 @@ async fn handle_network_event(
                         arr.copy_from_slice(&bytes);
                         let object_id = opolys_core::ObjectId(opolys_core::Hash::from_bytes(arr));
                         let refiners = node.refiners.read().await;
-                        if let Some(v) = refiners.get_refiner(&object_id) {
-                            if v.status == opolys_core::RefinerStatus::Active {
-                                drop(refiners);
-                                let mut vp = node.refiner_peers.write().await;
-                                vp.insert(peer_id, object_id.clone());
-                                tracing::info!(
-                                    peer = %peer_id,
-                                    refiner = %object_id.to_hex(),
-                                    "Peer identified as active refiner"
-                                );
-                            }
+                        if let Some(v) = refiners.get_refiner(&object_id)
+                            && v.status == opolys_core::RefinerStatus::Active
+                        {
+                            drop(refiners);
+                            let mut vp = node.refiner_peers.write().await;
+                            vp.insert(peer_id, object_id.clone());
+                            tracing::info!(
+                                peer = %peer_id,
+                                refiner = %object_id.to_hex(),
+                                "Peer identified as active refiner"
+                            );
                         }
                     }
                     _ => {
@@ -1428,12 +1431,12 @@ async fn handle_network_event(
             // Eclipse protection: remove from direction tracking and free subnet slot
             node.outbound_peers.write().await.remove(&peer_id);
             node.inbound_peers.write().await.remove(&peer_id);
-            if let Some(subnet) = peer_subnets.remove(&peer_id) {
-                if let Some(count) = subnet_counts.get_mut(&subnet) {
-                    *count = count.saturating_sub(1);
-                    if *count == 0 {
-                        subnet_counts.remove(&subnet);
-                    }
+            if let Some(subnet) = peer_subnets.remove(&peer_id)
+                && let Some(count) = subnet_counts.get_mut(&subnet)
+            {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    subnet_counts.remove(&subnet);
                 }
             }
         }

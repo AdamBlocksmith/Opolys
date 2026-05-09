@@ -99,6 +99,7 @@ pub const BLOCKS_PER_YEAR: u64 = (365 * 86400 + 86400 / 4) / 90; // 350_640
 /// - Mine assay: reduced issuance at block reward time
 /// - Stake decay: epoch-based bonded stake reduction
 /// - Bond/unbond assay: entry/exit fees
+///
 /// Total target: ~1.5% annual supply attrition, matching physical gold.
 pub const ANNUAL_ATTRITION_PERMILLE: u64 = 15;
 

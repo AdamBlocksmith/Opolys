@@ -84,10 +84,7 @@ impl PowContext {
             EPOCH,
             &seed_material,
         );
-        let nonce = match nonce_result {
-            Some(n) => n,
-            None => return None,
-        };
+        let nonce = nonce_result?;
 
         let mut proof_buf = Vec::with_capacity(8);
         proof_buf.extend_from_slice(&nonce.to_le_bytes());
@@ -125,10 +122,7 @@ impl PowContext {
             EPOCH,
             &seed_material,
         );
-        let nonce = match nonce_result {
-            Some(n) => n,
-            None => return None,
-        };
+        let nonce = nonce_result?;
 
         let mut proof_buf = Vec::with_capacity(8);
         proof_buf.extend_from_slice(&nonce.to_le_bytes());

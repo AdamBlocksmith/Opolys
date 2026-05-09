@@ -427,7 +427,7 @@ fn find_price_in_json(val: &serde_json::Value) -> Option<f64> {
     match val {
         serde_json::Value::Number(n) => {
             let f = n.as_f64()?;
-            if f >= PRICE_MIN_USD_OZ && f <= PRICE_MAX_USD_OZ {
+            if (PRICE_MIN_USD_OZ..=PRICE_MAX_USD_OZ).contains(&f) {
                 Some(f)
             } else {
                 None
@@ -435,10 +435,10 @@ fn find_price_in_json(val: &serde_json::Value) -> Option<f64> {
         }
         serde_json::Value::Object(map) => {
             for key in &["price", "ask", "bid", "spot", "usd", "rate"] {
-                if let Some(v) = map.get(*key) {
-                    if let Some(f) = find_price_in_json(v) {
-                        return Some(f);
-                    }
+                if let Some(v) = map.get(*key)
+                    && let Some(f) = find_price_in_json(v)
+                {
+                    return Some(f);
                 }
             }
             for v in map.values() {
@@ -473,10 +473,11 @@ fn last_number_in_range(s: &str, min: f64, max: f64) -> Option<f64> {
                 i += 1;
             }
             let num_str: String = chars[start..i].iter().filter(|&&c| c != ',').collect();
-            if let Ok(n) = num_str.parse::<f64>() {
-                if n >= min && n <= max {
-                    result = Some(n);
-                }
+            if let Ok(n) = num_str.parse::<f64>()
+                && n >= min
+                && n <= max
+            {
+                result = Some(n);
             }
         } else {
             i += 1;
@@ -494,7 +495,7 @@ fn trimmed_median(mut values: Vec<f64>) -> f64 {
         values.remove(values.len() - 1);
     }
     let mid = values.len() / 2;
-    if values.len() % 2 == 0 {
+    if values.len().is_multiple_of(2) {
         (values[mid - 1] + values[mid]) / 2.0
     } else {
         values[mid]
@@ -503,14 +504,14 @@ fn trimmed_median(mut values: Vec<f64>) -> f64 {
 
 fn apply_outlier_flags(results: &mut [SourceResult], median: f64) {
     for r in results.iter_mut() {
-        if let Some(v) = r.extracted_value {
-            if (v - median).abs() / median > OUTLIER_PCT {
-                r.status = if r.status == "manual" {
-                    "manual-outlier".to_string()
-                } else {
-                    "outlier".to_string()
-                };
-            }
+        if let Some(v) = r.extracted_value
+            && (v - median).abs() / median > OUTLIER_PCT
+        {
+            r.status = if r.status == "manual" {
+                "manual-outlier".to_string()
+            } else {
+                "outlier".to_string()
+            };
         }
     }
 }
@@ -577,15 +578,19 @@ fn prompt_evidence_note(def: &SourceDef) -> Option<String> {
 
 // ─── Collect source results ───────────────────────────────────────────────────
 
+struct SourceCollectionSpec<'a> {
+    value_desc: &'a str,
+    unit: &'a str,
+    example: &'a str,
+    sanity_min: f64,
+    sanity_max: f64,
+}
+
 fn collect_source_results(
     sources: &[SourceDef],
     fetch_results: Vec<FetchResult>,
     manual: bool,
-    value_desc: &str,
-    unit: &str,
-    example: &str,
-    sanity_min: f64,
-    sanity_max: f64,
+    spec: SourceCollectionSpec<'_>,
 ) -> Vec<SourceResult> {
     let mut out = Vec::new();
 
@@ -593,7 +598,7 @@ fn collect_source_results(
         let auto_value = fetch.extracted_value;
         let (value, fetched_at_ms, was_manual, value_origin, evidence_note, evidence_timestamp_ms) =
             if manual {
-                let v = prompt_value(def, value_desc, unit, example);
+                let v = prompt_value(def, spec.value_desc, spec.unit, spec.example);
                 let origin = if v.is_some() { "manual" } else { "manual-skip" };
                 let evidence = v.and_then(|_| prompt_evidence_note(def));
                 let evidence_ts = evidence.as_ref().map(|_| now_ms());
@@ -609,7 +614,7 @@ fn collect_source_results(
                 )
             } else {
                 println!("\n  [auto-parse failed for {}]", def.name);
-                let v = prompt_value(def, value_desc, unit, example);
+                let v = prompt_value(def, spec.value_desc, spec.unit, spec.example);
                 let origin = if v.is_some() {
                     "manual-after-auto-fail"
                 } else {
@@ -620,7 +625,7 @@ fn collect_source_results(
                 (v, now_ms(), true, origin.to_string(), evidence, evidence_ts)
             };
 
-        let value = value.filter(|&v| v >= sanity_min && v <= sanity_max);
+        let value = value.filter(|&v| v >= spec.sanity_min && v <= spec.sanity_max);
         let status = match &value {
             None => "failed",
             Some(_) if was_manual => "manual",
@@ -893,7 +898,7 @@ fn canonical_json(value: &serde_json::Value) -> Result<String, String> {
         }
         serde_json::Value::Object(map) => {
             let mut entries = map.iter().collect::<Vec<_>>();
-            entries.sort_by(|(key_a, _), (key_b, _)| key_a.cmp(key_b));
+            entries.sort_by_key(|(key, _)| *key);
 
             let mut out = String::from("{");
             for (idx, (key, value)) in entries.into_iter().enumerate() {
@@ -1234,7 +1239,7 @@ fn format_timestamp(ts_secs: u64) -> String {
 }
 
 fn is_leap(y: u64) -> bool {
-    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+    (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400)
 }
 
 fn format_flakes_constant(flakes: u64) -> String {
@@ -1677,11 +1682,13 @@ async fn run_ceremony(cli: Cli) {
         PROD_SOURCES,
         prod_fetch,
         manual,
-        "annual mine production",
-        "metric tonnes",
-        "3630",
-        PROD_MIN_TONNES,
-        PROD_MAX_TONNES,
+        SourceCollectionSpec {
+            value_desc: "annual mine production",
+            unit: "metric tonnes",
+            example: "3630",
+            sanity_min: PROD_MIN_TONNES,
+            sanity_max: PROD_MAX_TONNES,
+        },
     );
 
     let prod_values: Vec<f64> = prod_results
@@ -1726,11 +1733,13 @@ async fn run_ceremony(cli: Cli) {
         PRICE_SOURCES,
         price_fetch,
         manual,
-        "live gold spot price",
-        "USD per troy oz",
-        "2386.00",
-        PRICE_MIN_USD_OZ,
-        PRICE_MAX_USD_OZ,
+        SourceCollectionSpec {
+            value_desc: "live gold spot price",
+            unit: "USD per troy oz",
+            example: "2386.00",
+            sanity_min: PRICE_MIN_USD_OZ,
+            sanity_max: PRICE_MAX_USD_OZ,
+        },
     );
 
     let price_values: Vec<f64> = price_results
@@ -2013,10 +2022,12 @@ mod tests {
 
     #[test]
     fn sanity_bounds() {
-        assert!(DRY_RUN_PROD_TONNES >= PROD_MIN_TONNES);
-        assert!(DRY_RUN_PROD_TONNES <= PROD_MAX_TONNES);
-        assert!(DRY_RUN_PRICE_USD_OZ >= PRICE_MIN_USD_OZ);
-        assert!(DRY_RUN_PRICE_USD_OZ <= PRICE_MAX_USD_OZ);
+        const {
+            assert!(DRY_RUN_PROD_TONNES >= PROD_MIN_TONNES);
+            assert!(DRY_RUN_PROD_TONNES <= PROD_MAX_TONNES);
+            assert!(DRY_RUN_PRICE_USD_OZ >= PRICE_MIN_USD_OZ);
+            assert!(DRY_RUN_PRICE_USD_OZ <= PRICE_MAX_USD_OZ);
+        }
     }
 
     #[test]
@@ -2076,11 +2087,13 @@ mod tests {
             &PROD_SOURCES[..1],
             fetches,
             false,
-            "annual mine production",
-            "metric tonnes",
-            "3630",
-            PROD_MIN_TONNES,
-            PROD_MAX_TONNES,
+            SourceCollectionSpec {
+                value_desc: "annual mine production",
+                unit: "metric tonnes",
+                example: "3630",
+                sanity_min: PROD_MIN_TONNES,
+                sanity_max: PROD_MAX_TONNES,
+            },
         );
 
         assert_eq!(results.len(), 1);

@@ -179,7 +179,7 @@ impl DerivationPath {
             0x80000000 | self.purpose,   // 44'
             0x80000000 | self.coin_type, // 999'
             0x80000000 | self.account,   // account'
-            0x80000000 | 0,              // 0' (change)
+            0x80000000,                  // 0' (change)
         ]
     }
 }

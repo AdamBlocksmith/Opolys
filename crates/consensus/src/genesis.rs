@@ -193,10 +193,10 @@ pub fn apply_genesis_accounts(config: &GenesisConfig, accounts: &mut AccountStor
         if accounts.get_account(account_id).is_none() {
             accounts.create_account(account_id.clone()).ok();
         }
-        if let Some(account) = accounts.get_account_mut(account_id) {
-            if !pk.is_empty() {
-                account.public_key = Some(pk.clone());
-            }
+        if let Some(account) = accounts.get_account_mut(account_id)
+            && !pk.is_empty()
+        {
+            account.public_key = Some(pk.clone());
         }
         accounts.credit(account_id, *amount).ok();
         total_issued = total_issued.saturating_add(*amount);

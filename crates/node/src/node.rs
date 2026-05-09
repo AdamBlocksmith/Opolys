@@ -353,7 +353,7 @@ impl ChainState {
             .iter()
             .map(|((height, hash), refiners)| {
                 let mut refiners: Vec<ObjectId> = refiners.iter().cloned().collect();
-                refiners.sort_by(|a, b| a.0.0.cmp(&b.0.0));
+                refiners.sort_by_key(|a| a.0.0);
                 (*height, hash.clone(), refiners)
             })
             .collect();
@@ -683,7 +683,7 @@ fn canonical_json(value: &serde_json::Value) -> Result<String, String> {
         }
         serde_json::Value::Object(map) => {
             let mut entries = map.iter().collect::<Vec<_>>();
-            entries.sort_by(|(key_a, _), (key_b, _)| key_a.cmp(key_b));
+            entries.sort_by_key(|(key, _)| *key);
 
             let mut out = String::from("{");
             for (idx, (key, value)) in entries.into_iter().enumerate() {
@@ -1778,38 +1778,36 @@ impl OpolysNode {
         Self::prune_attestation_finality_index(&mut chain);
 
         // Verify Refiner signature if present
-        if block.header.refiner_signature.is_some() && !block.header.producer.0.is_zero() {
-            if let Some(ref sig_bytes) = block.header.refiner_signature {
-                if sig_bytes.len() != 64 {
-                    return Err("Refiner signature must be 64 bytes".to_string());
-                }
-                let block_hash = compute_block_hash(&block.header);
-                let (pk_array, sig_array) = {
-                    let account = accounts
-                        .get_account(&block.header.producer)
-                        .ok_or_else(|| "Refiner block producer account not found".to_string())?;
-                    let pk_bytes = account.public_key.as_ref().ok_or_else(|| {
-                        "Refiner block producer public key not registered".to_string()
-                    })?;
-                    if pk_bytes.len() != 32 {
-                        return Err(
-                            "Refiner block producer public key must be 32 bytes".to_string()
-                        );
-                    }
-                    let mut pk_array = [0u8; 32];
-                    pk_array.copy_from_slice(pk_bytes);
-                    let mut sig_array = [0u8; 64];
-                    sig_array.copy_from_slice(sig_bytes);
-                    (pk_array, sig_array)
-                };
-                let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&pk_array)
-                    .map_err(|_| "Refiner block producer public key is invalid".to_string())?;
-                let signature = ed25519_dalek::Signature::from_bytes(&sig_array);
-                let signing_payload = refiner_block_signing_payload(&block_hash);
-                verifying_key
-                    .verify(&signing_payload, &signature)
-                    .map_err(|_| "Refiner signature verification failed".to_string())?;
+        if let Some(ref sig_bytes) = block.header.refiner_signature
+            && !block.header.producer.0.is_zero()
+        {
+            if sig_bytes.len() != 64 {
+                return Err("Refiner signature must be 64 bytes".to_string());
             }
+            let block_hash = compute_block_hash(&block.header);
+            let (pk_array, sig_array) = {
+                let account = accounts
+                    .get_account(&block.header.producer)
+                    .ok_or_else(|| "Refiner block producer account not found".to_string())?;
+                let pk_bytes = account.public_key.as_ref().ok_or_else(|| {
+                    "Refiner block producer public key not registered".to_string()
+                })?;
+                if pk_bytes.len() != 32 {
+                    return Err("Refiner block producer public key must be 32 bytes".to_string());
+                }
+                let mut pk_array = [0u8; 32];
+                pk_array.copy_from_slice(pk_bytes);
+                let mut sig_array = [0u8; 64];
+                sig_array.copy_from_slice(sig_bytes);
+                (pk_array, sig_array)
+            };
+            let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&pk_array)
+                .map_err(|_| "Refiner block producer public key is invalid".to_string())?;
+            let signature = ed25519_dalek::Signature::from_bytes(&sig_array);
+            let signing_payload = refiner_block_signing_payload(&block_hash);
+            verifying_key
+                .verify(&signing_payload, &signature)
+                .map_err(|_| "Refiner signature verification failed".to_string())?;
         }
 
         // PoW rewards can only be credited to a registered account whose
@@ -1884,9 +1882,10 @@ impl OpolysNode {
         // Detect double-signing locally: if a refiner signed a different block at
         // the same height, build evidence for inclusion in the next mined block.
         let mut new_evidence: Vec<DoubleSignEvidence> = Vec::new();
-        if block.header.refiner_signature.is_some() && !block.header.producer.0.is_zero() {
+        if let Some(sig_bytes) = block.header.refiner_signature.as_ref()
+            && !block.header.producer.0.is_zero()
+        {
             let block_hash = compute_block_hash(&block.header);
-            let sig_bytes = block.header.refiner_signature.as_ref().unwrap().clone();
             let key = (block.header.height, block.header.producer.to_hex());
             if let Some((prev_hash, prev_sig)) = chain.producer_signatures.get(&key) {
                 if *prev_hash != block_hash {
@@ -1906,13 +1905,13 @@ impl OpolysNode {
                         hash_a: prev_hash.clone(),
                         signature_a: prev_sig.clone(),
                         hash_b: block_hash,
-                        signature_b: sig_bytes,
+                        signature_b: sig_bytes.clone(),
                     });
                 }
             } else {
                 chain
                     .producer_signatures
-                    .insert(key, (block_hash, sig_bytes));
+                    .insert(key, (block_hash, sig_bytes.clone()));
             }
         }
 
@@ -2024,7 +2023,7 @@ impl OpolysNode {
         }
 
         // FIX 3: evict expired mempool transactions at epoch boundaries
-        if block.header.height > 0 && block.header.height % opolys_core::EPOCH == 0 {
+        if block.header.height > 0 && block.header.height.is_multiple_of(opolys_core::EPOCH) {
             let evicted = mempool.evict_expired(now_secs);
             if evicted > 0 {
                 tracing::info!(
@@ -2128,10 +2127,10 @@ impl OpolysNode {
         chain.state_root = account_hasher.finalize();
 
         // Persist state to disk
-        if let Some(ref store) = self.store {
-            if let Err(e) = Self::persist_state(store, &chain, &accounts, &refiners, block) {
-                tracing::error!("Failed to persist state: {}", e);
-            }
+        if let Some(ref store) = self.store
+            && let Err(e) = Self::persist_state(store, &chain, &accounts, &refiners, block)
+        {
+            tracing::error!("Failed to persist state: {}", e);
         }
 
         // Release all write locks before accessing pending_slash_evidence

@@ -153,7 +153,7 @@ impl BlockchainStore {
             .ok_or_else(|| "Column family 'blocks' not found".to_string())?;
 
         self.db
-            .put_cf(&cf, &height_key, encode_value(&data))
+            .put_cf(&cf, height_key, encode_value(&data))
             .map_err(|e| format!("Block put failed: {}", e))?;
 
         // Store the height of the latest block for quick lookup
@@ -177,7 +177,7 @@ impl BlockchainStore {
             .cf_handle("blocks")
             .ok_or_else(|| "Column family 'blocks' not found".to_string())?;
 
-        match self.db.get_cf(&cf, &height_key) {
+        match self.db.get_cf(&cf, height_key) {
             Ok(Some(data)) => {
                 let payload = decode_value("Block", &data)?;
                 let block: Block = Block::try_from_slice(&payload)
@@ -303,7 +303,7 @@ impl BlockchainStore {
         let hash_key = format!("hash_{}", block_hash.to_hex());
 
         let mut batch = WriteBatch::default();
-        batch.put_cf(&blocks_cf, &height_key, encode_value(&block_data));
+        batch.put_cf(&blocks_cf, height_key, encode_value(&block_data));
         batch.put_cf(&blocks_cf, hash_key.as_bytes(), encode_value(&height_key));
         batch.put_cf(&chain_cf, b"latest_block_height", encode_value(&height_key));
         batch.put_cf(&chain_cf, b"chain_state", encode_value(&chain_data));

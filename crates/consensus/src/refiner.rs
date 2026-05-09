@@ -438,9 +438,9 @@ impl RefinerSet {
             .iter()
             .filter(|(_, v)| {
                 v.status == RefinerStatus::Bonding
-                    && v.entries.first().map_or(false, |e| {
-                        current_height >= e.bonded_at_height.saturating_add(EPOCH)
-                    })
+                    && v.entries
+                        .first()
+                        .is_some_and(|e| current_height >= e.bonded_at_height.saturating_add(EPOCH))
             })
             .map(|(id, _)| id.clone())
             .collect();
@@ -472,7 +472,7 @@ impl RefinerSet {
             .filter(|(_, v)| v.status != RefinerStatus::Slashed && v.total_stake() > 0)
             .map(|(id, v)| (id.clone(), v.weight(current_timestamp)))
             .collect();
-        eligible.sort_by(|a, b| b.1.cmp(&a.1));
+        eligible.sort_by_key(|(_, weight)| std::cmp::Reverse(*weight));
 
         let mut newly_activated = Vec::new();
         let mut newly_demoted = Vec::new();
@@ -703,7 +703,7 @@ impl RefinerSet {
     /// Also includes the unbonding queue to capture pending stake withdrawals.
     pub fn compute_state_root(&self) -> opolys_core::Hash {
         let mut sorted_ids: Vec<&ObjectId> = self.cached_refiners.keys().collect();
-        sorted_ids.sort_by(|a, b| a.0.0.cmp(&b.0.0));
+        sorted_ids.sort_by_key(|a| a.0.0);
 
         let mut hasher = Blake3Hasher::new();
         hasher.update(DOMAIN_STATE_ROOT);
@@ -764,6 +764,12 @@ impl RefinerSet {
 
         // Fallback: if no refiner was selected due to rounding, pick the last active one.
         active.last().copied()
+    }
+}
+
+impl Default for RefinerSet {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -857,7 +863,7 @@ mod tests {
             vs.unbonding_queue[0].amount,
             MIN_BOND_STAKE + MIN_BOND_STAKE / 2
         );
-        assert_eq!(vs.unbonding_queue[0].matures_at, 500 + EPOCH as u64);
+        assert_eq!(vs.unbonding_queue[0].matures_at, 500 + EPOCH);
     }
 
     #[test]

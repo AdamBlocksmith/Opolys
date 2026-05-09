@@ -220,7 +220,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Balance { address } => {
             let client = reqwest::Client::new();
             let resp = client
-                .post(&format!("{}/rpc", cli.rpc_url))
+                .post(format!("{}/rpc", cli.rpc_url))
                 .json(&serde_json::json!({
                     "jsonrpc": "2.0",
                     "method": "opl_getBalance",
@@ -340,7 +340,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Send { tx_hex } => {
             let client = reqwest::Client::new();
             let resp = client
-                .post(&format!("{}/rpc", cli.rpc_url))
+                .post(format!("{}/rpc", cli.rpc_url))
                 .json(&serde_json::json!({
                     "jsonrpc": "2.0",
                     "method": "opl_sendTransaction",
@@ -396,7 +396,7 @@ fn validate_rpc_url(rpc_url: &str) -> Result<(), String> {
 async fn query_nonce(rpc_url: &str, address: String) -> Result<u64, Box<dyn std::error::Error>> {
     let client = reqwest::Client::new();
     let resp = client
-        .post(&format!("{}/rpc", rpc_url))
+        .post(format!("{}/rpc", rpc_url))
         .json(&serde_json::json!({
             "jsonrpc": "2.0",
             "method": "opl_getAccount",

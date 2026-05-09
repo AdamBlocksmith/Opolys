@@ -392,9 +392,7 @@ pub fn validate_block(
 
         if has_pow {
             // PoW block — verify the proof-of-work
-            if let Err(e) = crate::pow::verify_pow_light(&block.header, block.header.difficulty) {
-                return Err(e);
-            }
+            crate::pow::verify_pow_light(&block.header, block.header.difficulty)?;
         } else if has_refiner_signature {
             // Refiner block — verify the refiner's ed25519 signature
             // 1. The signature must be exactly 64 bytes (ed25519)
@@ -451,7 +449,7 @@ mod tests {
             data: vec![],
             public_key: vec![],
         };
-        let root1 = compute_transaction_root(&[tx.clone()]);
+        let root1 = compute_transaction_root(std::slice::from_ref(&tx));
         let root2 = compute_transaction_root(&[tx]);
         assert_eq!(root1, root2);
     }

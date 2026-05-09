@@ -159,6 +159,7 @@ pub struct BlockSubmissionResult {
 
 impl RpcState {
     /// Create RPC state wrapping all shared node components.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         chain: Arc<RwLock<ChainInfo>>,
         accounts: Arc<RwLock<AccountStore>>,
@@ -220,16 +221,16 @@ fn constant_time_key_eq(provided: &str, required: &str) -> bool {
 
 /// Verify `Authorization: Bearer <key>` or `X-Api-Key: <key>` header.
 fn check_api_key(headers: &HeaderMap, required_key: &str) -> bool {
-    if let Some(val) = headers.get("authorization").and_then(|v| v.to_str().ok()) {
-        if val.starts_with("Bearer ") && constant_time_key_eq(&val["Bearer ".len()..], required_key)
-        {
-            return true;
-        }
+    if let Some(val) = headers.get("authorization").and_then(|v| v.to_str().ok())
+        && val.starts_with("Bearer ")
+        && constant_time_key_eq(&val["Bearer ".len()..], required_key)
+    {
+        return true;
     }
-    if let Some(val) = headers.get("x-api-key").and_then(|v| v.to_str().ok()) {
-        if constant_time_key_eq(val, required_key) {
-            return true;
-        }
+    if let Some(val) = headers.get("x-api-key").and_then(|v| v.to_str().ok())
+        && constant_time_key_eq(val, required_key)
+    {
+        return true;
     }
     false
 }
@@ -279,20 +280,19 @@ pub async fn handle_jsonrpc(
     }
 
     // Layer 3: API key check for write and mining methods
-    if needs_auth {
-        if let Some(ref required_key) = state.api_key {
-            if !check_api_key(&headers, required_key) {
-                return (
-                    StatusCode::UNAUTHORIZED,
-                    Json(JsonRpcResponse {
-                        jsonrpc: "2.0".to_string(),
-                        result: None,
-                        error: Some(JsonRpcError::unauthorized()),
-                        id: req.id,
-                    }),
-                );
-            }
-        }
+    if needs_auth
+        && let Some(ref required_key) = state.api_key
+        && !check_api_key(&headers, required_key)
+    {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                result: None,
+                error: Some(JsonRpcError::unauthorized()),
+                id: req.id,
+            }),
+        );
     }
 
     let result = match req.method.as_str() {
@@ -471,7 +471,7 @@ async fn handle_get_latest_blocks(
     let finalized_height = chain.finalized_height;
     drop(chain);
     let mut blocks = Vec::new();
-    let limit = count.min(50) as u64;
+    let limit = count.min(50);
     for h in (0..=current_height).rev().take(limit as usize) {
         match state.store.load_block(h) {
             Ok(Some(block)) => blocks.push(block_to_response(&block, finalized_height)),
@@ -1034,11 +1034,11 @@ fn attestation_confidence_weight(
         if !seen_refiners.insert(attestation.refiner.clone()) {
             continue;
         }
-        if let Some(refiner) = refiners.get_refiner(&attestation.refiner) {
-            if refiner.status == RefinerStatus::Active {
-                attesting_weight =
-                    attesting_weight.saturating_add(refiner.weight(current_timestamp) as u128);
-            }
+        if let Some(refiner) = refiners.get_refiner(&attestation.refiner)
+            && refiner.status == RefinerStatus::Active
+        {
+            attesting_weight =
+                attesting_weight.saturating_add(refiner.weight(current_timestamp) as u128);
         }
     }
 
@@ -1046,11 +1046,11 @@ fn attestation_confidence_weight(
 }
 
 fn confidence_milli(attesting_weight: u128, total_active_weight: u128) -> u64 {
-    if total_active_weight > 0 {
-        ((attesting_weight.saturating_mul(1000)) / total_active_weight).min(1000) as u64
-    } else {
-        0
-    }
+    attesting_weight
+        .saturating_mul(1000)
+        .checked_div(total_active_weight)
+        .unwrap_or(0)
+        .min(1000) as u64
 }
 
 /// Parse an ObjectId from a hex string.
@@ -1554,7 +1554,9 @@ mod tests {
 
     #[test]
     fn rpc_body_limit_fits_hex_encoded_max_block() {
-        assert!(MAX_RPC_REQUEST_BODY_BYTES > MAX_BLOCK_SIZE_BYTES * 2);
-        assert!(MAX_RPC_REQUEST_BODY_BYTES < (MAX_BLOCK_SIZE_BYTES * 2) + 65_536);
+        const {
+            assert!(MAX_RPC_REQUEST_BODY_BYTES > MAX_BLOCK_SIZE_BYTES * 2);
+            assert!(MAX_RPC_REQUEST_BODY_BYTES < (MAX_BLOCK_SIZE_BYTES * 2) + 65_536);
+        }
     }
 }

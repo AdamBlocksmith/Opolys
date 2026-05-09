@@ -1637,4 +1637,14 @@ A comprehensive audit of all consensus-critical formulas and constants in the co
 
 ---
 
+#### L1: Build reproducibility and CI
+**Location:** `rust-toolchain.toml`, `.github/workflows/ci.yml`
+**Status:** **FIXED**
+
+**What it is:** Mainnet source builds should not silently drift across Rust compiler versions, and pushes should be checked automatically before they become launch candidates.
+
+**How fixed:** The repository now pins Rust `1.95.0` with `rustfmt` and `clippy` components in `rust-toolchain.toml`. GitHub CI runs formatting, clippy with `-D warnings`, and the full workspace test suite on push and pull request.
+
+---
+
 *This document is the single source of truth for Opolys development. Update it with every design decision and implementation change.*

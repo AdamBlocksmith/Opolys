@@ -8,6 +8,8 @@
 //! The same ed25519 key is used for both transaction signing and refiner
 //! block signing. Full wallet recovery from mnemonic alone is supported.
 
+#![allow(clippy::items_after_test_module)]
+
 use ed25519_dalek::{Signature as DalekSignature, Signer, SigningKey, Verifier, VerifyingKey};
 use opolys_core::ObjectId;
 use opolys_crypto::hash_to_object_id;
@@ -202,11 +204,9 @@ impl Wallet {
 
         fs::create_dir_all(&self.keys_dir).map_err(|e| WalletError::IoError(e.to_string()))?;
 
-        let key_path = self.keys_dir.join(format!(
-            "{}_{}.key",
-            name,
-            object_id.to_hex()[..16].to_string()
-        ));
+        let key_path = self
+            .keys_dir
+            .join(format!("{}_{}.key", name, &object_id.to_hex()[..16]));
         let mut key_bytes = keypair.to_bytes();
         write_private_key_file(&key_path, &key_bytes)
             .map_err(|e| WalletError::IoError(e.to_string()))?;

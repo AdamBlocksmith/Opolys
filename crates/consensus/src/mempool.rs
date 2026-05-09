@@ -302,6 +302,12 @@ impl Mempool {
     }
 }
 
+impl Default for Mempool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

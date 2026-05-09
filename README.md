@@ -248,6 +248,10 @@ core ← crypto ← consensus ← execution ← node → rpc
 
 EVO-OMAP is vendored at `vendor/evo-omap` from upstream commit `6da0fac5d73b1a0ac5b4589454a66c2f83ce93c8`. Opolys builds against this local copy so mainnet consensus code does not fetch its proof-of-work engine from GitHub at build time.
 
+### Build Reproducibility
+
+Opolys pins the Rust toolchain in `rust-toolchain.toml`. CI uses the same toolchain and runs `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace` on every push and pull request.
+
 ---
 
 ## Cryptographic Stack

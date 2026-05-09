@@ -14,6 +14,8 @@
 //! via channels. The node sends commands through `NetworkCommand` and
 //! receives events via `NetworkEvent`.
 
+#![allow(clippy::items_after_test_module)]
+
 use crate::behaviour::{
     GOSSIP_ATTESTATION_TOPIC, GOSSIP_BLOCK_TOPIC, GOSSIP_TX_TOPIC, OpolysBehaviour,
     OpolysBehaviourEvent, opolys_agent_string, sync_protocol,

@@ -163,10 +163,7 @@ impl RateLimiter {
     /// different rate limits to different method tiers from a single limiter instance.
     pub fn check_limit(&mut self, key: &str, max: usize) -> bool {
         let now = Instant::now();
-        let entries = self
-            .requests
-            .entry(key.to_string())
-            .or_insert_with(Vec::new);
+        let entries = self.requests.entry(key.to_string()).or_default();
         entries.retain(|t| now.duration_since(*t).as_secs() < 60);
         if entries.len() >= max {
             return false;

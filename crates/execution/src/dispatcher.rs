@@ -169,10 +169,11 @@ impl TransactionDispatcher {
         // their account. The first real transaction from a pre-funded account
         // registers the key; subsequent transactions update it. This enables
         // future signature verification without a separate key registry.
-        if result.success && !tx.public_key.is_empty() {
-            if let Some(account) = accounts.get_account_mut(sender) {
-                account.public_key = Some(tx.public_key.clone());
-            }
+        if result.success
+            && !tx.public_key.is_empty()
+            && let Some(account) = accounts.get_account_mut(sender)
+        {
+            account.public_key = Some(tx.public_key.clone());
         }
 
         result
@@ -235,13 +236,13 @@ impl TransactionDispatcher {
             Ok(total) => total,
             Err(e) => return ApplyResult::err(&e),
         };
-        if let Some(account) = accounts.get_account(sender) {
-            if account.balance < total_needed {
-                return ApplyResult::err(&format!(
-                    "Insufficient balance for bond: need {}, have {}",
-                    total_needed, account.balance
-                ));
-            }
+        if let Some(account) = accounts.get_account(sender)
+            && account.balance < total_needed
+        {
+            return ApplyResult::err(&format!(
+                "Insufficient balance for bond: need {}, have {}",
+                total_needed, account.balance
+            ));
         }
 
         // Debit the sender's account for stake + fee
@@ -311,13 +312,13 @@ impl TransactionDispatcher {
             Ok(total) => total,
             Err(e) => return ApplyResult::err(&e),
         };
-        if let Some(account) = accounts.get_account(sender) {
-            if account.balance < total_fee {
-                return ApplyResult::err(&format!(
-                    "Insufficient balance for unbond fees: need {}, have {}",
-                    total_fee, account.balance
-                ));
-            }
+        if let Some(account) = accounts.get_account(sender)
+            && account.balance < total_fee
+        {
+            return ApplyResult::err(&format!(
+                "Insufficient balance for unbond fees: need {}, have {}",
+                total_fee, account.balance
+            ));
         }
 
         // Perform FIFO unbond — oldest entries consumed first, queued for delayed return
@@ -937,7 +938,7 @@ mod tests {
             refiners.unbonding_queue[0].amount,
             MIN_BOND_STAKE + MIN_BOND_STAKE / 2
         );
-        assert_eq!(refiners.unbonding_queue[0].matures_at, 3 + EPOCH as u64);
+        assert_eq!(refiners.unbonding_queue[0].matures_at, 3 + EPOCH);
 
         // Alice's balance after unbond: previous balance - 1 (fee) - unbond_assay
         let unbond_amount = MIN_BOND_STAKE + MIN_BOND_STAKE / 2; // 1.5 OPL

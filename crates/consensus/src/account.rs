@@ -271,7 +271,7 @@ impl AccountStore {
     /// balances, nonces, and public keys.
     pub fn compute_state_root(&self) -> opolys_core::Hash {
         let mut sorted_ids: Vec<&ObjectId> = self.accounts.keys().collect();
-        sorted_ids.sort_by(|a, b| a.0.0.cmp(&b.0.0));
+        sorted_ids.sort_by_key(|a| a.0.0);
 
         let mut hasher = Blake3Hasher::new();
         hasher.update(DOMAIN_STATE_ROOT);
@@ -299,6 +299,12 @@ pub struct TransferResult {
     pub fee_burned: FlakeAmount,
     /// The sender's new nonce after this transaction.
     pub new_nonce: u64,
+}
+
+impl Default for AccountStore {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
