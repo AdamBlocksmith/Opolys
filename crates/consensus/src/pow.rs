@@ -198,7 +198,7 @@ pub fn epoch_seed_material(header: &BlockHeader) -> Vec<u8> {
 /// Returns `Ok(())` if valid, `Err(InvalidProofOfWork)` otherwise.
 pub fn verify_pow_light(header: &BlockHeader, difficulty: u64) -> Result<(), OpolysError> {
     if difficulty == 0 {
-        return Ok(());
+        return Err(OpolysError::InvalidProofOfWork);
     }
 
     let nonce_bytes = header
@@ -475,6 +475,6 @@ mod tests {
         let mut header = make_header(1, 0);
         header.pow_proof = None;
         let result = verify_pow_light(&header, 0);
-        assert!(result.is_ok());
+        assert!(matches!(result, Err(OpolysError::InvalidProofOfWork)));
     }
 }

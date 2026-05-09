@@ -1607,4 +1607,14 @@ A comprehensive audit of all consensus-critical formulas and constants in the co
 
 ---
 
+#### M6: Light PoW verifier accepted zero difficulty
+**Location:** `consensus/pow.rs`
+**Status:** **FIXED**
+
+**What it is:** `verify_pow_light(_, 0)` returned `Ok(())`. Difficulty zero is not a valid consensus difficulty, so accepting it would make a future caller bug fail open into free proof-of-work.
+
+**How fixed:** The light verifier now rejects difficulty zero with `InvalidProofOfWork`. The zero-difficulty regression test now asserts rejection.
+
+---
+
 *This document is the single source of truth for Opolys development. Update it with every design decision and implementation change.*
