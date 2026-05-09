@@ -546,6 +546,18 @@ impl BlockchainStore {
             .put_cf(&cf, b"active_refiner_ids", encode_value(&active_data))
             .map_err(|e| format!("Active set index put failed: {}", e))?;
 
+        let all_refiners = refiners.all_refiners();
+        let count = all_refiners.len() as u64;
+        let data = borsh::to_vec(&all_refiners)
+            .map_err(|e| format!("Refiner serialization failed: {}", e))?;
+        self.db
+            .put_cf(&cf, b"all_refiners", encode_value(&data))
+            .map_err(|e| format!("Refiner blob put failed: {}", e))?;
+
+        self.db
+            .put_cf(&cf, b"refiner_count", encode_value(&count.to_le_bytes()))
+            .map_err(|e| format!("Refiner count put failed: {}", e))?;
+
         Ok(())
     }
 

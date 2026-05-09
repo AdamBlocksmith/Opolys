@@ -33,3 +33,9 @@ jobs:
 
       - name: Run tests
         run: cargo test --workspace
+
+      - name: Run EVO-OMAP tests
+        run: |
+          cargo test --manifest-path vendor/evo-omap/Cargo.toml test_known_answer --lib
+          cargo test --manifest-path vendor/evo-omap/Cargo.toml test_memory_merkle --lib
+          cargo test --manifest-path vendor/evo-omap/Cargo.toml compute_epoch_seed_with_epoch_length --lib

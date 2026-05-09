@@ -1186,7 +1186,7 @@ async fn handle_network_event(
 
                     let tx_data_for_rebroadcast = data.clone();
                     let tx_fee = tx.fee;
-                    let priority = tx_fee as f64;
+                    let priority = tx_fee;
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
@@ -1358,16 +1358,24 @@ async fn handle_network_event(
             }
 
             // FIX 7: send memory-fingerprinting challenge before accepting gossip
-            let height = node.chain.read().await.current_height;
+            let (height, parent_hash) = {
+                let chain = node.chain.read().await;
+                (chain.current_height, chain.latest_block_hash.clone())
+            };
             let nonce: u64 = rand::random();
             let expected_hash = opolys_consensus::compute_challenge_hash(
+                opolys_core::MAINNET_CHAIN_ID,
+                &parent_hash,
                 height,
                 nonce,
                 &net.local_peer_id().to_bytes(),
                 &peer_id.to_bytes(),
             );
             pending_challenges.insert(peer_id, (expected_hash, std::time::Instant::now()));
-            if let Err(e) = net.send_challenge(peer_id, height, nonce).await {
+            if let Err(e) = net
+                .send_challenge(peer_id, height, nonce, parent_hash.0)
+                .await
+            {
                 tracing::debug!(peer = %peer_id, error = %e, "Failed to send memory challenge");
             }
 
@@ -1496,9 +1504,12 @@ async fn handle_network_event(
             request_id,
             height,
             nonce,
+            parent_hash,
         } => {
             // FIX 7: compute EVO-OMAP hash and reply to prove we have the dataset
             let hash_val = opolys_consensus::compute_challenge_hash(
+                opolys_core::MAINNET_CHAIN_ID,
+                &opolys_core::Hash(parent_hash),
                 height,
                 nonce,
                 &peer_id.to_bytes(),

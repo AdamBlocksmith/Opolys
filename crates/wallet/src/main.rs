@@ -145,7 +145,9 @@ fn parse_opl_amount(s: &str) -> Result<FlakeAmount, String> {
             let whole: u64 = parts[0]
                 .parse()
                 .map_err(|e| format!("Invalid amount: {}", e))?;
-            Ok(whole * FLAKES_PER_OPL)
+            whole
+                .checked_mul(FLAKES_PER_OPL)
+                .ok_or_else(|| "Amount is too large".to_string())
         }
         2 => {
             let whole: u64 = parts[0]
@@ -159,7 +161,10 @@ fn parse_opl_amount(s: &str) -> Result<FlakeAmount, String> {
             let frac: u64 = frac_str_padded[..6]
                 .parse()
                 .map_err(|e| format!("Invalid fraction: {}", e))?;
-            Ok(whole * FLAKES_PER_OPL + frac)
+            whole
+                .checked_mul(FLAKES_PER_OPL)
+                .and_then(|base| base.checked_add(frac))
+                .ok_or_else(|| "Amount is too large".to_string())
         }
         _ => Err("Invalid amount format".to_string()),
     }
@@ -419,6 +424,18 @@ async fn query_nonce(rpc_url: &str, address: String) -> Result<u64, Box<dyn std:
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn parse_opl_amount_rejects_overflow() {
+        assert!(parse_opl_amount("18446744073710").is_err());
+        assert!(parse_opl_amount("18446744073709.551616").is_err());
+    }
+
+    #[test]
+    fn parse_opl_amount_accepts_fractional_flakes() {
+        assert_eq!(parse_opl_amount("1").unwrap(), FLAKES_PER_OPL);
+        assert_eq!(parse_opl_amount("1.000001").unwrap(), FLAKES_PER_OPL + 1);
+    }
 
     #[test]
     fn cli_defaults_to_loopback_rpc_url() {

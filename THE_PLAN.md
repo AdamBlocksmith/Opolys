@@ -85,7 +85,7 @@ From `crates/core/src/constants.rs`:
 | `UNBONDING_DELAY_BLOCKS` | `960` | One epoch delay for unbonding |
 | `MIN_FEE` | `1` Flake | Floor for market-driven fees |
 | `MIN_BOND_STAKE` | `1,000,000` Flakes (1 OPL) | Minimum per new bond entry |
-| `BLOCK_VERSION` | `1` | Current block header version |
+| `BLOCK_VERSION` | `2` | Current block header version |
 | `SIGNATURE_TYPE_ED25519` | `0` | ed25519 signature type constant |
 | `EXTENSION_TYPE_NONE` | `0` | No extension data |
 | `EXTENSION_TYPE_ROLLUP` | `1` | Rollup data (reserved) |
@@ -759,7 +759,7 @@ Run with `cargo test --workspace`.
 
 Every block applied to the chain must pass these checks:
 
-1. **Version**: Must match `BLOCK_VERSION` (currently 1)
+1. **Version**: Must match `BLOCK_VERSION` (currently 2)
 2. **Height**: Must equal `parent_height + 1`
 3. **Previous hash**: Must match parent's hash (or `Hash::zero()` for genesis)
 4. **Timestamp**: Must be strictly greater than parent timestamp, and within `MAX_FUTURE_BLOCK_TIME_SECS` (5 min) of wall clock

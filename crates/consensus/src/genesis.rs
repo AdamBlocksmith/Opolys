@@ -187,21 +187,30 @@ pub fn build_genesis_block(config: &GenesisConfig) -> Block {
 /// No transactions are created — the balances are written directly
 /// into the chain state. This ensures genesis accounts exist from
 /// block 0 without requiring a coinbase transaction.
-pub fn apply_genesis_accounts(config: &GenesisConfig, accounts: &mut AccountStore) -> FlakeAmount {
+pub fn apply_genesis_accounts(
+    config: &GenesisConfig,
+    accounts: &mut AccountStore,
+) -> Result<FlakeAmount, String> {
     let mut total_issued: FlakeAmount = 0;
     for (account_id, amount, pk) in &config.genesis_accounts {
         if accounts.get_account(account_id).is_none() {
-            accounts.create_account(account_id.clone()).ok();
+            accounts
+                .create_account(account_id.clone())
+                .map_err(|e| format!("Failed to create genesis account: {}", e))?;
         }
         if let Some(account) = accounts.get_account_mut(account_id)
             && !pk.is_empty()
         {
             account.public_key = Some(pk.clone());
         }
-        accounts.credit(account_id, *amount).ok();
-        total_issued = total_issued.saturating_add(*amount);
+        accounts
+            .credit(account_id, *amount)
+            .map_err(|e| format!("Failed to credit genesis account: {}", e))?;
+        total_issued = total_issued
+            .checked_add(*amount)
+            .ok_or_else(|| "Genesis issued supply overflow".to_string())?;
     }
-    total_issued
+    Ok(total_issued)
 }
 
 /// Validate that a block conforms to genesis invariants.

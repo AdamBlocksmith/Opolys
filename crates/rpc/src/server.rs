@@ -67,6 +67,7 @@ use crate::jsonrpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse, RateLimiter}
 /// HTTP body must fit roughly 2x `MAX_BLOCK_SIZE_BYTES` plus envelope overhead.
 /// Method handlers still enforce decoded tx/block limits before deserializing.
 pub const MAX_RPC_REQUEST_BODY_BYTES: usize = (MAX_BLOCK_SIZE_BYTES * 2) + 16_384;
+const BLOCK_SUBMISSION_TIMEOUT_SECS: u64 = 30;
 
 /// Simplified chain info snapshot for RPC responses.
 ///
@@ -264,7 +265,20 @@ pub async fn handle_jsonrpc(
 
     // Layer 2: per-IP rate limiting
     {
-        let mut limiter = state.rate_limiter.lock().unwrap();
+        let mut limiter = match state.rate_limiter.lock() {
+            Ok(limiter) => limiter,
+            Err(_) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(JsonRpcResponse {
+                        jsonrpc: "2.0".to_string(),
+                        result: None,
+                        error: Some(JsonRpcError::internal_error("RPC rate limiter unavailable")),
+                        id: req.id,
+                    }),
+                );
+            }
+        };
         let rate_key = format!("{}:{}", ip, tier);
         if !limiter.check_limit(&rate_key, max_per_min) {
             return (
@@ -638,7 +652,8 @@ async fn handle_get_block_confidence(
     let mut included_attestations = Vec::new();
     let mut included_through_height = target_height;
 
-    for height in target_height.saturating_add(1)..=current_height {
+    let scan_through_height = current_height.min(target_height.saturating_add(EPOCH));
+    for height in target_height.saturating_add(1)..=scan_through_height {
         let block = match state.store.load_block(height) {
             Ok(Some(block)) => block,
             Ok(None) => break,
@@ -691,12 +706,9 @@ async fn handle_send_transaction(
     let fee = tx.fee;
     let action = format_action(&tx.action);
 
-    // Insert into mempool with priority based on fee/size ratio
-    let priority = if fee > 0 {
-        fee as f64 / tx_size.max(1) as f64
-    } else {
-        0.0
-    };
+    // Insert into mempool with integer fee-density priority, scaled by 1e6.
+    let priority =
+        ((fee as u128 * 1_000_000) / tx_size.max(1) as u128).min(u64::MAX as u128) as u64;
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -858,9 +870,13 @@ async fn handle_submit_solution(
         JsonRpcError::internal_error("Node is not accepting blocks — channel closed")
     })?;
 
-    let result = reply_rx
-        .await
-        .map_err(|_| JsonRpcError::internal_error("Node did not respond to block submission"))?;
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(BLOCK_SUBMISSION_TIMEOUT_SECS),
+        reply_rx,
+    )
+    .await
+    .map_err(|_| JsonRpcError::internal_error("Timed out waiting for block submission result"))?
+    .map_err(|_| JsonRpcError::internal_error("Node did not respond to block submission"))?;
 
     match result.block_hash {
         Some(hash) => serde_json::to_value(SubmitSolutionResponse {

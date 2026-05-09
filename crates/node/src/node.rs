@@ -19,7 +19,7 @@
 //! Key derivation: BIP-39 24-word mnemonics, SLIP-0010 ed25519.
 
 use clap::Parser;
-use ed25519_dalek::{Signer, Verifier};
+use ed25519_dalek::{Signer, SigningKey, Verifier};
 use opolys_consensus::block::{
     MAX_SLASH_EVIDENCE_PER_BLOCK, compute_attestation_root, compute_block_hash,
     compute_evidence_root, compute_genesis_ceremony_hash, compute_transaction_root,
@@ -50,6 +50,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 const BLOCK_TIMESTAMP_WINDOW_LEN: usize = EPOCH as usize + 1;
+const DRY_RUN_GENESIS_OPERATOR_SEED: [u8; 32] = [42u8; 32];
 
 /// A record of a banned peer, persisted across restarts.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
@@ -396,7 +397,7 @@ impl ChainState {
     /// would always return 1.0, which is the critical bug this method now
     /// avoids by requiring the caller to supply bonded_stake.
     pub fn stake_coverage(&self, bonded_stake: FlakeAmount) -> f64 {
-        emission::compute_stake_coverage(bonded_stake, self.total_issued)
+        emission::compute_stake_coverage(bonded_stake, self.total_issued) as f64 / 1000.0
     }
 }
 
@@ -730,6 +731,15 @@ fn load_genesis_config_from_attestation(path: &str) -> Result<GenesisConfig, Str
 
     let operator_public_key =
         decode_hex_array::<32>("operator_public_key", &attestation.operator_public_key)?;
+    let dry_run_public_key = SigningKey::from_bytes(&DRY_RUN_GENESIS_OPERATOR_SEED)
+        .verifying_key()
+        .to_bytes();
+    if operator_public_key == dry_run_public_key {
+        return Err(
+            "Genesis ceremony uses the dry-run operator key; refuse to start mainnet state"
+                .to_string(),
+        );
+    }
     let operator_signature =
         decode_hex_array::<64>("operator_signature", &attestation.operator_signature)?;
     let verifying_key =
@@ -988,7 +998,8 @@ impl OpolysNode {
                         let genesis_issued = opolys_consensus::genesis::apply_genesis_accounts(
                             &genesis_config,
                             &mut accounts,
-                        );
+                        )
+                        .unwrap_or_else(|e| panic!("Failed to apply genesis accounts: {}", e));
                         // Track genesis issuance in chain state
                         let mut chain = chain;
                         chain.total_issued = chain.total_issued.saturating_add(genesis_issued);

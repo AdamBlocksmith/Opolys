@@ -1496,6 +1496,7 @@ mod tests {
         let mut expected_data = Vec::new();
         expected_data.extend_from_slice(&prefixed_domain(DOMAIN_EPOCH));
         expected_data.extend_from_slice(&0u64.to_le_bytes());
+        expected_data.extend_from_slice(&0u64.to_le_bytes());
         let expected = blake3_256(&expected_data);
 
         assert_eq!(seed0, expected);
@@ -2442,6 +2443,7 @@ mod tests {
         // KAT: verify epoch seed 0 matches the prefixed-domain format.
         let mut expected_data = Vec::new();
         expected_data.extend_from_slice(&prefixed_domain(DOMAIN_EPOCH));
+        expected_data.extend_from_slice(&0u64.to_le_bytes());
         expected_data.extend_from_slice(&0u64.to_le_bytes());
         let expected = blake3_256(&expected_data);
         assert_eq!(

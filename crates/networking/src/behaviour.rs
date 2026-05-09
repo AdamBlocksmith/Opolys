@@ -127,6 +127,7 @@ pub enum OpolysNetworkEvent {
         request_id: InboundRequestId,
         height: u64,
         nonce: u64,
+        parent_hash: [u8; 32],
     },
 
     /// A memory-fingerprinting challenge response arrived (we must verify).

@@ -36,7 +36,9 @@ pub struct MempoolEntry {
     pub transaction: Transaction,
     /// Priority score used for ordering — higher scores are included in
     /// blocks first. Typically derived from fee-to-size ratio.
-    pub priority_score: f64,
+    pub priority_score: u64,
+    /// Serialized transaction size in bytes, captured once at admission.
+    pub tx_size: usize,
     /// Unix timestamp when the transaction entered the mempool, used as a
     /// tiebreaker (earlier transactions win among equal-priority entries).
     pub submitted_at: u64,
@@ -119,7 +121,7 @@ impl Mempool {
     pub fn add_transaction(
         &mut self,
         tx: Transaction,
-        priority_score: f64,
+        priority_score: u64,
         submitted_at: u64,
         account_nonce: u64,
         suggested_fee: u64,
@@ -178,7 +180,7 @@ impl Mempool {
             .entries
             .values()
             .find(|e| e.transaction.sender == tx.sender && e.transaction.nonce == tx.nonce)
-            .map(|e| (e.transaction.tx_id.clone(), e.priority_score as u64));
+            .map(|e| (e.transaction.tx_id.clone(), e.priority_score));
 
         if let Some((old_id, old_priority)) = replacement {
             let min_replacement_fee = old_priority.saturating_mul(11) / 10;
@@ -212,6 +214,7 @@ impl Mempool {
             MempoolEntry {
                 transaction: tx,
                 priority_score,
+                tx_size,
                 submitted_at,
             },
         );
@@ -230,10 +233,7 @@ impl Mempool {
                     self.account_tx_counts.remove(sender);
                 }
             }
-            let tx_size = borsh::to_vec(&entry.transaction)
-                .map(|v| v.len())
-                .unwrap_or(0);
-            self.total_size = self.total_size.saturating_sub(tx_size);
+            self.total_size = self.total_size.saturating_sub(entry.tx_size);
             Some(entry.transaction)
         } else {
             None
@@ -253,8 +253,7 @@ impl Mempool {
         // Sort by priority (descending), then by submission time (ascending).
         entries.sort_by(|a, b| {
             b.priority_score
-                .partial_cmp(&a.priority_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
+                .cmp(&a.priority_score)
                 .then_with(|| a.submitted_at.cmp(&b.submitted_at))
         });
         entries.iter().map(|e| &e.transaction).collect()
@@ -274,22 +273,15 @@ impl Mempool {
     /// bytes have been freed. Eviction order is ascending priority score,
     /// then ascending submission time (oldest first among equal priority).
     fn evict_lowest_priority(&mut self, needed_space: usize) {
-        let mut entries: Vec<(ObjectId, f64, u64, usize)> = self
+        let mut entries: Vec<(ObjectId, u64, u64, usize)> = self
             .entries
             .iter()
-            .map(|(id, e)| {
-                let size = borsh::to_vec(&e.transaction).map(|v| v.len()).unwrap_or(0);
-                (id.clone(), e.priority_score, e.submitted_at, size)
-            })
+            .map(|(id, e)| (id.clone(), e.priority_score, e.submitted_at, e.tx_size))
             .collect();
 
         // Sort ascending by priority (lowest first), then by submission time
         // (oldest first) to evict the least valuable transactions.
-        entries.sort_by(|a, b| {
-            a.1.partial_cmp(&b.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.2.cmp(&b.2))
-        });
+        entries.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.2.cmp(&b.2)));
 
         let mut freed = 0usize;
         for (id, _, _, size) in entries {
@@ -338,7 +330,7 @@ mod tests {
         let tx = make_tx(b"alice", 0, 100);
         let tx_id = tx.tx_id.clone();
 
-        mempool.add_transaction(tx, 1.0, 0, 0, 1).unwrap();
+        mempool.add_transaction(tx, 1, 0, 0, 1).unwrap();
         assert_eq!(mempool.transaction_count(), 1);
 
         let removed = mempool.remove_transaction(&tx_id);
@@ -353,9 +345,9 @@ mod tests {
         let tx2 = make_tx(b"bob", 0, 100);
         let tx3 = make_tx(b"charlie", 0, 75);
 
-        mempool.add_transaction(tx1, 1.0, 0, 0, 1).unwrap();
-        mempool.add_transaction(tx2, 3.0, 0, 0, 1).unwrap();
-        mempool.add_transaction(tx3, 2.0, 0, 0, 1).unwrap();
+        mempool.add_transaction(tx1, 1, 0, 0, 1).unwrap();
+        mempool.add_transaction(tx2, 3, 0, 0, 1).unwrap();
+        mempool.add_transaction(tx3, 2, 0, 0, 1).unwrap();
 
         let ordered = mempool.get_ordered_transactions();
         assert_eq!(ordered[0].fee, 100);
@@ -369,8 +361,8 @@ mod tests {
         let tx = make_tx(b"alice", 0, 100);
         let tx2 = tx.clone();
 
-        mempool.add_transaction(tx, 1.0, 0, 0, 1).unwrap();
-        assert!(mempool.add_transaction(tx2, 1.0, 0, 0, 1).is_err());
+        mempool.add_transaction(tx, 1, 0, 0, 1).unwrap();
+        assert!(mempool.add_transaction(tx2, 1, 0, 0, 1).is_err());
     }
 
     #[test]
@@ -383,13 +375,13 @@ mod tests {
                 // Use i as account_nonce proxy so nonce is always within gap
                 assert!(
                     mempool
-                        .add_transaction(tx, 1.0, 0, i.saturating_sub(1) as u64, 1)
+                        .add_transaction(tx, 1, 0, i.saturating_sub(1) as u64, 1)
                         .is_ok()
                 );
             } else {
                 assert!(
                     mempool
-                        .add_transaction(tx, 1.0, 0, i.saturating_sub(1) as u64, 1)
+                        .add_transaction(tx, 1, 0, i.saturating_sub(1) as u64, 1)
                         .is_err()
                 );
             }
@@ -400,21 +392,21 @@ mod tests {
     fn min_fee_enforced() {
         let mut mempool = Mempool::new();
         let tx = make_tx(b"alice", 0, 0);
-        assert!(mempool.add_transaction(tx, 0.0, 0, 0, 1).is_err());
+        assert!(mempool.add_transaction(tx, 0, 0, 0, 1).is_err());
     }
 
     #[test]
     fn nonce_gap_rejected() {
         let mut mempool = Mempool::new();
         let tx = make_tx(b"alice", MAX_NONCE_GAP + 1, 100);
-        assert!(mempool.add_transaction(tx, 1.0, 0, 0, 1).is_err());
+        assert!(mempool.add_transaction(tx, 1, 0, 0, 1).is_err());
     }
 
     #[test]
     fn nonce_gap_accepted_at_boundary() {
         let mut mempool = Mempool::new();
         let tx = make_tx(b"alice", MAX_NONCE_GAP, 100);
-        assert!(mempool.add_transaction(tx, 1.0, 0, 0, 1).is_ok());
+        assert!(mempool.add_transaction(tx, 1, 0, 0, 1).is_ok());
     }
 
     #[test]
@@ -424,9 +416,9 @@ mod tests {
         let tx2 = make_tx(b"alice", 0, 109); // 9% bump — not enough
         let tx3 = make_tx(b"alice", 0, 111); // 11% bump — accepted
 
-        mempool.add_transaction(tx1, 100.0, 0, 0, 1).unwrap();
-        assert!(mempool.add_transaction(tx2, 109.0, 0, 0, 1).is_err());
-        assert!(mempool.add_transaction(tx3, 111.0, 0, 0, 1).is_ok());
+        mempool.add_transaction(tx1, 100, 0, 0, 1).unwrap();
+        assert!(mempool.add_transaction(tx2, 109, 0, 0, 1).is_err());
+        assert!(mempool.add_transaction(tx3, 111, 0, 0, 1).is_ok());
         assert_eq!(mempool.transaction_count(), 1);
     }
 
@@ -434,7 +426,7 @@ mod tests {
     fn evict_expired_removes_old_txs() {
         let mut mempool = Mempool::new();
         let tx = make_tx(b"alice", 0, 100);
-        mempool.add_transaction(tx, 1.0, 0, 0, 1).unwrap();
+        mempool.add_transaction(tx, 1, 0, 0, 1).unwrap();
         assert_eq!(mempool.transaction_count(), 1);
 
         // Time well past expiry

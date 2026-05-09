@@ -84,6 +84,7 @@ pub enum NetworkCommand {
         peer_id: PeerId,
         height: u64,
         nonce: u64,
+        parent_hash: [u8; 32],
     },
 
     /// Respond to an inbound memory-fingerprinting challenge.
@@ -426,12 +427,14 @@ impl OpolysNetwork {
         peer_id: PeerId,
         height: u64,
         nonce: u64,
+        parent_hash: [u8; 32],
     ) -> Result<(), NetworkError> {
         self.command_tx
             .send(NetworkCommand::SendChallenge {
                 peer_id,
                 height,
                 nonce,
+                parent_hash,
             })
             .await
             .map_err(|_| NetworkError::ChannelClosed)
@@ -614,8 +617,13 @@ impl SwarmTask {
                 peer_id,
                 height,
                 nonce,
+                parent_hash,
             } => {
-                let request = ChallengeRequest { height, nonce };
+                let request = ChallengeRequest {
+                    height,
+                    nonce,
+                    parent_hash,
+                };
                 self.swarm
                     .behaviour_mut()
                     .challenge_rr
@@ -867,6 +875,7 @@ impl SwarmTask {
                                 request_id,
                                 height: request.height,
                                 nonce: request.nonce,
+                                parent_hash: request.parent_hash,
                             },
                         );
                     }

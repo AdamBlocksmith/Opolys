@@ -7,6 +7,9 @@
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 
+const RATE_LIMIT_WINDOW_SECS: u64 = 60;
+const MAX_RATE_LIMIT_KEYS: usize = 10_000;
+
 /// JSON-RPC 2.0 request format.
 ///
 /// All Opolys RPC methods use JSON-RPC 2.0 over HTTP POST to `/rpc`.
@@ -163,8 +166,17 @@ impl RateLimiter {
     /// different rate limits to different method tiers from a single limiter instance.
     pub fn check_limit(&mut self, key: &str, max: usize) -> bool {
         let now = Instant::now();
+        self.requests.retain(|_, entries| {
+            entries
+                .retain(|t| now.saturating_duration_since(*t).as_secs() < RATE_LIMIT_WINDOW_SECS);
+            !entries.is_empty()
+        });
+
+        if !self.requests.contains_key(key) && self.requests.len() >= MAX_RATE_LIMIT_KEYS {
+            return false;
+        }
+
         let entries = self.requests.entry(key.to_string()).or_default();
-        entries.retain(|t| now.duration_since(*t).as_secs() < 60);
         if entries.len() >= max {
             return false;
         }

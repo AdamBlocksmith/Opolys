@@ -108,7 +108,7 @@ impl AccountStore {
     /// Register a brand-new account. Fails if the ObjectId already exists.
     pub fn create_account(&mut self, object_id: ObjectId) -> Result<&Account, OpolysError> {
         if self.accounts.contains_key(&object_id) {
-            return Err(OpolysError::AccountNotFound(format!(
+            return Err(OpolysError::InvalidParams(format!(
                 "Account already exists: {}",
                 object_id.to_hex()
             )));

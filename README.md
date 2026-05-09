@@ -55,7 +55,7 @@ The block time of 90,000 ms (90 seconds) is chosen so that exactly 960 blocks co
 
 ### Prerequisites
 
-- **Rust** 1.85+ (edition 2024)
+- **Rust** 1.95.0 (pinned in `rust-toolchain.toml`)
 - **RocksDB** system library (or builds from source via `librocksdb-sys`)
 - **Clang/LLVM** (required by `libp2p` build)
 
@@ -680,7 +680,7 @@ corrupt state as fatal once any block progress exists.
 
 Every block applied to the chain must pass these checks:
 
-1. **Version** must match `BLOCK_VERSION` (currently 1)
+1. **Version** must match `BLOCK_VERSION` (currently 2)
 2. **Height** must equal `parent_height + 1`
 3. **Previous hash** must match parent's hash (`Hash::zero()` for genesis)
 4. **Timestamp** must be strictly greater than parent, within 5 minutes of wall clock
@@ -712,7 +712,7 @@ Every block applied to the chain must pass these checks:
 | `UNBONDING_DELAY_BLOCKS` | 960 | One epoch delay for unbonding |
 | `MIN_FEE` | 1 Flake | Floor for market-driven fees |
 | `MIN_BOND_STAKE` | 1,000,000 Flakes (1 OPL) | Minimum per new bond entry |
-| `BLOCK_VERSION` | 1 | Current protocol version |
+| `BLOCK_VERSION` | 2 | Current protocol version |
 | `SIGNATURE_TYPE_ED25519` | 0 | ed25519 signature type |
 | `EXTENSION_TYPE_NONE` | 0 | No extension data |
 | `EXTENSION_TYPE_ROLLUP` | 1 | Rollup data (reserved) |

@@ -260,13 +260,13 @@ pub fn compute_refiner_weight(stake: FlakeAmount, age_years_milli: u64) -> Flake
 }
 
 /// Compute stake coverage — the ratio of total bonded $OPL to total issued
-/// $OPL, clamped to [0.0, 1.0]. This single metric determines how block
-/// rewards are split between miners and refiners.
-pub fn compute_stake_coverage(total_bonded: FlakeAmount, total_issued: FlakeAmount) -> f64 {
+/// Returns milli-units clamped to [0, 1000], keeping the consensus-facing
+/// calculation integer-only.
+pub fn compute_stake_coverage(total_bonded: FlakeAmount, total_issued: FlakeAmount) -> u64 {
     if total_issued == 0 {
-        return 0.0;
+        return 0;
     }
-    (total_bonded as f64 / total_issued as f64).min(1.0)
+    ((total_bonded as u128 * 1000) / total_issued as u128).min(1000) as u64
 }
 
 /// Compute the suggested fee for the next block using an EMA of the
@@ -473,10 +473,10 @@ mod tests {
 
     #[test]
     fn stake_coverage_calculation() {
-        assert_eq!(compute_stake_coverage(500, 1000), 0.5);
-        assert_eq!(compute_stake_coverage(0, 1000), 0.0);
-        assert_eq!(compute_stake_coverage(1000, 1000), 1.0);
-        assert!(compute_stake_coverage(2000, 1000) <= 1.0);
+        assert_eq!(compute_stake_coverage(500, 1000), 500);
+        assert_eq!(compute_stake_coverage(0, 1000), 0);
+        assert_eq!(compute_stake_coverage(1000, 1000), 1000);
+        assert_eq!(compute_stake_coverage(2000, 1000), 1000);
     }
 
     #[test]

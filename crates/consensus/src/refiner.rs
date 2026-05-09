@@ -229,11 +229,6 @@ impl RefinerInfo {
     }
 }
 
-/// Maximum number of refiners kept in the in-memory cache.
-/// Active refiners always stay cached; others are evicted when the cache
-/// is full. Non-cached refiners are loaded from RocksDB on demand.
-const REFINER_CACHE_MAX_SIZE: usize = 10_000;
-
 /// The set of all bonded refiners, supporting bonding, unbonding,
 /// activating, slashing, and weighted block-producer selection.
 ///
@@ -246,7 +241,8 @@ const REFINER_CACHE_MAX_SIZE: usize = 10_000;
 /// rerank_refiners() at epoch boundaries promotes/demotes as weights shift.
 #[derive(Debug)]
 pub struct RefinerSet {
-    /// In-memory refiner cache (active set always resident; others evicted when full).
+    /// In-memory refiner set. All refiners stay resident because totals,
+    /// producer selection, and state-root computation are consensus-critical.
     cached_refiners: HashMap<ObjectId, RefinerInfo>,
     /// In-memory active set for O(1) total_bonded_stake() and active_refiners().
     active_set: Vec<ObjectId>,
@@ -268,29 +264,9 @@ impl RefinerSet {
         }
     }
 
-    /// Evict non-active refiners from the in-memory cache when it exceeds
-    /// `REFINER_CACHE_MAX_SIZE`. Active refiners are never evicted.
-    fn evict_cache_if_full(&mut self) {
-        if self.cached_refiners.len() <= REFINER_CACHE_MAX_SIZE {
-            return;
-        }
-        let evict: Vec<ObjectId> = self
-            .cached_refiners
-            .iter()
-            .filter(|(_, v)| {
-                v.status != RefinerStatus::Active && v.status != RefinerStatus::Waiting
-            })
-            .map(|(id, _)| id.clone())
-            .take(
-                self.cached_refiners
-                    .len()
-                    .saturating_sub(REFINER_CACHE_MAX_SIZE),
-            )
-            .collect();
-        for id in evict {
-            self.cached_refiners.remove(&id);
-        }
-    }
+    /// Consensus state must not evict refiners without a deterministic backing
+    /// store. This is intentionally a no-op until such a store exists.
+    fn evict_cache_if_full(&mut self) {}
 
     /// Clear the dirty set (called after state root is committed).
     pub fn clear_dirty(&mut self) {
@@ -472,7 +448,9 @@ impl RefinerSet {
             .filter(|(_, v)| v.status != RefinerStatus::Slashed && v.total_stake() > 0)
             .map(|(id, v)| (id.clone(), v.weight(current_timestamp)))
             .collect();
-        eligible.sort_by_key(|(_, weight)| std::cmp::Reverse(*weight));
+        eligible.sort_by(|(a_id, a_weight), (b_id, b_weight)| {
+            b_weight.cmp(a_weight).then_with(|| a_id.0.0.cmp(&b_id.0.0))
+        });
 
         let mut newly_activated = Vec::new();
         let mut newly_demoted = Vec::new();
@@ -670,7 +648,9 @@ impl RefinerSet {
 
     /// Return all refiners as a serializable Vec. Used for persistence.
     pub fn all_refiners(&self) -> Vec<RefinerInfo> {
-        self.cached_refiners.values().cloned().collect()
+        let mut refiners: Vec<RefinerInfo> = self.cached_refiners.values().cloned().collect();
+        refiners.sort_by_key(|v| v.object_id.0.0);
+        refiners
     }
 
     /// Return the active set IDs.
@@ -798,6 +778,26 @@ mod tests {
         let id = test_id(b"refiner1");
         // MIN_BOND_STAKE is now 1 OPL = 1,000,000 flakes
         assert!(vs.bond(id, 100, 0, 0).is_err());
+    }
+
+    #[test]
+    fn rerank_refiners_ties_break_by_object_id() {
+        let mut vs = RefinerSet::new();
+        let ids = [
+            test_id(b"tie-refiner-c"),
+            test_id(b"tie-refiner-a"),
+            test_id(b"tie-refiner-b"),
+        ];
+
+        for id in &ids {
+            vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0).unwrap();
+        }
+        vs.activate_matured_refiners(EPOCH);
+        vs.rerank_refiners(0);
+
+        let mut expected = ids.to_vec();
+        expected.sort_by_key(|id| id.0.0);
+        assert_eq!(vs.active_set_ids(), &expected);
     }
 
     #[test]
@@ -1136,7 +1136,7 @@ mod tests {
     #[test]
     fn stake_coverage() {
         let coverage = crate::emission::compute_stake_coverage(500_000, 1_000_000);
-        assert!((coverage - 0.5).abs() < 0.001);
+        assert_eq!(coverage, 500);
     }
 
     #[test]

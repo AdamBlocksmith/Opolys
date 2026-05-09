@@ -16,7 +16,7 @@
 //! circulation exclusively through block rewards.
 
 use evo_omap::DatasetCache;
-use opolys_core::{Block, BlockHeader, EPOCH, MAINNET_CHAIN_ID, OpolysError};
+use opolys_core::{Block, BlockHeader, EPOCH, Hash, MAINNET_CHAIN_ID, OpolysError};
 
 /// EVO-OMAP dataset cache for efficient epoch-based mining.
 ///
@@ -200,7 +200,7 @@ pub fn verify_pow_light(header: &BlockHeader, difficulty: u64) -> Result<(), Opo
         .as_ref()
         .ok_or(OpolysError::InvalidProofOfWork)?;
 
-    if nonce_bytes.len() < 8 {
+    if nonce_bytes.len() != 8 {
         return Err(OpolysError::InvalidProofOfWork);
     }
 
@@ -230,7 +230,7 @@ pub fn verify_pow_light(header: &BlockHeader, difficulty: u64) -> Result<(), Opo
 /// dataset is required. Returns `None` if the header has no PoW proof.
 pub fn compute_pow_hash_value(header: &BlockHeader) -> Option<u64> {
     let nonce_bytes = header.pow_proof.as_ref()?;
-    if nonce_bytes.len() < 8 {
+    if nonce_bytes.len() != 8 {
         return None;
     }
     let nonce = u64::from_le_bytes(nonce_bytes[..8].try_into().ok()?);
@@ -256,6 +256,8 @@ pub fn compute_pow_hash_value(header: &BlockHeader) -> Option<u64> {
 /// prevents a response computed for one connection from being replayed as if it
 /// came from another peer.
 pub fn compute_challenge_hash(
+    chain_id: u64,
+    parent_hash: &Hash,
     height: u64,
     nonce: u64,
     challenger_peer_id: &[u8],
@@ -263,7 +265,9 @@ pub fn compute_challenge_hash(
 ) -> u64 {
     let epoch_seed = evo_omap::compute_epoch_seed_with_epoch_length(height, EPOCH);
     let mut dataset = evo_omap::LightDataset::new(&epoch_seed);
-    let mut input = Vec::with_capacity(32 + challenger_peer_id.len() + responder_peer_id.len());
+    let mut input = Vec::with_capacity(72 + challenger_peer_id.len() + responder_peer_id.len());
+    input.extend_from_slice(&chain_id.to_le_bytes());
+    input.extend_from_slice(parent_hash.as_bytes());
     input.extend_from_slice(&height.to_le_bytes());
     input.extend_from_slice(&nonce.to_le_bytes());
     input.extend_from_slice(&(challenger_peer_id.len() as u64).to_le_bytes());
@@ -426,26 +430,65 @@ mod tests {
     fn challenge_hash_is_bound_to_peer_ids() {
         let height = 7;
         let nonce = 42;
+        let chain_id = MAINNET_CHAIN_ID;
+        let parent_hash = Hash([3u8; 32]);
         let challenger = b"challenger-peer";
         let responder = b"responder-peer";
 
-        let expected = compute_challenge_hash(height, nonce, challenger, responder);
+        let expected =
+            compute_challenge_hash(chain_id, &parent_hash, height, nonce, challenger, responder);
 
         assert_eq!(
             expected,
-            compute_challenge_hash(height, nonce, challenger, responder)
+            compute_challenge_hash(chain_id, &parent_hash, height, nonce, challenger, responder)
         );
         assert_ne!(
             expected,
-            compute_challenge_hash(height, nonce, b"other-challenger", responder)
+            compute_challenge_hash(
+                chain_id + 1,
+                &parent_hash,
+                height,
+                nonce,
+                challenger,
+                responder
+            )
         );
         assert_ne!(
             expected,
-            compute_challenge_hash(height, nonce, challenger, b"other-responder")
+            compute_challenge_hash(
+                chain_id,
+                &Hash([4u8; 32]),
+                height,
+                nonce,
+                challenger,
+                responder
+            )
         );
         assert_ne!(
             expected,
-            compute_challenge_hash(height, nonce, responder, challenger)
+            compute_challenge_hash(
+                chain_id,
+                &parent_hash,
+                height,
+                nonce,
+                b"other-challenger",
+                responder
+            )
+        );
+        assert_ne!(
+            expected,
+            compute_challenge_hash(
+                chain_id,
+                &parent_hash,
+                height,
+                nonce,
+                challenger,
+                b"other-responder"
+            )
+        );
+        assert_ne!(
+            expected,
+            compute_challenge_hash(chain_id, &parent_hash, height, nonce, responder, challenger)
         );
     }
 
@@ -462,6 +505,15 @@ mod tests {
         header.pow_proof = Some(vec![0u8; 4]);
         let result = verify_pow_light(&header, 1);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_verify_pow_rejects_long_proof() {
+        let mut header = make_header(1, 1);
+        header.pow_proof = Some(vec![0u8; 9]);
+        let result = verify_pow_light(&header, 1);
+        assert!(result.is_err());
+        assert!(compute_pow_hash_value(&header).is_none());
     }
 
     #[test]

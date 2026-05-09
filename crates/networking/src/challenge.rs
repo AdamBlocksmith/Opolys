@@ -22,6 +22,8 @@ pub struct ChallengeRequest {
     pub height: u64,
     /// Nonce to hash — chosen randomly by the challenger.
     pub nonce: u64,
+    /// Challenger's current tip hash, binding the response to this chain fork.
+    pub parent_hash: [u8; 32],
 }
 
 /// The peer's response: just the hash value for the given (height, nonce).
