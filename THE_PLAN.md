@@ -1547,4 +1547,14 @@ A comprehensive audit of all consensus-critical formulas and constants in the co
 
 ---
 
+#### H3: Attestation cumulative-weight DoS
+**Location:** `node/node.rs`, `storage/store.rs`
+**Status:** **FIXED**
+
+**What it is:** Finality weight calculation rescanned historical blocks from RocksDB for each attestation candidate during `apply_block()`, while holding the chain/account/refiner/mempool write locks. A block packed with many old attestations could force excessive storage reads and stall node progress.
+
+**How fixed:** Chain state now keeps a persisted finality-attestation index keyed by `(attested_height, attested_block_hash)` with unique refiner ids. Applying a block validates each included attestation once, updates the index, and computes weight from the indexed refiner set. The index is pruned by the existing finalized-height and epoch window rules, so restart recovery does not need hot-path history rescans.
+
+---
+
 *This document is the single source of truth for Opolys development. Update it with every design decision and implementation change.*

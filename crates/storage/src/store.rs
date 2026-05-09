@@ -70,6 +70,12 @@ pub struct PersistedChainState {
     /// Height of the latest finalized refiner-produced block.
     /// 0 means no refiner block has reached attestation finality yet.
     pub finalized_height: u64,
+    /// Persisted finality attestation index:
+    /// (attested_height, attested_block_hash, unique_refiner_ids).
+    ///
+    /// This lets nodes resume cumulative finality accounting after restart
+    /// without rescanning historical blocks during block application.
+    pub attestation_finality_refiners: Vec<(u64, Hash, Vec<ObjectId>)>,
 }
 
 /// Persistent storage backed by RocksDB.
@@ -665,6 +671,7 @@ mod tests {
             base_reward: 332_000_000,
             producer_signatures: vec![],
             finalized_height: 0,
+            attestation_finality_refiners: vec![],
         };
 
         store.save_chain_state(&state).unwrap();
@@ -764,6 +771,7 @@ mod tests {
             base_reward: genesis_config.base_reward,
             producer_signatures: vec![],
             finalized_height: 0,
+            attestation_finality_refiners: vec![],
         };
 
         store
@@ -818,6 +826,7 @@ mod tests {
             base_reward: 332_000_000,
             producer_signatures: vec![],
             finalized_height: 0,
+            attestation_finality_refiners: vec![],
         };
 
         store.save_chain_state(&state).unwrap();

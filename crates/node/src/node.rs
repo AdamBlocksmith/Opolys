@@ -265,6 +265,11 @@ pub struct ChainState {
     /// Advances only when later on-chain refiner-block attestations reach
     /// `FINALITY_CONFIDENCE_MILLI` of active refiner weight.
     pub finalized_height: u64,
+    /// Cumulative finality attestations keyed by (attested_height, attested_hash).
+    ///
+    /// Stores unique refiner ids only; weight is recomputed from the current
+    /// refiner set so finality remains tied to consensus state.
+    pub attestation_finality_refiners: HashMap<(u64, Hash), HashSet<ObjectId>>,
 }
 
 impl ChainState {
@@ -287,6 +292,7 @@ impl ChainState {
             producer_signatures: HashMap::new(),
             base_reward: genesis_config.base_reward,
             finalized_height: 0,
+            attestation_finality_refiners: HashMap::new(),
         }
     }
 
@@ -314,11 +320,31 @@ impl ChainState {
                 BASE_REWARD
             },
             finalized_height: p.finalized_height,
+            attestation_finality_refiners: p
+                .attestation_finality_refiners
+                .iter()
+                .map(|(height, hash, refiners)| {
+                    ((*height, hash.clone()), refiners.iter().cloned().collect())
+                })
+                .collect(),
         }
     }
 
     /// Convert chain state to the persisted format for storage.
     pub fn to_persisted(&self) -> opolys_storage::PersistedChainState {
+        let mut attestation_finality_refiners: Vec<(u64, Hash, Vec<ObjectId>)> = self
+            .attestation_finality_refiners
+            .iter()
+            .map(|((height, hash), refiners)| {
+                let mut refiners: Vec<ObjectId> = refiners.iter().cloned().collect();
+                refiners.sort_by(|a, b| a.0.0.cmp(&b.0.0));
+                (*height, hash.clone(), refiners)
+            })
+            .collect();
+        attestation_finality_refiners.sort_by(|(height_a, hash_a, _), (height_b, hash_b, _)| {
+            height_a.cmp(height_b).then_with(|| hash_a.0.cmp(&hash_b.0))
+        });
+
         opolys_storage::PersistedChainState {
             chain_id: MAINNET_CHAIN_ID,
             genesis_hash: self.genesis_hash.0,
@@ -337,6 +363,7 @@ impl ChainState {
                 .map(|((h, prod), (hash, sig))| (*h, prod.clone(), hash.clone(), sig.clone()))
                 .collect(),
             finalized_height: self.finalized_height,
+            attestation_finality_refiners,
         }
     }
 
@@ -1399,51 +1426,25 @@ impl OpolysNode {
             .unwrap_or(current_finalized_height)
     }
 
-    fn cumulative_attestation_weight_for_block(
-        target_height: u64,
-        target_hash: &Hash,
-        current_tip_height: u64,
-        current_block: &Block,
-        store: Option<&BlockchainStore>,
+    fn indexed_attestation_weight_for_refiners(
+        attesting_refiners: &HashSet<ObjectId>,
         refiners: &RefinerSet,
         timestamp: u64,
-    ) -> Result<(usize, u128), String> {
-        let mut seen_refiners: HashSet<ObjectId> = HashSet::new();
-        let mut weight: u128 = 0;
+    ) -> u128 {
+        attesting_refiners
+            .iter()
+            .filter_map(|refiner_id| refiners.get_refiner(refiner_id))
+            .filter(|refiner| refiner.status == RefinerStatus::Active)
+            .map(|refiner| refiner.weight(timestamp) as u128)
+            .fold(0u128, u128::saturating_add)
+    }
 
-        let mut record = |attestation: &BlockAttestation| {
-            if attestation.height != target_height || &attestation.block_hash != target_hash {
-                return;
-            }
-            if !seen_refiners.insert(attestation.refiner.clone()) {
-                return;
-            }
-            if let Some(refiner) = refiners.get_refiner(&attestation.refiner) {
-                if refiner.status == RefinerStatus::Active {
-                    weight = weight.saturating_add(refiner.weight(timestamp) as u128);
-                }
-            }
-        };
-
-        if let Some(store) = store {
-            for height in target_height.saturating_add(1)..=current_tip_height {
-                let Some(block) = store
-                    .load_block(height)
-                    .map_err(|e| format!("Failed to load attestation block: {}", e))?
-                else {
-                    break;
-                };
-                for attestation in &block.attestations {
-                    record(attestation);
-                }
-            }
-        }
-
-        for attestation in &current_block.attestations {
-            record(attestation);
-        }
-
-        Ok((seen_refiners.len(), weight))
+    fn prune_attestation_finality_index(chain: &mut ChainState) {
+        let min_live_height = chain.current_height.saturating_sub(EPOCH);
+        let finalized_height = chain.finalized_height;
+        chain
+            .attestation_finality_refiners
+            .retain(|(height, _), _| *height > finalized_height && *height >= min_live_height);
     }
 
     /// Apply a mined or received block to the chain state.
@@ -1514,7 +1515,7 @@ impl OpolysNode {
             std::collections::HashSet::new();
         let finality_threshold =
             Self::active_refiner_weight_milli_threshold(&refiners, block.header.timestamp);
-        let mut finality_candidates: HashMap<u64, Hash> = HashMap::new();
+        let mut touched_finality_keys: HashSet<(u64, Hash)> = HashSet::new();
         for attestation in &block.attestations {
             if attestation.height >= block.header.height {
                 return Err(format!(
@@ -1548,23 +1549,27 @@ impl OpolysNode {
                 &canonical_hash,
                 &refiners,
             )?;
-            finality_candidates
-                .entry(attestation.height)
-                .or_insert(canonical_hash);
+            let finality_key = (attestation.height, canonical_hash);
+            chain
+                .attestation_finality_refiners
+                .entry(finality_key.clone())
+                .or_default()
+                .insert(attestation.refiner.clone());
+            touched_finality_keys.insert(finality_key);
             refiners.record_correct_attestation(&attestation.refiner)?;
         }
 
         let mut finality_weights: HashMap<u64, u128> = HashMap::new();
-        for (height, hash) in finality_candidates {
-            let (_count, weight) = Self::cumulative_attestation_weight_for_block(
-                height,
-                &hash,
-                chain.current_height,
-                block,
-                self.store.as_deref(),
+        for (height, hash) in touched_finality_keys {
+            let Some(attesting_refiners) = chain.attestation_finality_refiners.get(&(height, hash))
+            else {
+                continue;
+            };
+            let weight = Self::indexed_attestation_weight_for_refiners(
+                attesting_refiners,
                 &refiners,
                 block.header.timestamp,
-            )?;
+            );
             finality_weights.insert(height, weight);
         }
 
@@ -1582,6 +1587,7 @@ impl OpolysNode {
             );
             chain.finalized_height = newly_finalized_height;
         }
+        Self::prune_attestation_finality_index(&mut chain);
 
         // Verify Refiner signature if present
         if block.header.refiner_signature.is_some() && !block.header.producer.0.is_zero() {
@@ -2370,7 +2376,12 @@ mod tests {
     #[test]
     fn chain_state_persist_roundtrip() {
         let genesis_config = GenesisConfig::default();
-        let chain = ChainState::new(&genesis_config);
+        let mut chain = ChainState::new(&genesis_config);
+        chain
+            .attestation_finality_refiners
+            .entry((7, Hash::from_bytes([7u8; 32])))
+            .or_default()
+            .insert(ObjectId(Hash::from_bytes([8u8; 32])));
         let persisted = chain.to_persisted();
         let restored = ChainState::from_persisted(&persisted);
         assert_eq!(restored.current_height, chain.current_height);
@@ -2380,6 +2391,10 @@ mod tests {
         assert_eq!(restored.genesis_hash, chain.genesis_hash);
         assert_eq!(restored.latest_block_hash, chain.latest_block_hash);
         assert_eq!(restored.state_root, chain.state_root);
+        assert_eq!(
+            restored.attestation_finality_refiners,
+            chain.attestation_finality_refiners
+        );
     }
 
     /// Integration test that mines real EVO-OMAP blocks.
