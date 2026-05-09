@@ -49,6 +49,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+const BLOCK_TIMESTAMP_WINDOW_LEN: usize = EPOCH as usize + 1;
+
 /// A record of a banned peer, persisted across restarts.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct BanRecord {
@@ -274,6 +276,13 @@ pub struct ChainState {
 }
 
 impl ChainState {
+    fn prune_block_timestamps(timestamps: &mut Vec<u64>) {
+        let excess = timestamps.len().saturating_sub(BLOCK_TIMESTAMP_WINDOW_LEN);
+        if excess > 0 {
+            timestamps.drain(0..excess);
+        }
+    }
+
     /// Create chain state from the genesis configuration, computing the
     /// genesis block hash and setting initial values.
     pub fn new(genesis_config: &GenesisConfig) -> Self {
@@ -299,12 +308,15 @@ impl ChainState {
 
     /// Create chain state from persisted data (loaded from RocksDB).
     pub fn from_persisted(p: &opolys_storage::PersistedChainState) -> Self {
+        let mut block_timestamps = p.block_timestamps.clone();
+        Self::prune_block_timestamps(&mut block_timestamps);
+
         ChainState {
             current_height: p.current_height,
             current_difficulty: p.current_difficulty,
             total_issued: p.total_issued,
             total_burned: p.total_burned,
-            block_timestamps: p.block_timestamps.clone(),
+            block_timestamps,
             genesis_hash: Hash::from_bytes(p.genesis_hash),
             latest_block_hash: Hash::from_bytes(p.latest_block_hash),
             state_root: Hash::from_bytes(p.state_root),
@@ -333,6 +345,9 @@ impl ChainState {
 
     /// Convert chain state to the persisted format for storage.
     pub fn to_persisted(&self) -> opolys_storage::PersistedChainState {
+        let mut block_timestamps = self.block_timestamps.clone();
+        Self::prune_block_timestamps(&mut block_timestamps);
+
         let mut attestation_finality_refiners: Vec<(u64, Hash, Vec<ObjectId>)> = self
             .attestation_finality_refiners
             .iter()
@@ -353,7 +368,7 @@ impl ChainState {
             current_difficulty: self.current_difficulty,
             total_issued: self.total_issued,
             total_burned: self.total_burned,
-            block_timestamps: self.block_timestamps.clone(),
+            block_timestamps,
             latest_block_hash: self.latest_block_hash.0,
             state_root: self.state_root.0,
             suggested_fee: self.suggested_fee,
@@ -2035,6 +2050,7 @@ impl OpolysNode {
         chain.current_difficulty = block.header.difficulty;
         chain.latest_block_hash = block_hash.clone();
         chain.block_timestamps.push(block.header.timestamp);
+        ChainState::prune_block_timestamps(&mut chain.block_timestamps);
         chain.suggested_fee = next_suggested_fee;
 
         // Process matured unbonding entries — return stake to accounts
@@ -2634,6 +2650,7 @@ mod tests {
     fn chain_state_persist_roundtrip() {
         let genesis_config = GenesisConfig::default();
         let mut chain = ChainState::new(&genesis_config);
+        chain.block_timestamps = (0..(BLOCK_TIMESTAMP_WINDOW_LEN as u64 + 10)).collect();
         chain
             .attestation_finality_refiners
             .entry((7, Hash::from_bytes([7u8; 32])))
@@ -2648,10 +2665,25 @@ mod tests {
         assert_eq!(restored.genesis_hash, chain.genesis_hash);
         assert_eq!(restored.latest_block_hash, chain.latest_block_hash);
         assert_eq!(restored.state_root, chain.state_root);
+        assert_eq!(restored.block_timestamps.len(), BLOCK_TIMESTAMP_WINDOW_LEN);
+        assert_eq!(restored.block_timestamps.first().copied(), Some(10));
         assert_eq!(
             restored.attestation_finality_refiners,
             chain.attestation_finality_refiners
         );
+    }
+
+    #[test]
+    fn chain_state_prunes_persisted_timestamp_history_on_load() {
+        let genesis_config = GenesisConfig::default();
+        let mut persisted = ChainState::new(&genesis_config).to_persisted();
+        persisted.current_height = BLOCK_TIMESTAMP_WINDOW_LEN as u64 + 99;
+        persisted.block_timestamps = (0..(BLOCK_TIMESTAMP_WINDOW_LEN as u64 + 100)).collect();
+
+        let restored = ChainState::from_persisted(&persisted);
+
+        assert_eq!(restored.block_timestamps.len(), BLOCK_TIMESTAMP_WINDOW_LEN);
+        assert_eq!(restored.block_timestamps.first().copied(), Some(100));
     }
 
     /// Integration test that mines real EVO-OMAP blocks.

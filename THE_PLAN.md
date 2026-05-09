@@ -1587,4 +1587,14 @@ A comprehensive audit of all consensus-critical formulas and constants in the co
 
 ---
 
+#### M1: Unbounded block timestamp persistence
+**Location:** `node/node.rs`, `consensus/difficulty.rs`
+**Status:** **FIXED**
+
+**What it is:** `ChainState.block_timestamps` grew forever and was persisted on every block, even though retargeting only needs the latest epoch window plus one start timestamp.
+
+**How fixed:** Chain state now keeps and persists only the latest `EPOCH + 1` timestamps. Loading old persisted state prunes any longer history. Difficulty retargeting now derives the rolling window's start height from `current_height` and timestamp count, so a bounded window produces the same retarget result as full history.
+
+---
+
 *This document is the single source of truth for Opolys development. Update it with every design decision and implementation change.*

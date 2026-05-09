@@ -100,18 +100,16 @@ fn compute_retarget(
         return current_difficulty.max(MIN_DIFFICULTY);
     }
 
-    let epoch_start = current_height.saturating_sub(EPOCH);
-    if epoch_start as usize >= block_timestamps.len() {
+    let timestamp_window_start_height = current_height
+        .saturating_add(1)
+        .saturating_sub(block_timestamps.len() as u64);
+    let epoch_start_height = current_height.saturating_sub(EPOCH);
+    if epoch_start_height < timestamp_window_start_height {
         return current_difficulty.max(MIN_DIFFICULTY);
     }
 
-    let start_idx = epoch_start as usize;
-    // Clamp end_idx to the available timestamp array to avoid panics.
-    let end_idx = if (current_height as usize) < block_timestamps.len() {
-        current_height as usize
-    } else {
-        block_timestamps.len() - 1
-    };
+    let start_idx = (epoch_start_height - timestamp_window_start_height) as usize;
+    let end_idx = block_timestamps.len() - 1;
 
     if end_idx <= start_idx {
         return current_difficulty.max(MIN_DIFFICULTY);
@@ -255,6 +253,18 @@ mod tests {
         let new_diff = compute_retarget(current_difficulty, EPOCH, &timestamps);
 
         assert_eq!(new_diff, 2);
+    }
+
+    #[test]
+    fn retarget_matches_full_history_with_rolling_timestamp_window() {
+        let current_height = EPOCH + 42;
+        let full_history: Vec<u64> = (0..=current_height).map(|i| i * 84).collect();
+        let rolling_window = full_history[full_history.len() - (EPOCH as usize + 1)..].to_vec();
+
+        assert_eq!(
+            compute_retarget(100, current_height, &rolling_window),
+            compute_retarget(100, current_height, &full_history)
+        );
     }
 
     #[test]
