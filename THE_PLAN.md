@@ -1577,4 +1577,14 @@ A comprehensive audit of all consensus-critical formulas and constants in the co
 
 ---
 
+#### M2: Pending slash evidence consumed by failed candidates
+**Location:** `node/node.rs`
+**Status:** **FIXED**
+
+**What it is:** Mining and refiner block production drained `pending_slash_evidence` before the candidate block was accepted. If mining failed, or a locally produced candidate lost to another block, valid double-sign evidence could disappear before reaching the canonical chain.
+
+**How fixed:** Block candidates now clone up to the per-block evidence cap from the pending pool. Evidence is removed only after it appears in an accepted block, and newly detected evidence is deduplicated before queuing. Tests cover failed mining preserving pending evidence and accepted evidence being pruned.
+
+---
+
 *This document is the single source of truth for Opolys development. Update it with every design decision and implementation change.*

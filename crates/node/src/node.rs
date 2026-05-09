@@ -21,8 +21,9 @@
 use clap::Parser;
 use ed25519_dalek::{Signer, Verifier};
 use opolys_consensus::block::{
-    compute_attestation_root, compute_block_hash, compute_evidence_root,
-    compute_genesis_ceremony_hash, compute_transaction_root, minimum_block_timestamp_delta_secs,
+    MAX_SLASH_EVIDENCE_PER_BLOCK, compute_attestation_root, compute_block_hash,
+    compute_evidence_root, compute_genesis_ceremony_hash, compute_transaction_root,
+    minimum_block_timestamp_delta_secs,
 };
 use opolys_consensus::difficulty::compute_next_difficulty;
 use opolys_consensus::emission::compute_suggested_fee;
@@ -412,7 +413,8 @@ pub struct OpolysNode {
     /// Used by produce_refiner_block() to sign refiner blocks.
     pub signing_key: Option<ed25519_dalek::SigningKey>,
     /// Double-sign evidence collected during mining or refiner block production.
-    /// Drained into `Block.slash_evidence` by mine_block() and produce_refiner_block().
+    /// Candidate blocks clone from this pool; evidence is removed only after it
+    /// appears in an accepted block.
     pub pending_slash_evidence: Arc<RwLock<Vec<DoubleSignEvidence>>>,
     /// Valid refiner attestations collected for future block inclusion.
     /// Keyed by (height, refiner ObjectId hex) to deduplicate repeated gossip.
@@ -1160,6 +1162,53 @@ impl OpolysNode {
         attestations
     }
 
+    async fn pending_slash_evidence_for_block(&self) -> Vec<DoubleSignEvidence> {
+        self.pending_slash_evidence
+            .read()
+            .await
+            .iter()
+            .take(MAX_SLASH_EVIDENCE_PER_BLOCK)
+            .cloned()
+            .collect()
+    }
+
+    fn same_slash_evidence(left: &DoubleSignEvidence, right: &DoubleSignEvidence) -> bool {
+        left.producer == right.producer
+            && left.height == right.height
+            && left.producer_pubkey == right.producer_pubkey
+            && left.hash_a == right.hash_a
+            && left.signature_a == right.signature_a
+            && left.hash_b == right.hash_b
+            && left.signature_b == right.signature_b
+    }
+
+    async fn remove_accepted_slash_evidence(&self, accepted: &[DoubleSignEvidence]) {
+        if accepted.is_empty() {
+            return;
+        }
+        let mut pending = self.pending_slash_evidence.write().await;
+        pending.retain(|candidate| {
+            !accepted
+                .iter()
+                .any(|accepted| Self::same_slash_evidence(candidate, accepted))
+        });
+    }
+
+    async fn queue_slash_evidence(&self, evidence_items: Vec<DoubleSignEvidence>) {
+        if evidence_items.is_empty() {
+            return;
+        }
+        let mut pending = self.pending_slash_evidence.write().await;
+        for evidence in evidence_items {
+            if !pending
+                .iter()
+                .any(|known| Self::same_slash_evidence(known, &evidence))
+            {
+                pending.push(evidence);
+            }
+        }
+    }
+
     /// Return true if `peer_id_str` is currently banned (permanent or unexpired temp ban).
     pub async fn is_peer_banned(&self, peer_id_str: &str) -> bool {
         let now = std::time::SystemTime::now()
@@ -1248,11 +1297,9 @@ impl OpolysNode {
             .cloned()
             .collect();
 
-        // Drain pending double-sign evidence before mining starts
-        let pending_evidence: Vec<DoubleSignEvidence> = {
-            let mut pending = self.pending_slash_evidence.write().await;
-            std::mem::take(&mut *pending)
-        };
+        // Clone pending double-sign evidence for this candidate. The pool is
+        // pruned only after evidence appears in an accepted canonical block.
+        let pending_evidence = self.pending_slash_evidence_for_block().await;
         let next_height = chain.current_height + 1;
         let pending_attestations = self.drain_pending_attestations_for_block(next_height).await;
         let genesis_ceremony = None;
@@ -1370,11 +1417,9 @@ impl OpolysNode {
             .cloned()
             .collect();
 
-        // Drain pending double-sign evidence into this block
-        let pending_evidence: Vec<DoubleSignEvidence> = {
-            let mut pending = self.pending_slash_evidence.write().await;
-            std::mem::take(&mut *pending)
-        };
+        // Clone pending double-sign evidence for this candidate. The pool is
+        // pruned only after evidence appears in an accepted canonical block.
+        let pending_evidence = self.pending_slash_evidence_for_block().await;
         let next_height = chain.current_height + 1;
         let pending_attestations = self.drain_pending_attestations_for_block(next_height).await;
         let genesis_ceremony = None;
@@ -2075,13 +2120,12 @@ impl OpolysNode {
         drop(accounts);
         drop(chain);
 
-        // Queue newly detected evidence for inclusion in the next mined block
-        if !new_evidence.is_empty() {
-            self.pending_slash_evidence
-                .write()
-                .await
-                .extend(new_evidence);
-        }
+        // Evidence included in an accepted block has landed on-chain and can
+        // leave the local pool. Newly detected evidence remains queued until a
+        // future accepted block carries it.
+        self.remove_accepted_slash_evidence(&block.slash_evidence)
+            .await;
+        self.queue_slash_evidence(new_evidence).await;
 
         Ok(block_hash)
     }
@@ -2194,6 +2238,18 @@ mod tests {
             .to_bytes()
             .to_vec();
         block.header.refiner_signature = Some(signature);
+    }
+
+    fn dummy_slash_evidence(height: u64) -> DoubleSignEvidence {
+        DoubleSignEvidence {
+            producer: ObjectId(Hash::from_bytes([42u8; 32])),
+            producer_pubkey: vec![7u8; 32],
+            height,
+            hash_a: Hash::from_bytes([1u8; 32]),
+            signature_a: vec![2u8; 64],
+            hash_b: Hash::from_bytes([3u8; 32]),
+            signature_b: vec![4u8; 64],
+        }
     }
 
     fn write_test_genesis_attestation(dir: &tempfile::TempDir, base_reward_flakes: u64) -> String {
@@ -2673,6 +2729,33 @@ mod tests {
             accounts.get_account(&node.miner_id).unwrap().balance,
             u64::MAX
         );
+    }
+
+    #[tokio::test]
+    async fn failed_mining_attempt_preserves_pending_slash_evidence() {
+        let (config, _dir) = test_config();
+        let node = OpolysNode::new(config);
+        let evidence = dummy_slash_evidence(7);
+        node.queue_slash_evidence(vec![evidence.clone()]).await;
+
+        let block = node.mine_block(0).await;
+
+        assert!(block.is_none());
+        let pending = node.pending_slash_evidence.read().await;
+        assert_eq!(pending.len(), 1);
+        assert!(OpolysNode::same_slash_evidence(&pending[0], &evidence));
+    }
+
+    #[tokio::test]
+    async fn accepted_block_removes_included_slash_evidence_from_pending_pool() {
+        let (config, _dir) = test_config();
+        let node = OpolysNode::new(config);
+        let evidence = dummy_slash_evidence(8);
+        node.queue_slash_evidence(vec![evidence.clone()]).await;
+
+        node.remove_accepted_slash_evidence(&[evidence]).await;
+
+        assert!(node.pending_slash_evidence.read().await.is_empty());
     }
 
     #[tokio::test]

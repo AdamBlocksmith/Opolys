@@ -18,7 +18,7 @@ use opolys_core::{
 
 /// Maximum slash evidence entries allowed per block.
 /// Prevents DoS via unbounded ed25519 verification under the write lock.
-const MAX_SLASH_EVIDENCE_PER_BLOCK: usize = 10;
+pub const MAX_SLASH_EVIDENCE_PER_BLOCK: usize = 10;
 use borsh::{BorshDeserialize, BorshSerialize};
 use opolys_crypto::{
     Blake3Hasher, DOMAIN_ATTESTATION_ROOT, DOMAIN_BLOCK_HASH, DOMAIN_EVIDENCE_ROOT,
