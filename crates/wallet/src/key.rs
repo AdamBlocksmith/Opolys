@@ -20,6 +20,8 @@ use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use std::process::Command;
 use zeroize::{Zeroize, Zeroizing};
 
 /// Errors that can occur during wallet operations.
@@ -289,6 +291,28 @@ mod tests {
 
         assert_eq!(mode, 0o600);
     }
+
+    #[cfg(windows)]
+    #[test]
+    fn create_account_restricts_private_key_file_acl() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut wallet = Wallet::new(temp_dir.path().to_path_buf());
+        wallet.create_account("alice").unwrap();
+
+        let key_path = fs::read_dir(temp_dir.path())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let output = Command::new("icacls.exe").arg(&key_path).output().unwrap();
+        let acl = String::from_utf8_lossy(&output.stdout);
+
+        assert!(output.status.success());
+        assert!(!acl.contains("Everyone:"));
+        assert!(!acl.contains("BUILTIN\\Users:"));
+        assert!(!acl.contains("Authenticated Users:"));
+    }
 }
 
 #[cfg(unix)]
@@ -309,6 +333,63 @@ fn private_key_open_options() -> OpenOptions {
 
 fn write_private_key_file(path: &Path, key_bytes: &[u8; 32]) -> Result<(), std::io::Error> {
     let mut file = private_key_open_options().open(path)?;
+    if let Err(error) = restrict_private_key_file_permissions(path) {
+        let _ = fs::remove_file(path);
+        return Err(error);
+    }
     file.write_all(key_bytes)?;
     file.sync_all()
+}
+
+#[cfg(unix)]
+fn restrict_private_key_file_permissions(_path: &Path) -> Result<(), std::io::Error> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn restrict_private_key_file_permissions(path: &Path) -> Result<(), std::io::Error> {
+    let user = windows_acl_user()?;
+
+    run_icacls(path, ["/inheritance:r"])?;
+    run_icacls(path, ["/grant:r", &format!("{}:F", user)])?;
+    run_icacls(path, ["/remove:g", "*S-1-1-0"])?;
+    run_icacls(path, ["/remove:g", "*S-1-5-11"])?;
+    run_icacls(path, ["/remove:g", "*S-1-5-32-545"])?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn windows_acl_user() -> Result<String, std::io::Error> {
+    match (std::env::var("USERDOMAIN"), std::env::var("USERNAME")) {
+        (Ok(domain), Ok(username)) if !domain.is_empty() && !username.is_empty() => {
+            Ok(format!(r"{}\{}", domain, username))
+        }
+        (_, Ok(username)) if !username.is_empty() => Ok(username),
+        _ => Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "USERNAME is not set; cannot restrict key file ACL",
+        )),
+    }
+}
+
+#[cfg(windows)]
+fn run_icacls<'a>(
+    path: &Path,
+    args: impl IntoIterator<Item = &'a str>,
+) -> Result<(), std::io::Error> {
+    let status = Command::new("icacls.exe").arg(path).args(args).status()?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("icacls failed while restricting {}", path.display()),
+        ))
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn restrict_private_key_file_permissions(_path: &Path) -> Result<(), std::io::Error> {
+    Ok(())
 }

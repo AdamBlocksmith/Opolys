@@ -743,6 +743,16 @@ impl SwarmTask {
                 libp2p::gossipsub::Event::GossipsubNotSupported { peer_id } => {
                     tracing::debug!(peer = %peer_id, "Peer does not support gossipsub");
                 }
+                libp2p::gossipsub::Event::SlowPeer {
+                    peer_id,
+                    failed_messages,
+                } => {
+                    tracing::debug!(
+                        peer = %peer_id,
+                        ?failed_messages,
+                        "Peer is slow to process gossipsub messages"
+                    );
+                }
             },
 
             // ── Request-Response events ────────────────────────────────────
@@ -750,7 +760,7 @@ impl SwarmTask {
             // arrive as inbound Response messages for our outbound requests.
             OpolysBehaviourEvent::RequestResponse(rr_event) => {
                 match rr_event {
-                    libp2p::request_response::Event::Message { peer, message } => {
+                    libp2p::request_response::Event::Message { peer, message, .. } => {
                         match message {
                             // Inbound sync request from a peer — save the response
                             // channel and emit an event so the node can look up blocks
@@ -800,6 +810,7 @@ impl SwarmTask {
                         peer,
                         request_id,
                         error,
+                        ..
                     } => {
                         tracing::warn!(peer = %peer, ?request_id, ?error, "Outbound sync request failed");
                     }
@@ -807,10 +818,13 @@ impl SwarmTask {
                         peer,
                         request_id,
                         error,
+                        ..
                     } => {
                         tracing::warn!(peer = %peer, ?request_id, ?error, "Inbound sync request failed");
                     }
-                    libp2p::request_response::Event::ResponseSent { peer, request_id } => {
+                    libp2p::request_response::Event::ResponseSent {
+                        peer, request_id, ..
+                    } => {
                         tracing::debug!(peer = %peer, ?request_id, "Sync response sent");
                     }
                 }
@@ -861,7 +875,7 @@ impl SwarmTask {
 
             // ── Challenge request-response events ──────────────────────────
             OpolysBehaviourEvent::ChallengeRr(rr_event) => match rr_event {
-                libp2p::request_response::Event::Message { peer, message } => match message {
+                libp2p::request_response::Event::Message { peer, message, .. } => match message {
                     libp2p::request_response::Message::Request {
                         request_id,
                         request,
@@ -893,6 +907,7 @@ impl SwarmTask {
                     peer,
                     request_id,
                     error,
+                    ..
                 } => {
                     tracing::debug!(peer = %peer, ?request_id, ?error, "Challenge outbound failure");
                 }
@@ -900,10 +915,13 @@ impl SwarmTask {
                     peer,
                     request_id,
                     error,
+                    ..
                 } => {
                     tracing::debug!(peer = %peer, ?request_id, ?error, "Challenge inbound failure");
                 }
-                libp2p::request_response::Event::ResponseSent { peer, request_id } => {
+                libp2p::request_response::Event::ResponseSent {
+                    peer, request_id, ..
+                } => {
                     tracing::trace!(peer = %peer, ?request_id, "Challenge response sent");
                 }
             },

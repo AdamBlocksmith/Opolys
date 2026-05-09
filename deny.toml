@@ -1,0 +1,4 @@
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2024-0436", reason = "paste is pulled through libp2p's QUIC interface watcher; no fixed libp2p path is available yet, and this is an unmaintained notice rather than a vulnerability." },
+]

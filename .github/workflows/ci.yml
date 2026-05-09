@@ -40,6 +40,19 @@ jobs:
           cargo test --manifest-path vendor/evo-omap/Cargo.toml test_memory_merkle --lib
           cargo test --manifest-path vendor/evo-omap/Cargo.toml compute_epoch_seed_with_epoch_length --lib
 
+      - name: Install dependency security tools
+        run: |
+          cargo install cargo-audit --locked
+          cargo install cargo-deny --locked
+
+      - name: Run dependency security checks
+        run: |
+          cargo audit --ignore RUSTSEC-2026-0118 --ignore RUSTSEC-2026-0119
+          cargo deny check advisories
+          cd vendor/evo-omap
+          cargo audit
+          cargo deny check advisories
+
   cross-platform:
     name: Cross-platform deterministic checks (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

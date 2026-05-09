@@ -38,10 +38,10 @@ blake3 = "1.8"
 ed25519-dalek = { version = "2.1", features = ["serde"] }
 
 rocksdb = "0.22"
-libp2p = { version = "0.54", features = [
+libp2p = { version = "0.56", default-features = false, features = [
     "tcp", "noise", "yamux", "gossipsub", "kad", "identify",
-    "ping", "dns", "macros", "serde", "quic", "rsa", "ecdsa", "ed25519",
-    "secp256k1", "tokio", "request-response", "cbor", "relay"
+    "ping", "macros", "serde", "quic", "ed25519",
+    "tokio", "request-response", "cbor", "relay"
 ] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
