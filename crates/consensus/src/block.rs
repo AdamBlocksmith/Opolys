@@ -10,9 +10,10 @@
 //! keeping the fee market pure and deflationary.
 
 use opolys_core::{
-    BLOCK_VERSION, Block, BlockAttestation, BlockHeader, DoubleSignEvidence, FLAKES_PER_OPL,
-    GenesisCeremonyData, Hash, MAX_ATTESTATIONS_PER_BLOCK, MAX_BLOCK_SIZE_BYTES,
-    MAX_FUTURE_BLOCK_TIME_SECS, MAX_TRANSACTIONS_PER_BLOCK, MAX_TX_DATA_SIZE_BYTES, OpolysError,
+    BLOCK_TARGET_TIME_SECS, BLOCK_VERSION, Block, BlockAttestation, BlockHeader,
+    DoubleSignEvidence, FLAKES_PER_OPL, GenesisCeremonyData, Hash, MAX_ATTESTATIONS_PER_BLOCK,
+    MAX_BLOCK_SIZE_BYTES, MAX_FUTURE_BLOCK_TIME_SECS, MAX_TRANSACTIONS_PER_BLOCK,
+    MAX_TX_DATA_SIZE_BYTES, OpolysError,
 };
 
 /// Maximum slash evidence entries allowed per block.
@@ -24,6 +25,16 @@ use opolys_crypto::{
     DOMAIN_GENESIS_CEREMONY_HASH, DOMAIN_TX_ROOT,
 };
 use serde::{Deserialize, Serialize};
+
+/// Minimum allowed wall-clock progress per non-genesis block.
+///
+/// This is derived from the existing target interval rather than a separate
+/// economic constant. Blocks may still arrive faster than target, allowing
+/// difficulty to rise naturally, but not fast enough for a miner to compress a
+/// whole epoch into fake one-second timestamps.
+pub fn minimum_block_timestamp_delta_secs() -> u64 {
+    (BLOCK_TARGET_TIME_SECS / 2).max(1)
+}
 
 /// Metadata extracted from a block for indexing and querying.
 ///
@@ -171,8 +182,9 @@ pub fn format_opl(flakes: u64) -> String {
 /// 1. **Version**: Must match `BLOCK_VERSION` (currently 1).
 /// 2. **Height**: Must be exactly `expected_height` (parent height + 1).
 /// 3. **Previous hash**: Must match the parent block's hash (or `Hash::zero()` for genesis).
-/// 4. **Timestamp**: Must be greater than `parent_timestamp` and within
-///    `MAX_FUTURE_BLOCK_TIME_SECS` of the current wall clock.
+/// 4. **Timestamp**: Must advance by a target-derived minimum from
+///    `parent_timestamp` and stay within `MAX_FUTURE_BLOCK_TIME_SECS` of the
+///    current wall clock.
 /// 5. **Difficulty**: Must match `expected_difficulty`.
 /// 6. **Transaction count**: Must not exceed `MAX_TRANSACTIONS_PER_BLOCK`.
 /// 7. **Block size**: Must not exceed `MAX_BLOCK_SIZE_BYTES`.
@@ -219,12 +231,15 @@ pub fn validate_block(
         )));
     }
 
-    // 4. Timestamp check: must be strictly greater than parent, and not too far in the future
-    if block.header.timestamp <= parent_timestamp && expected_height > 0 {
-        return Err(OpolysError::BlockValidationFailed(format!(
-            "Block timestamp {} must be greater than parent timestamp {}",
-            block.header.timestamp, parent_timestamp
-        )));
+    // 4. Timestamp check: must advance by a target-derived minimum and not be too far in the future.
+    if expected_height > 0 {
+        let min_timestamp = parent_timestamp.saturating_add(minimum_block_timestamp_delta_secs());
+        if block.header.timestamp < min_timestamp {
+            return Err(OpolysError::BlockValidationFailed(format!(
+                "Block timestamp {} is too compressed: minimum allowed is {}",
+                block.header.timestamp, min_timestamp
+            )));
+        }
     }
     if block.header.timestamp > now_secs.saturating_add(MAX_FUTURE_BLOCK_TIME_SECS) {
         return Err(OpolysError::BlockValidationFailed(format!(
@@ -604,7 +619,7 @@ mod tests {
     fn validate_block_rejects_pow_and_refiner_signature_together() {
         let header = BlockHeader {
             height: 1,
-            timestamp: 1001,
+            timestamp: 1045,
             transaction_root: compute_transaction_root(&[]),
             producer: ObjectId(Hash::from_bytes([7u8; 32])),
             pow_proof: Some(vec![0; 8]),
@@ -618,7 +633,7 @@ mod tests {
             attestations: vec![],
             genesis_ceremony: None,
         };
-        let err = validate_block(&block, 1, &Hash::zero(), 1000, 1, 1001).unwrap_err();
+        let err = validate_block(&block, 1, &Hash::zero(), 1000, 1, 1045).unwrap_err();
         assert!(
             err.to_string()
                 .contains("both pow_proof and refiner_signature")
@@ -629,7 +644,7 @@ mod tests {
     fn validate_block_rejects_zero_producer_after_genesis() {
         let header = BlockHeader {
             height: 1,
-            timestamp: 1001,
+            timestamp: 1045,
             transaction_root: compute_transaction_root(&[]),
             refiner_signature: Some(vec![0; 64]),
             ..test_header(1, 1)
@@ -641,10 +656,61 @@ mod tests {
             attestations: vec![],
             genesis_ceremony: None,
         };
-        let err = validate_block(&block, 1, &Hash::zero(), 1000, 1, 1001).unwrap_err();
+        let err = validate_block(&block, 1, &Hash::zero(), 1000, 1, 1045).unwrap_err();
         assert!(
             err.to_string()
                 .contains("producer must be a non-zero ObjectId")
+        );
+    }
+
+    #[test]
+    fn validate_block_rejects_compressed_timestamp() {
+        let header = BlockHeader {
+            height: 1,
+            timestamp: 1001,
+            transaction_root: compute_transaction_root(&[]),
+            producer: ObjectId(Hash::from_bytes([7u8; 32])),
+            pow_proof: Some(vec![0; 8]),
+            ..test_header(1, 1)
+        };
+        let block = Block {
+            header,
+            transactions: vec![],
+            slash_evidence: vec![],
+            attestations: vec![],
+            genesis_ceremony: None,
+        };
+        let err = validate_block(&block, 1, &Hash::zero(), 1000, 1, 1001).unwrap_err();
+        assert!(err.to_string().contains("too compressed"));
+    }
+
+    #[test]
+    fn validate_block_accepts_target_derived_minimum_timestamp() {
+        let header = BlockHeader {
+            height: 1,
+            timestamp: 1000 + minimum_block_timestamp_delta_secs(),
+            transaction_root: compute_transaction_root(&[]),
+            producer: ObjectId(Hash::from_bytes([7u8; 32])),
+            refiner_signature: Some(vec![0; 64]),
+            ..test_header(1, 1)
+        };
+        let block = Block {
+            header,
+            transactions: vec![],
+            slash_evidence: vec![],
+            attestations: vec![],
+            genesis_ceremony: None,
+        };
+        assert!(
+            validate_block(
+                &block,
+                1,
+                &Hash::zero(),
+                1000,
+                1,
+                1000 + minimum_block_timestamp_delta_secs()
+            )
+            .is_ok()
         );
     }
 

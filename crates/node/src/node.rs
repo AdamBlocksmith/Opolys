@@ -22,7 +22,7 @@ use clap::Parser;
 use ed25519_dalek::{Signer, Verifier};
 use opolys_consensus::block::{
     compute_attestation_root, compute_block_hash, compute_evidence_root,
-    compute_genesis_ceremony_hash, compute_transaction_root,
+    compute_genesis_ceremony_hash, compute_transaction_root, minimum_block_timestamp_delta_secs,
 };
 use opolys_consensus::difficulty::compute_next_difficulty;
 use opolys_consensus::emission::compute_suggested_fee;
@@ -1117,6 +1117,18 @@ impl OpolysNode {
         );
 
         let difficulty = diff_target.effective_difficulty();
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let timestamp = now_secs.max(
+            chain
+                .block_timestamps
+                .last()
+                .copied()
+                .unwrap_or(0)
+                .saturating_add(minimum_block_timestamp_delta_secs()),
+        );
 
         // Build the block header with body roots before mining.
         let header = BlockHeader {
@@ -1128,10 +1140,7 @@ impl OpolysNode {
             evidence_root,
             attestation_root,
             genesis_ceremony_hash,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
+            timestamp,
             difficulty,
             suggested_fee: chain.suggested_fee,
             extension_root: None,
@@ -1228,6 +1237,18 @@ impl OpolysNode {
             bonded_stake,
         );
         let difficulty = diff_target.effective_difficulty();
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let timestamp = now_secs.max(
+            chain
+                .block_timestamps
+                .last()
+                .copied()
+                .unwrap_or(0)
+                .saturating_add(minimum_block_timestamp_delta_secs()),
+        );
 
         // Build the block header (no PoW proof) with body roots before signing.
         let header = BlockHeader {
@@ -1239,10 +1260,7 @@ impl OpolysNode {
             evidence_root,
             attestation_root,
             genesis_ceremony_hash,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
+            timestamp,
             difficulty,
             suggested_fee: chain.suggested_fee,
             extension_root: None,

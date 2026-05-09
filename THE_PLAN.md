@@ -1527,4 +1527,14 @@ A comprehensive audit of all consensus-critical formulas and constants in the co
 
 ---
 
+#### H1/M8: Timestamp compression difficulty attack
+**Location:** `consensus/block.rs`, `node/node.rs`
+**Status:** **FIXED**
+
+**What it is:** A miner could stamp blocks with tiny `+1s` deltas across an epoch, causing retarget to see fake ultra-fast blocks and spike difficulty. The inverse path was stretching timestamps as far as the future-time limit allowed.
+
+**How fixed:** Block validation now rejects non-genesis timestamps that advance less than a target-derived minimum (`BLOCK_TARGET_TIME_SECS / 2`) from the parent. Local mined/refiner blocks choose `max(now, parent + minimum_delta)` so honest production remains valid. This protects the time input while leaving the retarget output unclamped and system-derived.
+
+---
+
 *This document is the single source of truth for Opolys development. Update it with every design decision and implementation change.*
