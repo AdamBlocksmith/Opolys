@@ -214,8 +214,8 @@ pub enum RefinerStatus {
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize, Serialize, Deserialize)]
 pub struct BlockHeader {
     /// Protocol version number. Allows future upgrades while maintaining
-    /// backward compatibility. Version 1 is the initial protocol with
-    /// EVO-OMAP PoW and ed25519 signatures.
+    /// backward compatibility. Version 2 commits all state-mutating body
+    /// fields into the header.
     pub version: u32,
     /// The sequential height of this block (0 for genesis).
     pub height: BlockHeight,
@@ -223,8 +223,15 @@ pub struct BlockHeader {
     pub previous_hash: Hash,
     /// Merkle root of the post-execution application state (accounts, stakes, etc.).
     pub state_root: Hash,
-    /// Merkle root of all transactions in this block's body.
+    /// Root of all transactions in this block's body.
     pub transaction_root: Hash,
+    /// Root of all slash evidence entries in this block's body.
+    pub evidence_root: Hash,
+    /// Root of all refiner attestations in this block's body.
+    pub attestation_root: Hash,
+    /// Commitment to genesis ceremony data. For non-genesis blocks this is
+    /// the canonical empty ceremony commitment.
+    pub genesis_ceremony_hash: Hash,
     /// Unix timestamp (seconds since epoch) when the block was produced.
     pub timestamp: u64,
     /// The difficulty target for this block — lower values mean harder PoW.

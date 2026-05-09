@@ -10,16 +10,19 @@
 //! keeping the fee market pure and deflationary.
 
 use opolys_core::{
-    BLOCK_VERSION, Block, BlockHeader, FLAKES_PER_OPL, Hash, MAX_ATTESTATIONS_PER_BLOCK,
-    MAX_BLOCK_SIZE_BYTES, MAX_FUTURE_BLOCK_TIME_SECS, MAX_TRANSACTIONS_PER_BLOCK,
-    MAX_TX_DATA_SIZE_BYTES, OpolysError,
+    BLOCK_VERSION, Block, BlockAttestation, BlockHeader, DoubleSignEvidence, FLAKES_PER_OPL,
+    GenesisCeremonyData, Hash, MAX_ATTESTATIONS_PER_BLOCK, MAX_BLOCK_SIZE_BYTES,
+    MAX_FUTURE_BLOCK_TIME_SECS, MAX_TRANSACTIONS_PER_BLOCK, MAX_TX_DATA_SIZE_BYTES, OpolysError,
 };
 
 /// Maximum slash evidence entries allowed per block.
 /// Prevents DoS via unbounded ed25519 verification under the write lock.
 const MAX_SLASH_EVIDENCE_PER_BLOCK: usize = 10;
 use borsh::{BorshDeserialize, BorshSerialize};
-use opolys_crypto::{Blake3Hasher, DOMAIN_BLOCK_HASH, DOMAIN_TX_ROOT};
+use opolys_crypto::{
+    Blake3Hasher, DOMAIN_ATTESTATION_ROOT, DOMAIN_BLOCK_HASH, DOMAIN_EVIDENCE_ROOT,
+    DOMAIN_GENESIS_CEREMONY_HASH, DOMAIN_TX_ROOT,
+};
 use serde::{Deserialize, Serialize};
 
 /// Metadata extracted from a block for indexing and querying.
@@ -75,8 +78,9 @@ pub enum BlockStatus {
 /// Note: `pow_proof` and `refiner_signature` are intentionally excluded
 /// because they are populated after mining — the proof must satisfy the hash,
 /// not the other way around. The `version`, `suggested_fee`, and
+/// `evidence_root`, `attestation_root`, `genesis_ceremony_hash`, and
 /// `extension_root` fields are included to bind the PoW to the complete
-/// header state.
+/// state-mutating block body.
 pub fn compute_block_hash(header: &BlockHeader) -> Hash {
     let mut hasher = Blake3Hasher::new();
     hasher.update(DOMAIN_BLOCK_HASH);
@@ -91,6 +95,9 @@ pub fn compute_block_hash(header: &BlockHeader) -> Hash {
     hasher.update(header.producer.as_bytes());
     hasher.update(&header.state_root.0);
     hasher.update(&header.transaction_root.0);
+    hasher.update(&header.evidence_root.0);
+    hasher.update(&header.attestation_root.0);
+    hasher.update(&header.genesis_ceremony_hash.0);
     hasher.update(&header.timestamp.to_be_bytes());
     hasher.update(&header.difficulty.to_be_bytes());
     hasher.update(&header.suggested_fee.to_be_bytes());
@@ -118,6 +125,35 @@ pub fn compute_transaction_root(transactions: &[opolys_core::Transaction]) -> Ha
     hasher.finalize()
 }
 
+/// Compute the canonical root of all slash evidence entries in a block.
+pub fn compute_evidence_root(evidence: &[DoubleSignEvidence]) -> Hash {
+    let bytes = borsh::to_vec(evidence)
+        .expect("Double-sign evidence serialization must not fail; this is a consensus bug");
+    opolys_crypto::hash_with_domain(DOMAIN_EVIDENCE_ROOT, &bytes)
+}
+
+/// Compute the canonical root of all refiner attestations in a block.
+pub fn compute_attestation_root(attestations: &[BlockAttestation]) -> Hash {
+    let bytes = borsh::to_vec(attestations)
+        .expect("Block attestation serialization must not fail; this is a consensus bug");
+    opolys_crypto::hash_with_domain(DOMAIN_ATTESTATION_ROOT, &bytes)
+}
+
+/// Compute the canonical commitment to the optional genesis ceremony payload.
+pub fn compute_genesis_ceremony_hash(ceremony: &Option<GenesisCeremonyData>) -> Hash {
+    let bytes = borsh::to_vec(ceremony)
+        .expect("Genesis ceremony serialization must not fail; this is a consensus bug");
+    opolys_crypto::hash_with_domain(DOMAIN_GENESIS_CEREMONY_HASH, &bytes)
+}
+
+/// Fill all block-body roots into a header before hashing, mining, signing, or validation.
+pub fn set_body_roots(block: &mut Block) {
+    block.header.transaction_root = compute_transaction_root(&block.transactions);
+    block.header.evidence_root = compute_evidence_root(&block.slash_evidence);
+    block.header.attestation_root = compute_attestation_root(&block.attestations);
+    block.header.genesis_ceremony_hash = compute_genesis_ceremony_hash(&block.genesis_ceremony);
+}
+
 /// Format a flake amount as a human-readable OPL string with 6 decimal places.
 ///
 /// One OPL equals `FLAKES_PER_OPL` (1,000,000) flakes. This is a pure
@@ -140,7 +176,8 @@ pub fn format_opl(flakes: u64) -> String {
 /// 5. **Difficulty**: Must match `expected_difficulty`.
 /// 6. **Transaction count**: Must not exceed `MAX_TRANSACTIONS_PER_BLOCK`.
 /// 7. **Block size**: Must not exceed `MAX_BLOCK_SIZE_BYTES`.
-/// 8. **Transaction root**: Must match `compute_transaction_root(block.transactions)`.
+/// 8. **Body roots**: Must match transactions, slash evidence, attestations,
+///    and genesis ceremony data.
 /// 9. **No duplicate transactions**: Each `tx_id` must be unique within the block.
 /// 10. **Transaction data size**: Each `tx.data` must not exceed `MAX_TX_DATA_SIZE_BYTES`.
 /// 11. **Fee minimum**: Each transaction fee must be at least `MIN_FEE`.
@@ -248,6 +285,33 @@ pub fn validate_block(
             "Transaction root mismatch: expected {}, got {}",
             computed_root.to_hex(),
             block.header.transaction_root.to_hex()
+        )));
+    }
+
+    let computed_evidence_root = compute_evidence_root(&block.slash_evidence);
+    if block.header.evidence_root != computed_evidence_root {
+        return Err(OpolysError::BlockValidationFailed(format!(
+            "Evidence root mismatch: expected {}, got {}",
+            computed_evidence_root.to_hex(),
+            block.header.evidence_root.to_hex()
+        )));
+    }
+
+    let computed_attestation_root = compute_attestation_root(&block.attestations);
+    if block.header.attestation_root != computed_attestation_root {
+        return Err(OpolysError::BlockValidationFailed(format!(
+            "Attestation root mismatch: expected {}, got {}",
+            computed_attestation_root.to_hex(),
+            block.header.attestation_root.to_hex()
+        )));
+    }
+
+    let computed_genesis_ceremony_hash = compute_genesis_ceremony_hash(&block.genesis_ceremony);
+    if block.header.genesis_ceremony_hash != computed_genesis_ceremony_hash {
+        return Err(OpolysError::BlockValidationFailed(format!(
+            "Genesis ceremony hash mismatch: expected {}, got {}",
+            computed_genesis_ceremony_hash.to_hex(),
+            block.header.genesis_ceremony_hash.to_hex()
         )));
     }
 
@@ -377,13 +441,45 @@ mod tests {
         assert_eq!(root1, root2);
     }
 
+    #[test]
+    fn body_roots_change_when_state_mutating_body_changes() {
+        let evidence = DoubleSignEvidence {
+            producer: hash_to_object_id(b"refiner"),
+            producer_pubkey: vec![1; 32],
+            height: 7,
+            hash_a: Hash::from_bytes([2u8; 32]),
+            signature_a: vec![3; 64],
+            hash_b: Hash::from_bytes([4u8; 32]),
+            signature_b: vec![5; 64],
+        };
+        let attestation = BlockAttestation {
+            refiner: hash_to_object_id(b"attester"),
+            refiner_pubkey: vec![6; 32],
+            height: 6,
+            block_hash: Hash::from_bytes([7u8; 32]),
+            signature: vec![8; 64],
+        };
+
+        assert_ne!(
+            compute_evidence_root(&[]),
+            compute_evidence_root(&[evidence])
+        );
+        assert_ne!(
+            compute_attestation_root(&[]),
+            compute_attestation_root(&[attestation])
+        );
+    }
+
     fn test_header(height: u64, difficulty: u64) -> BlockHeader {
         BlockHeader {
-            version: 1,
+            version: BLOCK_VERSION,
             height,
             previous_hash: Hash::zero(),
             state_root: Hash::from_bytes([0u8; 32]),
             transaction_root: Hash::from_bytes([0u8; 32]),
+            evidence_root: compute_evidence_root(&[]),
+            attestation_root: compute_attestation_root(&[]),
+            genesis_ceremony_hash: compute_genesis_ceremony_hash(&None),
             timestamp: 1000,
             difficulty,
             suggested_fee: 1,
@@ -397,11 +493,14 @@ mod tests {
     #[test]
     fn compute_block_hash_deterministic() {
         let header = BlockHeader {
-            version: 1,
+            version: BLOCK_VERSION,
             height: 42,
             previous_hash: Hash::zero(),
             state_root: Hash::from_bytes([1u8; 32]),
             transaction_root: Hash::from_bytes([2u8; 32]),
+            evidence_root: compute_evidence_root(&[]),
+            attestation_root: compute_attestation_root(&[]),
+            genesis_ceremony_hash: compute_genesis_ceremony_hash(&None),
             timestamp: 1700000000,
             difficulty: 100,
             suggested_fee: 1,
@@ -464,7 +563,7 @@ mod tests {
     fn block_hash_includes_version() {
         let h1 = test_header(1, 1);
         let h2 = BlockHeader {
-            version: 2,
+            version: BLOCK_VERSION + 1,
             ..h1.clone()
         };
         assert_ne!(compute_block_hash(&h1), compute_block_hash(&h2));
@@ -478,6 +577,27 @@ mod tests {
             ..h1.clone()
         };
         assert_ne!(compute_block_hash(&h1), compute_block_hash(&h2));
+    }
+
+    #[test]
+    fn block_hash_includes_body_roots() {
+        let h1 = test_header(1, 1);
+        let h2 = BlockHeader {
+            evidence_root: Hash::from_bytes([9u8; 32]),
+            ..h1.clone()
+        };
+        let h3 = BlockHeader {
+            attestation_root: Hash::from_bytes([8u8; 32]),
+            ..h1.clone()
+        };
+        let h4 = BlockHeader {
+            genesis_ceremony_hash: Hash::from_bytes([7u8; 32]),
+            ..h1.clone()
+        };
+
+        assert_ne!(compute_block_hash(&h1), compute_block_hash(&h2));
+        assert_ne!(compute_block_hash(&h1), compute_block_hash(&h3));
+        assert_ne!(compute_block_hash(&h1), compute_block_hash(&h4));
     }
 
     #[test]
@@ -526,6 +646,58 @@ mod tests {
             err.to_string()
                 .contains("producer must be a non-zero ObjectId")
         );
+    }
+
+    #[test]
+    fn validate_block_rejects_uncommitted_attestation_mutation() {
+        let mut block = Block {
+            header: BlockHeader {
+                height: 0,
+                ..test_header(0, 1)
+            },
+            transactions: vec![],
+            slash_evidence: vec![],
+            attestations: vec![],
+            genesis_ceremony: None,
+        };
+        set_body_roots(&mut block);
+        block.attestations.push(BlockAttestation {
+            refiner: hash_to_object_id(b"attester"),
+            refiner_pubkey: vec![1; 32],
+            height: 0,
+            block_hash: Hash::from_bytes([2u8; 32]),
+            signature: vec![3; 64],
+        });
+
+        let err = validate_block(&block, 0, &Hash::zero(), 0, 1, 1001).unwrap_err();
+        assert!(err.to_string().contains("Attestation root mismatch"));
+    }
+
+    #[test]
+    fn validate_block_rejects_uncommitted_slash_evidence_mutation() {
+        let mut block = Block {
+            header: BlockHeader {
+                height: 0,
+                ..test_header(0, 1)
+            },
+            transactions: vec![],
+            slash_evidence: vec![],
+            attestations: vec![],
+            genesis_ceremony: None,
+        };
+        set_body_roots(&mut block);
+        block.slash_evidence.push(DoubleSignEvidence {
+            producer: hash_to_object_id(b"refiner"),
+            producer_pubkey: vec![1; 32],
+            height: 0,
+            hash_a: Hash::from_bytes([2u8; 32]),
+            signature_a: vec![3; 64],
+            hash_b: Hash::from_bytes([4u8; 32]),
+            signature_b: vec![5; 64],
+        });
+
+        let err = validate_block(&block, 0, &Hash::zero(), 0, 1, 1001).unwrap_err();
+        assert!(err.to_string().contains("Evidence root mismatch"));
     }
 
     #[test]

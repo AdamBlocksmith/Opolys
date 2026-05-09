@@ -155,8 +155,8 @@ impl Default for PowContext {
 /// Serialize the block header fields for EVO-OMAP mining.
 ///
 /// Includes all fields except `pow_proof` and `refiner_signature`,
-/// which are set after mining. Also includes `version` and `suggested_fee`
-/// to bind the PoW to the complete header state.
+/// which are set after mining. Body commitment roots are included so PoW is
+/// bound to slash evidence, attestations, and genesis ceremony data.
 ///
 /// Opolys serializes block-header integers in little-endian order at this
 /// boundary to match EVO-OMAP's VM word convention. This applies only to the
@@ -168,6 +168,9 @@ pub fn serialize_header_for_pow(header: &BlockHeader) -> Vec<u8> {
     buf.extend_from_slice(&header.previous_hash.0);
     buf.extend_from_slice(&header.state_root.0);
     buf.extend_from_slice(&header.transaction_root.0);
+    buf.extend_from_slice(&header.evidence_root.0);
+    buf.extend_from_slice(&header.attestation_root.0);
+    buf.extend_from_slice(&header.genesis_ceremony_hash.0);
     buf.extend_from_slice(&header.timestamp.to_le_bytes());
     buf.extend_from_slice(&header.difficulty.to_le_bytes());
     buf.extend_from_slice(&header.suggested_fee.to_le_bytes());
@@ -290,6 +293,9 @@ pub fn mine_block(header: BlockHeader, difficulty: u64, max_attempts: u64) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::block::{
+        compute_attestation_root, compute_evidence_root, compute_genesis_ceremony_hash,
+    };
     use opolys_core::{BLOCK_VERSION, Hash, ObjectId};
 
     fn make_header(height: u64, difficulty: u64) -> BlockHeader {
@@ -299,6 +305,9 @@ mod tests {
             previous_hash: Hash::zero(),
             state_root: Hash::zero(),
             transaction_root: Hash::zero(),
+            evidence_root: compute_evidence_root(&[]),
+            attestation_root: compute_attestation_root(&[]),
+            genesis_ceremony_hash: compute_genesis_ceremony_hash(&None),
             timestamp: 1000,
             difficulty,
             suggested_fee: 1,
@@ -367,7 +376,7 @@ mod tests {
     fn test_header_serialization_includes_version() {
         let h1 = make_header(1, 1);
         let h2 = BlockHeader {
-            version: 2,
+            version: opolys_core::BLOCK_VERSION + 1,
             ..h1.clone()
         };
         let b1 = serialize_header_for_pow(&h1);
@@ -390,9 +399,9 @@ mod tests {
 
         assert_eq!(&bytes[0..4], &0x01020304u32.to_le_bytes());
         assert_eq!(&bytes[4..12], &0x05060708090a0b0cu64.to_le_bytes());
-        assert_eq!(&bytes[108..116], &0x0d0e0f1011121314u64.to_le_bytes());
-        assert_eq!(&bytes[116..124], &0x15161718191a1b1cu64.to_le_bytes());
-        assert_eq!(&bytes[124..132], &0x1d1e1f2021222324u64.to_le_bytes());
+        assert_eq!(&bytes[204..212], &0x0d0e0f1011121314u64.to_le_bytes());
+        assert_eq!(&bytes[212..220], &0x15161718191a1b1cu64.to_le_bytes());
+        assert_eq!(&bytes[220..228], &0x1d1e1f2021222324u64.to_le_bytes());
     }
 
     #[test]

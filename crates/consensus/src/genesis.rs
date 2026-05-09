@@ -12,6 +12,10 @@
 //! exact same chain state from the same config.
 
 use crate::account::AccountStore;
+use crate::block::{
+    compute_attestation_root, compute_evidence_root, compute_genesis_ceremony_hash,
+    compute_transaction_root,
+};
 use borsh::{BorshDeserialize, BorshSerialize};
 use opolys_core::{
     BASE_REWARD, BLOCK_TARGET_TIME_MS, BLOCK_VERSION, Block, BlockHeader, CURRENCY_NAME,
@@ -147,13 +151,21 @@ pub fn build_genesis_block(config: &GenesisConfig) -> Block {
     }
     let state_root = state_hasher.finalize();
 
+    let transactions = vec![];
+    let slash_evidence = vec![];
+    let attestations = vec![];
+    let genesis_ceremony = config.ceremony_data.clone();
+
     Block {
         header: BlockHeader {
             version: BLOCK_VERSION,
             height: 0,
             previous_hash: Hash::zero(),
             state_root,
-            transaction_root: Hash::zero(),
+            transaction_root: compute_transaction_root(&transactions),
+            evidence_root: compute_evidence_root(&slash_evidence),
+            attestation_root: compute_attestation_root(&attestations),
+            genesis_ceremony_hash: compute_genesis_ceremony_hash(&genesis_ceremony),
             timestamp: config.attestation.ceremony_timestamp,
             difficulty: config.initial_difficulty,
             suggested_fee: MIN_FEE,
@@ -162,10 +174,10 @@ pub fn build_genesis_block(config: &GenesisConfig) -> Block {
             pow_proof: None,
             refiner_signature: None,
         },
-        transactions: vec![],
-        slash_evidence: vec![],
-        attestations: vec![],
-        genesis_ceremony: config.ceremony_data.clone(),
+        transactions,
+        slash_evidence,
+        attestations,
+        genesis_ceremony,
     }
 }
 
@@ -211,6 +223,19 @@ pub fn validate_genesis_block(block: &Block) -> Result<(), String> {
     }
     if !block.transactions.is_empty() {
         return Err("Genesis block must not have transactions".to_string());
+    }
+    if block.header.transaction_root != compute_transaction_root(&block.transactions) {
+        return Err("Genesis transaction root mismatch".to_string());
+    }
+    if block.header.evidence_root != compute_evidence_root(&block.slash_evidence) {
+        return Err("Genesis evidence root mismatch".to_string());
+    }
+    if block.header.attestation_root != compute_attestation_root(&block.attestations) {
+        return Err("Genesis attestation root mismatch".to_string());
+    }
+    if block.header.genesis_ceremony_hash != compute_genesis_ceremony_hash(&block.genesis_ceremony)
+    {
+        return Err("Genesis ceremony hash mismatch".to_string());
     }
     Ok(())
 }

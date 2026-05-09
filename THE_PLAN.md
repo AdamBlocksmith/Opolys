@@ -1497,6 +1497,16 @@ A comprehensive audit of all consensus-critical formulas and constants in the co
 
 ### Recent Execution Hardening
 
+#### C1: Block body malleability via uncommitted evidence/attestations
+**Location:** `core/types.rs`, `consensus/block.rs`, `consensus/pow.rs`, `node/node.rs`
+**Status:** **FIXED**
+
+**What it is:** `slash_evidence`, `attestations`, and `genesis_ceremony` lived outside the block header commitment even though they can affect state. A relay could mutate those fields without changing the block hash or PoW input.
+
+**How fixed:** `BlockHeader` now carries `evidence_root`, `attestation_root`, and `genesis_ceremony_hash`. These roots are included in `compute_block_hash()` and `serialize_header_for_pow()`, validated before block application, and filled before mining/refiner signing. `BLOCK_VERSION` was bumped to 2.
+
+---
+
 #### H16: Execution amount overflow and partial unbond edge cases
 **Location:** `consensus/account.rs`, `consensus/refiner.rs`, `execution/dispatcher.rs`
 **Status:** **FIXED**

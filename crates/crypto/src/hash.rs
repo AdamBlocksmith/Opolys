@@ -26,6 +26,12 @@ pub const DOMAIN_OBJECT_ID: &[u8] = b"OPL_OBJECT_ID_V1";
 pub const DOMAIN_STATE_ROOT: &[u8] = b"OPL_STATE_ROOT_V1";
 /// Blake3 domain for block transaction roots.
 pub const DOMAIN_TX_ROOT: &[u8] = b"OPL_TX_ROOT_V1";
+/// Blake3 domain for slash-evidence roots.
+pub const DOMAIN_EVIDENCE_ROOT: &[u8] = b"OPL_EVIDENCE_ROOT_V1";
+/// Blake3 domain for refiner-attestation roots.
+pub const DOMAIN_ATTESTATION_ROOT: &[u8] = b"OPL_ATTESTATION_ROOT_V1";
+/// Blake3 domain for genesis ceremony commitments.
+pub const DOMAIN_GENESIS_CEREMONY_HASH: &[u8] = b"OPL_GENESIS_CEREMONY_V1";
 /// Ed25519 signing domain for transactions.
 pub const DOMAIN_TX_SIGNATURE: &[u8] = b"OPL_TX_V1";
 /// Ed25519 signing domain for refiner block signatures.

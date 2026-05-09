@@ -756,6 +756,13 @@ async fn handle_get_mining_job(state: &RpcState) -> Result<serde_json::Value, Js
         .cloned()
         .collect();
     let transaction_root = opolys_consensus::block::compute_transaction_root(&transactions);
+    let slash_evidence = vec![];
+    let attestations = vec![];
+    let genesis_ceremony = None;
+    let evidence_root = opolys_consensus::block::compute_evidence_root(&slash_evidence);
+    let attestation_root = opolys_consensus::block::compute_attestation_root(&attestations);
+    let genesis_ceremony_hash =
+        opolys_consensus::block::compute_genesis_ceremony_hash(&genesis_ceremony);
     let transaction_root_hex = transaction_root.to_hex();
 
     // Build a template block header for mining
@@ -765,6 +772,9 @@ async fn handle_get_mining_job(state: &RpcState) -> Result<serde_json::Value, Js
         previous_hash: chain.latest_block_hash.clone(),
         state_root: chain.state_root.clone(),
         transaction_root,
+        evidence_root,
+        attestation_root,
+        genesis_ceremony_hash,
         timestamp: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()

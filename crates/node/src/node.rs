@@ -20,7 +20,10 @@
 
 use clap::Parser;
 use ed25519_dalek::{Signer, Verifier};
-use opolys_consensus::block::{compute_block_hash, compute_transaction_root};
+use opolys_consensus::block::{
+    compute_attestation_root, compute_block_hash, compute_evidence_root,
+    compute_genesis_ceremony_hash, compute_transaction_root,
+};
 use opolys_consensus::difficulty::compute_next_difficulty;
 use opolys_consensus::emission::compute_suggested_fee;
 use opolys_consensus::pow;
@@ -1032,7 +1035,18 @@ impl OpolysNode {
             .cloned()
             .collect();
 
+        // Drain pending double-sign evidence before mining starts
+        let pending_evidence: Vec<DoubleSignEvidence> = {
+            let mut pending = self.pending_slash_evidence.write().await;
+            std::mem::take(&mut *pending)
+        };
+        let next_height = chain.current_height + 1;
+        let pending_attestations = self.drain_pending_attestations_for_block(next_height).await;
+        let genesis_ceremony = None;
         let transaction_root = compute_transaction_root(&transactions);
+        let evidence_root = compute_evidence_root(&pending_evidence);
+        let attestation_root = compute_attestation_root(&pending_attestations);
+        let genesis_ceremony_hash = compute_genesis_ceremony_hash(&genesis_ceremony);
         let bonded_stake = refiners.total_bonded_stake();
         let total_issued = chain.total_issued;
 
@@ -1045,15 +1059,17 @@ impl OpolysNode {
         );
 
         let difficulty = diff_target.effective_difficulty();
-        let next_height = chain.current_height + 1;
 
-        // Build the block header with all new fields
+        // Build the block header with body roots before mining.
         let header = BlockHeader {
             version: BLOCK_VERSION,
             height: next_height,
             previous_hash: chain.latest_block_hash.clone(),
             state_root: chain.state_root.clone(),
             transaction_root,
+            evidence_root,
+            attestation_root,
+            genesis_ceremony_hash,
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -1066,13 +1082,6 @@ impl OpolysNode {
             refiner_signature: None,
         };
 
-        // Drain pending double-sign evidence before mining starts
-        let pending_evidence: Vec<DoubleSignEvidence> = {
-            let mut pending = self.pending_slash_evidence.write().await;
-            std::mem::take(&mut *pending)
-        };
-        let pending_attestations = self.drain_pending_attestations_for_block(next_height).await;
-
         drop(chain);
         drop(accounts);
         drop(refiners);
@@ -1080,8 +1089,10 @@ impl OpolysNode {
 
         let mut ctx = self.pow_context.write().await;
         let mut block = ctx.mine_parallel(header, difficulty, max_attempts, 0)?;
+        block.transactions = transactions;
         block.slash_evidence = pending_evidence;
         block.attestations = pending_attestations;
+        block.genesis_ceremony = genesis_ceremony;
         Some(block)
     }
 
@@ -1137,7 +1148,18 @@ impl OpolysNode {
             .cloned()
             .collect();
 
+        // Drain pending double-sign evidence into this block
+        let pending_evidence: Vec<DoubleSignEvidence> = {
+            let mut pending = self.pending_slash_evidence.write().await;
+            std::mem::take(&mut *pending)
+        };
+        let next_height = chain.current_height + 1;
+        let pending_attestations = self.drain_pending_attestations_for_block(next_height).await;
+        let genesis_ceremony = None;
         let transaction_root = compute_transaction_root(&transactions);
+        let evidence_root = compute_evidence_root(&pending_evidence);
+        let attestation_root = compute_attestation_root(&pending_attestations);
+        let genesis_ceremony_hash = compute_genesis_ceremony_hash(&genesis_ceremony);
         let bonded_stake = refiners.total_bonded_stake();
 
         let diff_target = compute_next_difficulty(
@@ -1148,15 +1170,17 @@ impl OpolysNode {
             bonded_stake,
         );
         let difficulty = diff_target.effective_difficulty();
-        let next_height = chain.current_height + 1;
 
-        // Build the block header (no PoW proof)
+        // Build the block header (no PoW proof) with body roots before signing.
         let header = BlockHeader {
             version: BLOCK_VERSION,
             height: next_height,
             previous_hash: chain.latest_block_hash.clone(),
             state_root: chain.state_root.clone(),
             transaction_root,
+            evidence_root,
+            attestation_root,
+            genesis_ceremony_hash,
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -1168,13 +1192,6 @@ impl OpolysNode {
             pow_proof: None,
             refiner_signature: None,
         };
-
-        // Drain pending double-sign evidence into this block
-        let pending_evidence: Vec<DoubleSignEvidence> = {
-            let mut pending = self.pending_slash_evidence.write().await;
-            std::mem::take(&mut *pending)
-        };
-        let pending_attestations = self.drain_pending_attestations_for_block(next_height).await;
 
         // Compute the block hash and sign it with the refiner's ed25519 key
         let block_hash = compute_block_hash(&header);
@@ -1190,7 +1207,7 @@ impl OpolysNode {
             transactions,
             slash_evidence: pending_evidence,
             attestations: pending_attestations,
-            genesis_ceremony: None,
+            genesis_ceremony,
         };
 
         tracing::info!(
@@ -1874,6 +1891,7 @@ impl OpolysNode {
 mod tests {
     use super::*;
     use ed25519_dalek::Signer;
+    use opolys_consensus::block::set_body_roots;
 
     /// Helper: create a NodeConfig that uses a temporary directory.
     fn test_config() -> (NodeConfig, tempfile::TempDir) {
@@ -1945,6 +1963,21 @@ mod tests {
         node.produce_refiner_block()
             .await
             .expect("single active refiner should be selected")
+    }
+
+    fn refresh_body_roots_and_refiner_signature(node: &OpolysNode, block: &mut Block) {
+        set_body_roots(block);
+        block.header.refiner_signature = None;
+        let block_hash = compute_block_hash(&block.header);
+        let payload = refiner_block_signing_payload(&block_hash);
+        let signature = node
+            .signing_key
+            .as_ref()
+            .expect("test node has signing key")
+            .sign(&payload)
+            .to_bytes()
+            .to_vec();
+        block.header.refiner_signature = Some(signature);
     }
 
     fn write_test_genesis_attestation(dir: &tempfile::TempDir, base_reward_flakes: u64) -> String {
@@ -2428,6 +2461,7 @@ mod tests {
 
         let mut block = produce_test_refiner_block(&node).await;
         block.attestations.push(attestation);
+        refresh_body_roots_and_refiner_signature(&node, &mut block);
 
         let result = node.apply_block(&block).await;
         assert!(result.is_err());
@@ -2454,6 +2488,7 @@ mod tests {
 
         let mut block = produce_test_refiner_block(&node).await;
         block.attestations.push(attestation);
+        refresh_body_roots_and_refiner_signature(&node, &mut block);
 
         node.apply_block(&block)
             .await

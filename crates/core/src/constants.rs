@@ -148,9 +148,9 @@ pub const MIN_BOND_STAKE: u64 = FLAKES_PER_OPL;
 pub const MAX_ACTIVE_REFINERS: usize = 5_000;
 
 /// Block header version number. Incremented for protocol upgrades.
-/// Version 1 is the initial protocol version with EVO-OMAP PoW and
-/// ed25519 signatures.
-pub const BLOCK_VERSION: u32 = 1;
+/// Version 2 commits slash evidence, attestations, and genesis ceremony data
+/// into the block header.
+pub const BLOCK_VERSION: u32 = 2;
 
 /// Signature type constant for ed25519 signatures.
 /// Currently the only supported type. Post-quantum signatures (Dilithium)
@@ -318,8 +318,8 @@ mod tests {
     }
 
     #[test]
-    fn block_version_is_one() {
-        assert_eq!(BLOCK_VERSION, 1);
+    fn block_version_is_two() {
+        assert_eq!(BLOCK_VERSION, 2);
     }
 
     #[test]
