@@ -1597,4 +1597,14 @@ A comprehensive audit of all consensus-critical formulas and constants in the co
 
 ---
 
+#### M3: Refiner block accepted when no active refiners exist
+**Location:** `node/node.rs`
+**Status:** **FIXED**
+
+**What it is:** Refiner-signed block validation rejected the wrong selected producer, but if producer selection returned `None` because no refiners were active, the check was skipped. That made the no-active-refiner case permissive instead of fail-closed.
+
+**How fixed:** Applying a refiner-signed block now requires `select_block_producer()` to return an active expected producer. If there is no active refiner producer, the block is rejected before state is advanced. A regression test converts a mined candidate into a validly signed refiner-style block with no active refiners and confirms it is rejected.
+
+---
+
 *This document is the single source of truth for Opolys development. Update it with every design decision and implementation change.*

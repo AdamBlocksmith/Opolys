@@ -1834,14 +1834,18 @@ impl OpolysNode {
                     .unwrap_or([0u8; 8]),
             );
             let timestamp = chain.block_timestamps.last().copied().unwrap_or(0);
-            if let Some(expected_producer) = refiners.select_block_producer(timestamp, seed) {
-                if expected_producer.object_id != block.header.producer {
-                    return Err(format!(
-                        "Refiner block producer mismatch: expected {}, got {}",
-                        expected_producer.object_id.to_hex(),
-                        block.header.producer.to_hex()
-                    ));
-                }
+            let expected_producer =
+                refiners
+                    .select_block_producer(timestamp, seed)
+                    .ok_or_else(|| {
+                        "Refiner block rejected: no active refiner producer available".to_string()
+                    })?;
+            if expected_producer.object_id != block.header.producer {
+                return Err(format!(
+                    "Refiner block producer mismatch: expected {}, got {}",
+                    expected_producer.object_id.to_hex(),
+                    block.header.producer.to_hex()
+                ));
             }
         }
 
@@ -2254,6 +2258,11 @@ mod tests {
             .to_bytes()
             .to_vec();
         block.header.refiner_signature = Some(signature);
+    }
+
+    fn convert_to_refiner_signed_block(node: &OpolysNode, block: &mut Block) {
+        block.header.pow_proof = None;
+        refresh_body_roots_and_refiner_signature(node, block);
     }
 
     fn dummy_slash_evidence(height: u64) -> DoubleSignEvidence {
@@ -2859,6 +2868,29 @@ mod tests {
                 .await
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn refiner_block_rejected_when_no_active_refiners_exist() {
+        let (config, _dir) = test_config();
+        let node = OpolysNode::new(config);
+        register_test_miner_account(&node).await;
+        node.chain.write().await.current_difficulty = MIN_DIFFICULTY;
+
+        let mut block = node
+            .mine_block(1_000_000)
+            .await
+            .expect("Should mine candidate block");
+        convert_to_refiner_signed_block(&node, &mut block);
+
+        let result = node.apply_block(&block).await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .contains("no active refiner producer available")
+        );
+        assert_eq!(node.chain.read().await.current_height, 0);
     }
 
     #[tokio::test]
