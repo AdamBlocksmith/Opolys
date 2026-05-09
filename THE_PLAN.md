@@ -1567,4 +1567,14 @@ A comprehensive audit of all consensus-critical formulas and constants in the co
 
 ---
 
+#### H4: Genesis ceremony master-hash canonicalization
+**Location:** `scripts/genesis_ceremony/src/main.rs`, `node/node.rs`
+**Status:** **FIXED**
+
+**What it is:** The ceremony master hash depended on `serde_json::to_string()` output after parse/re-serialize. That is deterministic inside the current Rust build, but it was underspecified for independent verifiers and fragile around JSON key order and number formatting.
+
+**How fixed:** The ceremony tool and node now use the same explicit canonical ceremony JSON routine before hashing: object keys are sorted, arrays keep order, whitespace is removed, strings use JSON escaping, finite integer numbers stay integers, and finite non-integer numbers use fixed 6-decimal formatting with trailing zeroes trimmed. The verification guide now documents this rule, and tests prove reordered JSON produces the same master hash.
+
+---
+
 *This document is the single source of truth for Opolys development. Update it with every design decision and implementation change.*

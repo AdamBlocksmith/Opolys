@@ -846,11 +846,78 @@ fn compute_blocks_per_year() -> u64 {
     (ms_per_year / BLOCK_TARGET_TIME_MS as f64).floor() as u64
 }
 
+fn canonical_json_number(number: &serde_json::Number) -> Result<String, String> {
+    if let Some(value) = number.as_i64() {
+        return Ok(value.to_string());
+    }
+    if let Some(value) = number.as_u64() {
+        return Ok(value.to_string());
+    }
+    let value = number
+        .as_f64()
+        .ok_or_else(|| "number is not representable as f64".to_string())?;
+    if !value.is_finite() {
+        return Err("number must be finite".to_string());
+    }
+    let mut out = format!("{value:.6}");
+    while out.contains('.') && out.ends_with('0') {
+        out.pop();
+    }
+    if out.ends_with('.') {
+        out.pop();
+    }
+    if out == "-0" {
+        out = "0".to_string();
+    }
+    Ok(out)
+}
+
+fn canonical_json(value: &serde_json::Value) -> Result<String, String> {
+    match value {
+        serde_json::Value::Null => Ok("null".to_string()),
+        serde_json::Value::Bool(value) => Ok(value.to_string()),
+        serde_json::Value::Number(number) => canonical_json_number(number),
+        serde_json::Value::String(value) => {
+            serde_json::to_string(value).map_err(|e| format!("string canonicalization failed: {e}"))
+        }
+        serde_json::Value::Array(values) => {
+            let mut out = String::from("[");
+            for (idx, value) in values.iter().enumerate() {
+                if idx > 0 {
+                    out.push(',');
+                }
+                out.push_str(&canonical_json(value)?);
+            }
+            out.push(']');
+            Ok(out)
+        }
+        serde_json::Value::Object(map) => {
+            let mut entries = map.iter().collect::<Vec<_>>();
+            entries.sort_by(|(key_a, _), (key_b, _)| key_a.cmp(key_b));
+
+            let mut out = String::from("{");
+            for (idx, (key, value)) in entries.into_iter().enumerate() {
+                if idx > 0 {
+                    out.push(',');
+                }
+                out.push_str(
+                    &serde_json::to_string(key)
+                        .map_err(|e| format!("key canonicalization failed: {e}"))?,
+                );
+                out.push(':');
+                out.push_str(&canonical_json(value)?);
+            }
+            out.push('}');
+            Ok(out)
+        }
+    }
+}
+
 fn compute_master_hash(attestation: &GenesisAttestation) -> String {
     let mut tmp = serde_json::to_value(attestation).unwrap();
     tmp["master_hash"] = serde_json::Value::String(String::new());
     tmp["operator_signature"] = serde_json::Value::String(String::new());
-    let canonical = serde_json::to_string(&tmp).unwrap();
+    let canonical = canonical_json(&tmp).unwrap();
     hex::encode(blake3::hash(canonical.as_bytes()).as_bytes())
 }
 
@@ -1336,13 +1403,11 @@ fn write_verification_txt(dir: &Path, a: &GenesisAttestation) -> std::io::Result
     lines.push("-".repeat(40));
     lines.push("  1. Open genesis_attestation.json".into());
     lines.push("  2. Set 'master_hash' to \"\" and 'operator_signature' to \"\"".into());
-    lines.push("  3. Serialize back to compact JSON preserving key order:".into());
+    lines.push("  3. Serialize to canonical ceremony JSON: sorted object keys, no whitespace, arrays in order, strings escaped as JSON, finite non-integer numbers rounded to 6 decimal places with trailing zeroes trimmed.".into());
     lines.push(
-        "     python3 -c \"import json; d=json.load(open('genesis_attestation.json')); \\ ".into(),
+        "     The built-in verifier command below performs this exact canonicalization.".into(),
     );
-    lines.push("               d['master_hash']=''; d['operator_signature']=''; \\ ".into());
-    lines.push("               print(json.dumps(d, separators=(',',':')))\"".into());
-    lines.push("  4. Compute Blake3-256 of that output".into());
+    lines.push("  4. Compute Blake3-256 of those canonical bytes".into());
     lines.push(format!("  5. Must equal: {}", a.master_hash));
     lines.push(String::new());
 
@@ -2049,6 +2114,29 @@ mod tests {
         };
         assert_eq!(compute_master_hash(&a), compute_master_hash(&a));
         assert_eq!(compute_master_hash(&a).len(), 64);
+    }
+
+    #[test]
+    fn canonical_json_sorts_object_keys_and_normalizes_decimals() {
+        let left = serde_json::json!({
+            "z": 1,
+            "master_hash": "ignored",
+            "operator_signature": "ignored",
+            "a": {"b": 2, "a": 1.230000},
+            "items": [true, "x"]
+        });
+        let right: serde_json::Value = serde_json::from_str(
+            r#"{"items":[true,"x"],"a":{"a":1.23,"b":2},"operator_signature":"","master_hash":"","z":1}"#,
+        )
+        .unwrap();
+        let mut left_unsigned = left;
+        left_unsigned["master_hash"] = serde_json::Value::String(String::new());
+        left_unsigned["operator_signature"] = serde_json::Value::String(String::new());
+
+        assert_eq!(
+            canonical_json(&left_unsigned).unwrap(),
+            canonical_json(&right).unwrap()
+        );
     }
 
     #[test]

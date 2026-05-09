@@ -620,13 +620,79 @@ fn validate_ceremony_reward_derivation(
     Ok(())
 }
 
+fn canonical_json_number(number: &serde_json::Number) -> Result<String, String> {
+    if let Some(value) = number.as_i64() {
+        return Ok(value.to_string());
+    }
+    if let Some(value) = number.as_u64() {
+        return Ok(value.to_string());
+    }
+    let value = number
+        .as_f64()
+        .ok_or_else(|| "Genesis ceremony number is not representable as f64".to_string())?;
+    if !value.is_finite() {
+        return Err("Genesis ceremony number must be finite".to_string());
+    }
+    let mut out = format!("{value:.6}");
+    while out.contains('.') && out.ends_with('0') {
+        out.pop();
+    }
+    if out.ends_with('.') {
+        out.pop();
+    }
+    if out == "-0" {
+        out = "0".to_string();
+    }
+    Ok(out)
+}
+
+fn canonical_json(value: &serde_json::Value) -> Result<String, String> {
+    match value {
+        serde_json::Value::Null => Ok("null".to_string()),
+        serde_json::Value::Bool(value) => Ok(value.to_string()),
+        serde_json::Value::Number(number) => canonical_json_number(number),
+        serde_json::Value::String(value) => serde_json::to_string(value)
+            .map_err(|e| format!("Genesis ceremony string canonicalization failed: {}", e)),
+        serde_json::Value::Array(values) => {
+            let mut out = String::from("[");
+            for (idx, value) in values.iter().enumerate() {
+                if idx > 0 {
+                    out.push(',');
+                }
+                out.push_str(&canonical_json(value)?);
+            }
+            out.push(']');
+            Ok(out)
+        }
+        serde_json::Value::Object(map) => {
+            let mut entries = map.iter().collect::<Vec<_>>();
+            entries.sort_by(|(key_a, _), (key_b, _)| key_a.cmp(key_b));
+
+            let mut out = String::from("{");
+            for (idx, (key, value)) in entries.into_iter().enumerate() {
+                if idx > 0 {
+                    out.push(',');
+                }
+                out.push_str(
+                    &serde_json::to_string(key).map_err(|e| {
+                        format!("Genesis ceremony key canonicalization failed: {}", e)
+                    })?,
+                );
+                out.push(':');
+                out.push_str(&canonical_json(value)?);
+            }
+            out.push('}');
+            Ok(out)
+        }
+    }
+}
+
 fn compute_ceremony_master_hash(attestation_json: &str) -> Result<[u8; 32], String> {
     let mut value: serde_json::Value = serde_json::from_str(attestation_json)
         .map_err(|e| format!("Genesis ceremony JSON parse failed: {}", e))?;
     value["master_hash"] = serde_json::Value::String(String::new());
     value["operator_signature"] = serde_json::Value::String(String::new());
-    let canonical = serde_json::to_string(&value)
-        .map_err(|e| format!("Genesis ceremony canonicalization failed: {}", e))?;
+    let canonical = canonical_json(&value)?;
     Ok(*blake3::hash(canonical.as_bytes()).as_bytes())
 }
 
@@ -2292,6 +2358,23 @@ mod tests {
         assert_eq!(config.base_reward, 333 * FLAKES_PER_OPL);
         assert_eq!(config.attestation.annual_production_tonnes, 3637);
         assert!(config.ceremony_data.is_some());
+    }
+
+    #[test]
+    fn genesis_master_hash_uses_sorted_canonical_json() {
+        let left = r#"{
+            "z": 1,
+            "master_hash": "ignored",
+            "operator_signature": "ignored",
+            "a": {"b": 2, "a": 1.230000},
+            "items": [true, "x"]
+        }"#;
+        let right = r#"{"items":[true,"x"],"a":{"a":1.23,"b":2},"operator_signature":"","master_hash":"","z":1}"#;
+
+        assert_eq!(
+            compute_ceremony_master_hash(left).unwrap(),
+            compute_ceremony_master_hash(right).unwrap()
+        );
     }
 
     #[test]
