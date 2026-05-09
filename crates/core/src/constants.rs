@@ -73,10 +73,10 @@ pub const BASE_REWARD: u64 = 332 * FLAKES_PER_OPL;
 pub const MIN_DIFFICULTY: u64 = 1;
 
 /// Starting difficulty for the genesis block.
-/// At difficulty 7, 1.48 H/s parallel (Ryzen 7 7700):
-/// 2^7 / 1.48 = 86.5s per block, target 90s (3.9% off).
-/// First retarget at block 960 self-corrects automatically.
-/// Must be >= MIN_DIFFICULTY and calibrated to typical launch hardware.
+/// Local EVO-OMAP release benchmarks on a Ryzen 7 7700 suggest difficulty 6
+/// for one miner at roughly the 90s target. Mainnet starts at 7 to account for
+/// a small launch cohort or stronger hardware arriving immediately.
+/// First retarget at block 960 self-corrects from observed chain timing.
 pub const GENESIS_DIFFICULTY: u64 = 7;
 
 /// Unified epoch length for both EVO-OMAP dataset regeneration and
