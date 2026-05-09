@@ -196,9 +196,26 @@ fn classify_method(method: &str) -> (&'static str, usize, bool) {
     }
 }
 
-/// Compare API keys in constant time when their lengths match.
+/// Compare API keys without short-circuiting on length.
 fn constant_time_key_eq(provided: &str, required: &str) -> bool {
-    provided.len() == required.len() && provided.as_bytes().ct_eq(required.as_bytes()).into()
+    let provided_bytes = provided.as_bytes();
+    let required_bytes = required.as_bytes();
+    let mut provided_padded = [0u8; 256];
+    let mut required_padded = [0u8; 256];
+    let provided_len = provided_bytes.len().min(provided_padded.len());
+    let required_len = required_bytes.len().min(required_padded.len());
+
+    provided_padded[..provided_len].copy_from_slice(&provided_bytes[..provided_len]);
+    required_padded[..required_len].copy_from_slice(&required_bytes[..required_len]);
+
+    let bytes_match: bool = provided_padded.ct_eq(&required_padded).into();
+    let lengths_match: bool = (provided_bytes.len() as u64)
+        .ct_eq(&(required_bytes.len() as u64))
+        .into();
+    let provided_fits = provided_bytes.len() <= provided_padded.len();
+    let required_fits = required_bytes.len() <= required_padded.len();
+
+    bytes_match & lengths_match & provided_fits & required_fits
 }
 
 /// Verify `Authorization: Bearer <key>` or `X-Api-Key: <key>` header.
@@ -1503,6 +1520,10 @@ mod tests {
 
         let mut headers = HeaderMap::new();
         headers.insert("x-api-key", "secret".parse().unwrap());
+        assert!(!check_api_key(&headers, "secret-key"));
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", "secret-key-extra".parse().unwrap());
         assert!(!check_api_key(&headers, "secret-key"));
     }
 

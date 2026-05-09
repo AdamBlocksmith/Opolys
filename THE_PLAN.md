@@ -1617,4 +1617,14 @@ A comprehensive audit of all consensus-critical formulas and constants in the co
 
 ---
 
+#### M5: RPC API key length timing leak
+**Location:** `rpc/server.rs`
+**Status:** **FIXED**
+
+**What it is:** The RPC API key comparison used constant-time byte comparison only after a normal length equality check. That could reveal whether the submitted key length matched the configured key length.
+
+**How fixed:** API key comparison now pads both provided and required keys into fixed 256-byte buffers, compares the padded buffers with `subtle::ConstantTimeEq`, and checks length equality through `ConstantTimeEq` as well. Tests cover wrong same-length, prefix-only, shorter, and longer submitted keys.
+
+---
+
 *This document is the single source of truth for Opolys development. Update it with every design decision and implementation change.*
