@@ -281,8 +281,7 @@ The ceremony has three modes:
 ### Genesis Difficulty
 
 Genesis difficulty: 7
-- Local EVO-OMAP release benchmark on Ryzen 7 7700 showed difficulty 6 is the single-machine calibration for roughly 90s blocks.
-- Mainnet launch keeps difficulty 7 because two similar miners would make difficulty 6 too fast.
+- Mainnet launch starts conservatively to account for a small launch cohort or stronger hardware arriving immediately.
 - First retarget at block 960 (~24 hours) self-corrects automatically from observed chain timing.
 
 ### Retarget Algorithm
