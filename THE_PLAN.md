@@ -1517,4 +1517,14 @@ A comprehensive audit of all consensus-critical formulas and constants in the co
 
 ---
 
+#### H7: Silent reward and unbond credit errors
+**Location:** `node/node.rs`, `consensus/account.rs`, `consensus/refiner.rs`
+**Status:** **FIXED**
+
+**What it is:** Block reward credits and matured unbond returns used `.ok()` and silently discarded `create_account()` / `credit()` failures. In overflow edge cases, issuance accounting could advance without the account receiving funds, or matured unbonded stake could be removed from the queue without being returned.
+
+**How fixed:** Block application now aggregates planned reward/unbond credits, checks every destination with `AccountStore::can_credit()`, and propagates account creation/credit errors. Matured unbonds are previewed before the unbonding queue is drained, so failed creditability checks reject the block before the queued return is consumed.
+
+---
+
 *This document is the single source of truth for Opolys development. Update it with every design decision and implementation change.*

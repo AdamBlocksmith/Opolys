@@ -666,6 +666,64 @@ fn compute_reward_distribution(
     }
 }
 
+fn add_planned_credit(
+    planned_credits: &mut HashMap<ObjectId, FlakeAmount>,
+    account: &ObjectId,
+    amount: FlakeAmount,
+) -> Result<(), String> {
+    if amount == 0 {
+        return Ok(());
+    }
+    let entry = planned_credits.entry(account.clone()).or_insert(0);
+    *entry = entry.checked_add(amount).ok_or_else(|| {
+        format!(
+            "Planned credit overflow for account {} while adding {} flakes",
+            account.to_hex(),
+            amount
+        )
+    })?;
+    Ok(())
+}
+
+fn ensure_planned_credits_creditable(
+    accounts: &AccountStore,
+    planned_credits: &HashMap<ObjectId, FlakeAmount>,
+) -> Result<(), String> {
+    for (account, amount) in planned_credits {
+        accounts.can_credit(account, *amount).map_err(|e| {
+            format!(
+                "Account {} cannot receive {} flakes: {}",
+                account.to_hex(),
+                amount,
+                e
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn credit_or_create_account(
+    accounts: &mut AccountStore,
+    account: &ObjectId,
+    amount: FlakeAmount,
+) -> Result<(), String> {
+    if amount == 0 {
+        return Ok(());
+    }
+    if accounts.get_account(account).is_none() {
+        accounts.create_account(account.clone()).map_err(|e| {
+            format!(
+                "Failed to create reward account {}: {}",
+                account.to_hex(),
+                e
+            )
+        })?;
+    }
+    accounts
+        .credit(account, amount)
+        .map_err(|e| format!("Failed to credit account {}: {}", account.to_hex(), e))
+}
+
 impl OpolysNode {
     /// Create a new node, either loading persisted state from disk or
     /// initializing from genesis.
@@ -1691,15 +1749,13 @@ impl OpolysNode {
             compute_reward_distribution(block_reward, base_reward_amount, coverage_milli);
         let miner_share_amount = reward_distribution.miner_share;
         let refiner_share_amount = reward_distribution.refiner_share;
+        let mut planned_reward_credits: HashMap<ObjectId, FlakeAmount> = HashMap::new();
 
         // Credit the PoW share to the block producer (miner or selected refiner).
         // The producer is identified by block.header.producer.
         let producer = &block.header.producer;
         if !producer.0.is_zero() && miner_share_amount > 0 {
-            if accounts.get_account(producer).is_none() {
-                accounts.create_account(producer.clone()).ok();
-            }
-            accounts.credit(producer, miner_share_amount).ok();
+            add_planned_credit(&mut planned_reward_credits, producer, miner_share_amount)?;
         }
 
         // Distribute the refiner share among active refiners proportional to weight.
@@ -1713,13 +1769,15 @@ impl OpolysNode {
                     let v_share = ((refiner_share_amount as u128 * v_weight as u128)
                         / total_weight as u128) as FlakeAmount;
                     if v_share > 0 {
-                        if accounts.get_account(&v.object_id).is_none() {
-                            accounts.create_account(v.object_id.clone()).ok();
-                        }
-                        accounts.credit(&v.object_id, v_share).ok();
+                        add_planned_credit(&mut planned_reward_credits, &v.object_id, v_share)?;
                     }
                 }
             }
+        }
+
+        ensure_planned_credits_creditable(&accounts, &planned_reward_credits)?;
+        for (account, amount) in planned_reward_credits {
+            credit_or_create_account(&mut accounts, &account, amount)?;
         }
 
         // Compute the block hash — this is the new chain tip
@@ -1783,11 +1841,17 @@ impl OpolysNode {
         chain.suggested_fee = next_suggested_fee;
 
         // Process matured unbonding entries — return stake to accounts
-        for (account, amount) in refiners.process_matured_unbonds(chain.current_height) {
-            if accounts.get_account(&account).is_none() {
-                accounts.create_account(account.clone()).ok();
-            }
-            accounts.credit(&account, amount).ok();
+        let matured_unbonds = refiners.matured_unbonds(chain.current_height);
+        let mut planned_unbond_credits: HashMap<ObjectId, FlakeAmount> = HashMap::new();
+        for (account, amount) in &matured_unbonds {
+            add_planned_credit(&mut planned_unbond_credits, account, *amount)?;
+        }
+        ensure_planned_credits_creditable(&accounts, &planned_unbond_credits)?;
+
+        let drained_unbonds = refiners.process_matured_unbonds(chain.current_height);
+        debug_assert_eq!(drained_unbonds, matured_unbonds);
+        for (account, amount) in drained_unbonds {
+            credit_or_create_account(&mut accounts, &account, amount)?;
             tracing::debug!(
                 account = %account.to_hex(),
                 amount,
@@ -2346,6 +2410,34 @@ mod tests {
         assert_eq!(
             block2.header.previous_hash, block1_hash,
             "Block 2 must reference block 1 hash"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_block_rejects_reward_credit_overflow() {
+        let (config, _dir) = test_config();
+        let node = OpolysNode::new(config);
+        register_test_miner_account(&node).await;
+        node.chain.write().await.current_difficulty = MIN_DIFFICULTY;
+        {
+            let mut accounts = node.accounts.write().await;
+            accounts
+                .credit(&node.miner_id, u64::MAX)
+                .expect("test setup can fill miner account");
+        }
+
+        let block = node
+            .mine_block(1_000_000)
+            .await
+            .expect("Should mine block 1");
+        let result = node.apply_block(&block).await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("cannot receive"));
+        let accounts = node.accounts.read().await;
+        assert_eq!(
+            accounts.get_account(&node.miner_id).unwrap().balance,
+            u64::MAX
         );
     }
 

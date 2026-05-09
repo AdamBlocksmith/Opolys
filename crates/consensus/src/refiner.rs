@@ -393,6 +393,16 @@ impl RefinerSet {
         Ok(unbonded)
     }
 
+    /// Return all matured unbonding entries at the given block height without
+    /// removing them from the queue.
+    pub fn matured_unbonds(&self, current_height: u64) -> Vec<(ObjectId, FlakeAmount)> {
+        self.unbonding_queue
+            .iter()
+            .filter(|entry| current_height >= entry.matures_at)
+            .map(|entry| (entry.account.clone(), entry.amount))
+            .collect()
+    }
+
     /// Process all matured unbonding entries at the given block height.
     ///
     /// Returns a Vec of (account, amount) pairs for entries that have matured.
@@ -911,6 +921,18 @@ mod tests {
         assert_eq!(matured[0].0, id);
         assert_eq!(matured[0].1, MIN_BOND_STAKE);
         assert!(vs.unbonding_queue.is_empty());
+    }
+
+    #[test]
+    fn matured_unbonds_preview_does_not_drain_queue() {
+        let mut vs = RefinerSet::new();
+        let id = test_id(b"refiner1");
+        vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0).unwrap();
+        vs.unbond_amount(&id, MIN_BOND_STAKE, 100).unwrap();
+
+        let matured = vs.matured_unbonds(100 + EPOCH);
+        assert_eq!(matured, vec![(id, MIN_BOND_STAKE)]);
+        assert_eq!(vs.unbonding_queue.len(), 1);
     }
 
     #[test]

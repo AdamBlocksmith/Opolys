@@ -145,6 +145,23 @@ impl AccountStore {
         Ok(())
     }
 
+    /// Return whether `amount` can be credited without overflowing.
+    ///
+    /// Missing accounts are creditable because block rewards and matured unbonds
+    /// auto-create destination accounts before crediting them.
+    pub fn can_credit(&self, object_id: &ObjectId, amount: FlakeAmount) -> Result<(), OpolysError> {
+        if let Some(account) = self.accounts.get(object_id) {
+            account.balance.checked_add(amount).ok_or_else(|| {
+                OpolysError::InvalidParams(format!(
+                    "Balance overflow when crediting {} flakes to {}",
+                    amount,
+                    object_id.to_hex()
+                ))
+            })?;
+        }
+        Ok(())
+    }
+
     /// Subtract `amount` flakes from the account's balance. Fails if the
     /// account doesn't exist or holds insufficient funds.
     pub fn debit(&mut self, object_id: &ObjectId, amount: FlakeAmount) -> Result<(), OpolysError> {
@@ -373,6 +390,18 @@ mod tests {
         store.credit(&alice, u64::MAX).unwrap();
 
         assert!(store.credit(&alice, 1).is_err());
+    }
+
+    #[test]
+    fn can_credit_detects_overflow_without_mutating() {
+        let mut store = AccountStore::new();
+        let alice = test_id(b"alice");
+        store.create_account(alice.clone()).unwrap();
+        store.credit(&alice, u64::MAX).unwrap();
+
+        assert!(store.can_credit(&alice, 1).is_err());
+        assert_eq!(store.get_account(&alice).unwrap().balance, u64::MAX);
+        assert!(store.can_credit(&test_id(b"missing"), 1).is_ok());
     }
 
     #[test]
