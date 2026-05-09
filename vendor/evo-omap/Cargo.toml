@@ -1,0 +1,27 @@
+[package]
+name = "evo-omap"
+version = "0.3.0"
+edition = "2024"
+description = "EVO-OMAP: Evolving Oriented Memory-hard Algorithm for Proof-of-work"
+
+[dependencies]
+blake3 = "1.8"
+sha3 = "0.10"
+hex = "0.4"
+rayon = "1.10"
+
+[dev-dependencies]
+rand = "0.9"
+
+[[bin]]
+name = "evo-omap"
+path = "src/main.rs"
+
+[lib]
+name = "evo_omap"
+path = "src/lib.rs"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3

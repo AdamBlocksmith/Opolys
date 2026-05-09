@@ -242,9 +242,11 @@ core ← crypto ← consensus ← execution ← node → rpc
 | `libp2p` | 0.54 | P2P networking (QUIC, Kademlia, Gossipsub) |
 | `tokio` | 1 | Async runtime |
 | `axum` | 0.8 | JSON-RPC server |
-| `evo-omap` | pinned Git revision | Proof-of-work algorithm (EVO-OMAP) |
+| `evo-omap` | vendored local path | Proof-of-work algorithm (EVO-OMAP) |
 | `rayon` | 1.10 | Parallel mining |
 | `bip39` | 2.2 | Mnemonic generation |
+
+EVO-OMAP is vendored at `vendor/evo-omap` from upstream commit `6da0fac5d73b1a0ac5b4589454a66c2f83ce93c8`. Opolys builds against this local copy so mainnet consensus code does not fetch its proof-of-work engine from GitHub at build time.
 
 ---
 

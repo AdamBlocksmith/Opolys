@@ -1627,4 +1627,14 @@ A comprehensive audit of all consensus-critical formulas and constants in the co
 
 ---
 
+#### M7: EVO-OMAP supply-chain dependency
+**Location:** `Cargo.toml`, `vendor/evo-omap`
+**Status:** **FIXED**
+
+**What it is:** Opolys depended on EVO-OMAP through a pinned Git revision. That pinned accidental drift, but mainnet builds still depended on fetching consensus-critical proof-of-work code from GitHub.
+
+**How fixed:** EVO-OMAP commit `6da0fac5d73b1a0ac5b4589454a66c2f83ce93c8` is now vendored under `vendor/evo-omap`, and the workspace dependency points to the local path. The vendored crate is excluded from workspace membership but still compiled through the path dependency. `vendor/evo-omap/UPSTREAM.md` records the upstream repository, commit, and review expectation for future updates.
+
+---
+
 *This document is the single source of truth for Opolys development. Update it with every design decision and implementation change.*

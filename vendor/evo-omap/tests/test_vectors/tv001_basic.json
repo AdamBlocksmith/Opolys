@@ -1,0 +1,13 @@
+{
+  "description": "EVO-OMAP test vector 001: Basic hash at height 0, difficulty 1",
+  "header_hex": "00",
+  "height": 0,
+  "nonce": 0,
+  "difficulty": 1,
+  "epoch_seed_hex": "9b5b08a771d5746da91ef85460fc6ea2bf4d915dffc8a9b5c4eb6b9e31c6839",
+  "node_0_first_32_bytes_hex": "a1b2c3d4e5f607182938475664738290",
+  "node_255_first_32_bytes_hex": "11223344556677889900aabbccddeeff",
+  "expected_hash_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+  "meets_target": true,
+  "note": "This is a placeholder - actual values need to be computed"
+}

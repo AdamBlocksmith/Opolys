@@ -1,5 +1,8 @@
 [workspace]
 resolver = "2"
+exclude = [
+    "vendor/evo-omap",
+]
 members = [
     "crates/core",
     "crates/crypto",
@@ -29,7 +32,7 @@ opolys-networking = { path = "crates/networking" }
 opolys-node = { path = "crates/node" }
 opolys-wallet = { path = "crates/wallet" }
 opolys-rpc = { path = "crates/rpc" }
-evo-omap = { git = "https://github.com/AdamBlocksmith/evo-omap.git", rev = "6da0fac5d73b1a0ac5b4589454a66c2f83ce93c8" }
+evo-omap = { path = "vendor/evo-omap" }
 borsh = { version = "1.5", features = ["derive"] }
 blake3 = "1.8"
 ed25519-dalek = { version = "2.1", features = ["serde"] }
