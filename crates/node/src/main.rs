@@ -335,6 +335,7 @@ async fn main() {
         rpc_listen_addr: args.rpc_listen_addr,
         rpc_api_key,
         genesis_params_path: args.genesis_params,
+        allow_dry_run_genesis: args.allow_dry_run_genesis,
     };
 
     tracing::info!(

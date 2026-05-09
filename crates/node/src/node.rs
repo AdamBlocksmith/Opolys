@@ -161,6 +161,12 @@ pub struct Args {
     /// isolated behind another authenticated service.
     #[arg(long)]
     pub no_rpc_auth: bool,
+
+    /// Allow a dry-run genesis attestation signed by the public test key.
+    ///
+    /// Only use this for isolated launch rehearsals.
+    #[arg(long)]
+    pub allow_dry_run_genesis: bool,
 }
 
 /// Configuration for an Opolys node, derived from CLI arguments or defaults.
@@ -186,6 +192,8 @@ pub struct NodeConfig {
     pub rpc_api_key: Option<String>,
     /// Path to the genesis ceremony JSON. Required on startup.
     pub genesis_params_path: Option<String>,
+    /// Permit the deterministic dry-run genesis key for rehearsal only.
+    pub allow_dry_run_genesis: bool,
 }
 
 impl Default for NodeConfig {
@@ -204,6 +212,7 @@ impl Default for NodeConfig {
             rpc_listen_addr: "127.0.0.1".to_string(),
             rpc_api_key: None,
             genesis_params_path: None,
+            allow_dry_run_genesis: false,
         }
     }
 }
@@ -714,7 +723,15 @@ fn compute_ceremony_master_hash(attestation_json: &str) -> Result<[u8; 32], Stri
     Ok(*blake3::hash(canonical.as_bytes()).as_bytes())
 }
 
+#[cfg(test)]
 fn load_genesis_config_from_attestation(path: &str) -> Result<GenesisConfig, String> {
+    load_genesis_config_from_attestation_inner(path, false)
+}
+
+fn load_genesis_config_from_attestation_inner(
+    path: &str,
+    allow_dry_run_genesis: bool,
+) -> Result<GenesisConfig, String> {
     let contents = fs::read_to_string(path)
         .map_err(|e| format!("Failed to read genesis ceremony file {}: {}", path, e))?;
     let attestation: CeremonyAttestationFile = serde_json::from_str(&contents)
@@ -734,7 +751,7 @@ fn load_genesis_config_from_attestation(path: &str) -> Result<GenesisConfig, Str
     let dry_run_public_key = SigningKey::from_bytes(&DRY_RUN_GENESIS_OPERATOR_SEED)
         .verifying_key()
         .to_bytes();
-    if operator_public_key == dry_run_public_key {
+    if operator_public_key == dry_run_public_key && !allow_dry_run_genesis {
         return Err(
             "Genesis ceremony uses the dry-run operator key; refuse to start mainnet state"
                 .to_string(),
@@ -789,9 +806,12 @@ fn load_genesis_config_from_attestation(path: &str) -> Result<GenesisConfig, Str
 
 fn genesis_config_for_node(config: &NodeConfig) -> GenesisConfig {
     match config.genesis_params_path.as_deref() {
-        Some(path) => load_genesis_config_from_attestation(path).unwrap_or_else(|e| {
-            panic!("Invalid genesis ceremony file: {}", e);
-        }),
+        Some(path) => {
+            load_genesis_config_from_attestation_inner(path, config.allow_dry_run_genesis)
+                .unwrap_or_else(|e| {
+                    panic!("Invalid genesis ceremony file: {}", e);
+                })
+        }
         None => {
             tracing::warn!(
                 "No genesis ceremony file configured; using default development genesis"
@@ -2202,6 +2222,7 @@ mod tests {
             rpc_listen_addr: "127.0.0.1".to_string(),
             rpc_api_key: None,
             genesis_params_path: None,
+            allow_dry_run_genesis: false,
         };
         (config, dir)
     }
@@ -2555,6 +2576,30 @@ mod tests {
 
         let err = load_genesis_config_from_attestation(&path).unwrap_err();
         assert!(err.contains("missing evidence"), "{}", err);
+    }
+
+    #[test]
+    fn dry_run_genesis_key_requires_explicit_rehearsal_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_test_genesis_attestation(&dir, 333 * FLAKES_PER_OPL);
+        let mut attestation: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&DRY_RUN_GENESIS_OPERATOR_SEED);
+        attestation["operator_public_key"] =
+            serde_json::Value::String(hex::encode(signing_key.verifying_key().as_bytes()));
+        attestation["master_hash"] = serde_json::Value::String(String::new());
+        attestation["operator_signature"] = serde_json::Value::String(String::new());
+        let unsigned = serde_json::to_string_pretty(&attestation).unwrap();
+        let master_hash = compute_ceremony_master_hash(&unsigned).unwrap();
+        let signature = signing_key.sign(&master_hash);
+        attestation["master_hash"] = serde_json::Value::String(hex::encode(master_hash));
+        attestation["operator_signature"] =
+            serde_json::Value::String(hex::encode(signature.to_bytes()));
+        fs::write(&path, serde_json::to_string_pretty(&attestation).unwrap()).unwrap();
+
+        let err = load_genesis_config_from_attestation(&path).unwrap_err();
+        assert!(err.contains("dry-run operator key"), "{}", err);
+        assert!(load_genesis_config_from_attestation_inner(&path, true).is_ok());
     }
 
     #[test]

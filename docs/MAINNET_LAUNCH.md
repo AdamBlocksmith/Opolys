@@ -10,10 +10,11 @@ cd Opolys
 cargo build --release
 cargo test -p opolys-consensus
 cargo test -p opolys-node
+cargo test --manifest-path vendor/evo-omap/Cargo.toml test_known_answer --lib
 cargo fmt --check
 ```
 
-`evo-omap` is a pinned Git dependency in `Cargo.toml`. Operators do not download it separately; Cargo fetches the exact audited revision.
+`evo-omap` is vendored at `vendor/evo-omap`. Operators do not download it separately; Cargo builds the audited source committed in this repository.
 
 ## 2. Rehearse The Ceremony
 
@@ -40,11 +41,24 @@ Smoke-start a node against the dry-run attestation:
 cargo run -p opolys-node -- \
   --genesis-params ./genesis-dry-run/genesis_attestation.json \
   --data-dir ./launch-rehearsal-data \
+  --allow-dry-run-genesis \
   --no-rpc \
   --no-bootstrap
 ```
 
-The node should create `./launch-rehearsal-data/mainnet` and stay running.
+The node should create `./launch-rehearsal-data/mainnet` and stay running. The `--allow-dry-run-genesis` flag is intentionally required because the dry-run ceremony uses a public test signing key. Never use that flag for production mainnet data.
+
+For the full launch rehearsal, use a fresh temporary data directory and complete this sequence:
+
+1. Generate and verify a fresh dry-run attestation.
+2. Start a node with `--allow-dry-run-genesis --no-bootstrap`.
+3. Stop and restart the node against the same data directory.
+4. Confirm restart loads the same genesis hash and current height.
+5. Start a mining node with a throwaway miner key and local RPC.
+6. Mine at least one block.
+7. Query `opl_getChainInfo` and `opl_getBlockByHeight`.
+8. Send one wallet transaction over loopback RPC.
+9. Restart again and confirm the block, transaction, balances, and chain height persist.
 
 ## 3. Production Ceremony
 
