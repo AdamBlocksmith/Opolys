@@ -468,6 +468,10 @@ struct CeremonyAttestationFile {
 
 const CEREMONY_TROY_OZ_PER_TONNE: f64 = 32_150.7;
 const MIN_CEREMONY_PRODUCTION_SOURCES: usize = 5;
+const CEREMONY_PROD_MIN_TONNES: f64 = 1_000.0;
+const CEREMONY_PROD_MAX_TONNES: f64 = 10_000.0;
+const CEREMONY_PRICE_MIN_USD_CENTS: u64 = 50_000;
+const CEREMONY_PRICE_MAX_USD_CENTS: u64 = 1_500_000;
 
 fn decode_hex_array<const N: usize>(field: &str, value: &str) -> Result<[u8; N], String> {
     let bytes = hex::decode(value).map_err(|e| format!("{} must be hex: {}", field, e))?;
@@ -497,13 +501,35 @@ fn validate_ceremony_sources(attestation: &CeremonyAttestationFile) -> Result<()
             MIN_CEREMONY_PRODUCTION_SOURCES
         ));
     }
+    for value in &production_values {
+        if !value.is_finite()
+            || *value < CEREMONY_PROD_MIN_TONNES
+            || *value > CEREMONY_PROD_MAX_TONNES
+        {
+            return Err(format!(
+                "Genesis ceremony production source value {} is outside sanity bounds [{}, {}] tonnes",
+                value, CEREMONY_PROD_MIN_TONNES, CEREMONY_PROD_MAX_TONNES
+            ));
+        }
+    }
 
-    if !attestation
+    let price_values = attestation
         .price_sources
         .iter()
-        .any(|source| source.extracted_value.is_some())
-    {
+        .filter_map(|source| source.extracted_value)
+        .collect::<Vec<_>>();
+    if price_values.is_empty() {
         return Err("Genesis ceremony must include at least one price source".to_string());
+    }
+    let price_min_usd = CEREMONY_PRICE_MIN_USD_CENTS as f64 / 100.0;
+    let price_max_usd = CEREMONY_PRICE_MAX_USD_CENTS as f64 / 100.0;
+    for value in &price_values {
+        if !value.is_finite() || *value < price_min_usd || *value > price_max_usd {
+            return Err(format!(
+                "Genesis ceremony price source value {} is outside sanity bounds [{}, {}] USD/oz",
+                value, price_min_usd, price_max_usd
+            ));
+        }
     }
 
     for source in attestation
@@ -536,11 +562,47 @@ fn validate_ceremony_reward_derivation(
     {
         return Err("Genesis ceremony median_production_tonnes must be positive".to_string());
     }
-    if attestation.blocks_per_year == 0 {
-        return Err("Genesis ceremony blocks_per_year must be non-zero".to_string());
+    if attestation.median_production_tonnes < CEREMONY_PROD_MIN_TONNES
+        || attestation.median_production_tonnes > CEREMONY_PROD_MAX_TONNES
+    {
+        return Err(format!(
+            "Genesis ceremony median_production_tonnes {} is outside sanity bounds [{}, {}]",
+            attestation.median_production_tonnes,
+            CEREMONY_PROD_MIN_TONNES,
+            CEREMONY_PROD_MAX_TONNES
+        ));
+    }
+    if attestation.median_price_usd_cents < CEREMONY_PRICE_MIN_USD_CENTS
+        || attestation.median_price_usd_cents > CEREMONY_PRICE_MAX_USD_CENTS
+    {
+        return Err(format!(
+            "Genesis ceremony median_price_usd_cents {} is outside sanity bounds [{}, {}]",
+            attestation.median_price_usd_cents,
+            CEREMONY_PRICE_MIN_USD_CENTS,
+            CEREMONY_PRICE_MAX_USD_CENTS
+        ));
+    }
+    if attestation.blocks_per_year != BLOCKS_PER_YEAR {
+        return Err(format!(
+            "Genesis ceremony blocks_per_year must be {}, got {}",
+            BLOCKS_PER_YEAR, attestation.blocks_per_year
+        ));
     }
     if attestation.base_reward_flakes == 0 {
         return Err("Genesis ceremony base_reward_flakes must be non-zero".to_string());
+    }
+
+    let max_base_reward_opl = ((CEREMONY_PROD_MAX_TONNES * CEREMONY_TROY_OZ_PER_TONNE)
+        / BLOCKS_PER_YEAR as f64)
+        .floor() as u64;
+    let max_base_reward_flakes = max_base_reward_opl
+        .checked_mul(FLAKES_PER_OPL)
+        .ok_or_else(|| "Genesis ceremony base reward ceiling overflowed".to_string())?;
+    if attestation.base_reward_flakes > max_base_reward_flakes {
+        return Err(format!(
+            "Genesis ceremony base_reward_flakes {} exceeds safety ceiling {}",
+            attestation.base_reward_flakes, max_base_reward_flakes
+        ));
     }
 
     let annual_oz = attestation.median_production_tonnes * CEREMONY_TROY_OZ_PER_TONNE;
@@ -2245,6 +2307,62 @@ mod tests {
 
         let err = load_genesis_config_from_attestation(&path).unwrap_err();
         assert!(err.contains("base_reward_flakes mismatch"), "{}", err);
+    }
+
+    #[test]
+    fn genesis_attestation_rejects_impossible_production_even_when_signed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_test_genesis_attestation(&dir, 333 * FLAKES_PER_OPL);
+        let mut attestation: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let impossible_tonnes = CEREMONY_PROD_MAX_TONNES + 1.0;
+        let base_reward_opl = ((impossible_tonnes * CEREMONY_TROY_OZ_PER_TONNE)
+            / BLOCKS_PER_YEAR as f64)
+            .floor() as u64;
+        for source in attestation["production_sources"].as_array_mut().unwrap() {
+            source["extracted_value"] = serde_json::Value::from(impossible_tonnes);
+        }
+        attestation["median_production_tonnes"] = serde_json::Value::from(impossible_tonnes);
+        attestation["base_reward_opl"] = serde_json::Value::from(base_reward_opl);
+        attestation["base_reward_flakes"] =
+            serde_json::Value::from(base_reward_opl * FLAKES_PER_OPL);
+        resign_test_genesis_attestation(&mut attestation);
+        fs::write(&path, serde_json::to_string_pretty(&attestation).unwrap()).unwrap();
+
+        let err = load_genesis_config_from_attestation(&path).unwrap_err();
+        assert!(err.contains("production source value"), "{}", err);
+    }
+
+    #[test]
+    fn genesis_attestation_rejects_impossible_price_even_when_signed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_test_genesis_attestation(&dir, 333 * FLAKES_PER_OPL);
+        let mut attestation: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let impossible_price = CEREMONY_PRICE_MAX_USD_CENTS as f64 / 100.0 + 1.0;
+        attestation["price_sources"][0]["extracted_value"] =
+            serde_json::Value::from(impossible_price);
+        attestation["median_price_usd_cents"] =
+            serde_json::Value::from(CEREMONY_PRICE_MAX_USD_CENTS + 100);
+        resign_test_genesis_attestation(&mut attestation);
+        fs::write(&path, serde_json::to_string_pretty(&attestation).unwrap()).unwrap();
+
+        let err = load_genesis_config_from_attestation(&path).unwrap_err();
+        assert!(err.contains("price source value"), "{}", err);
+    }
+
+    #[test]
+    fn genesis_attestation_rejects_wrong_blocks_per_year_even_when_signed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_test_genesis_attestation(&dir, 333 * FLAKES_PER_OPL);
+        let mut attestation: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        attestation["blocks_per_year"] = serde_json::Value::from(BLOCKS_PER_YEAR - 1);
+        resign_test_genesis_attestation(&mut attestation);
+        fs::write(&path, serde_json::to_string_pretty(&attestation).unwrap()).unwrap();
+
+        let err = load_genesis_config_from_attestation(&path).unwrap_err();
+        assert!(err.contains("blocks_per_year must be"), "{}", err);
     }
 
     #[test]

@@ -1557,4 +1557,14 @@ A comprehensive audit of all consensus-critical formulas and constants in the co
 
 ---
 
+#### H5: Genesis ceremony sanity bounds
+**Location:** `node/node.rs`
+**Status:** **FIXED**
+
+**What it is:** The ceremony binary rejected impossible production/price inputs, but node startup only checked that the signed file was internally consistent. A signed file with unrealistic data should still fail closed at the node boundary.
+
+**How fixed:** Node-side genesis verification now enforces the ceremony's production and price sanity ranges, requires `blocks_per_year == BLOCKS_PER_YEAR`, and caps `base_reward_flakes` at the maximum reward implied by the production ceiling. Tests cover signed-but-impossible production, price, and block-year inputs.
+
+---
+
 *This document is the single source of truth for Opolys development. Update it with every design decision and implementation change.*
