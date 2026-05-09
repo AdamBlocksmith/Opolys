@@ -4,9 +4,8 @@
 //! rewards emerge from chain state:
 //!
 //! - **Vein yield** = `1 + ln(target / hash_int)`, where `target = 2^(64-D) - 1`
-//!   and D is the EVO-OMAP difficulty (leading zero bits). This uses f64::ln()
-//!   with deterministic IEEE 754 rounding. Most blocks earn ~1-2x BASE_REWARD,
-//!   with diminishing returns for higher yields.
+//!   and D is the EVO-OMAP difficulty (leading zero bits). This uses fixed-point
+//!   integer math only, so every platform computes the same consensus reward.
 //! - **Base reward** = `BASE_REWARD / effective_difficulty`. As difficulty
 //!   rises, the per-block reward naturally declines — mimicking the
 //!   diminishing returns of real-world gold extraction.
@@ -22,6 +21,100 @@
 //! state drive everything.
 
 use opolys_core::{FlakeAmount, MIN_DIFFICULTY};
+
+const Q32_ONE: u128 = 1u128 << 32;
+const LN_2_Q32: u128 = 2_977_044_471;
+
+fn saturating_u128_to_flakes(value: u128) -> FlakeAmount {
+    value.min(FlakeAmount::MAX as u128) as FlakeAmount
+}
+
+fn integer_sqrt_floor(n: u128) -> u128 {
+    if n < 2 {
+        return n;
+    }
+
+    let bit_len = 128 - n.leading_zeros() as u128;
+    let mut left = 1u128;
+    let mut right = 1u128 << bit_len.div_ceil(2);
+    let mut result = 1u128;
+
+    while left <= right {
+        let mid = (left + right) / 2;
+        let square = mid.saturating_mul(mid);
+        if square <= n {
+            result = mid;
+            left = mid + 1;
+        } else {
+            right = mid - 1;
+        }
+    }
+
+    result
+}
+
+fn integer_sqrt_round(n: u128) -> u128 {
+    let floor = integer_sqrt_floor(n);
+    let floor_square = floor.saturating_mul(floor);
+    let next = floor.saturating_add(1);
+    let next_square = next.saturating_mul(next);
+    if next_square.saturating_sub(n) < n.saturating_sub(floor_square) {
+        next
+    } else {
+        floor
+    }
+}
+
+fn ln_mantissa_q32(mantissa_q32: u128) -> u128 {
+    if mantissa_q32 <= Q32_ONE {
+        return 0;
+    }
+
+    let numerator = (mantissa_q32 - Q32_ONE) << 32;
+    let denominator = mantissa_q32 + Q32_ONE;
+    let y_q32 = numerator / denominator;
+    let y2_q32 = (y_q32 * y_q32) >> 32;
+    let mut term_q32 = y_q32;
+    let mut sum_q32 = 0u128;
+
+    for divisor in (1u128..=39).step_by(2) {
+        sum_q32 = sum_q32.saturating_add(term_q32 / divisor);
+        term_q32 = (term_q32 * y2_q32) >> 32;
+        if term_q32 == 0 {
+            break;
+        }
+    }
+
+    sum_q32.saturating_mul(2)
+}
+
+fn ln_u64_q32(value: u64) -> u128 {
+    if value <= 1 {
+        return 0;
+    }
+
+    let log2_floor = 63 - value.leading_zeros() as u64;
+    let mantissa_q32 = if log2_floor <= 32 {
+        (value as u128) << (32 - log2_floor)
+    } else {
+        (value as u128) >> (log2_floor - 32)
+    };
+
+    (log2_floor as u128)
+        .saturating_mul(LN_2_Q32)
+        .saturating_add(ln_mantissa_q32(mantissa_q32))
+}
+
+fn q32_to_milli(q32: u128) -> u64 {
+    ((q32.saturating_mul(1000).saturating_add(Q32_ONE / 2)) / Q32_ONE).min(u64::MAX as u128) as u64
+}
+
+fn ln_ratio_milli(numerator: u64, denominator: u64) -> u64 {
+    if denominator == 0 || numerator <= denominator {
+        return 0;
+    }
+    q32_to_milli(ln_u64_q32(numerator).saturating_sub(ln_u64_q32(denominator)))
+}
 
 /// Compute the target value for EVO-OMAP difficulty in u64 space.
 ///
@@ -59,9 +152,8 @@ pub fn compute_block_reward(
     let effective_difficulty = difficulty.max(MIN_DIFFICULTY);
     let base = base_reward / effective_difficulty;
     let yield_milli = compute_vein_yield(difficulty, pow_hash_value);
-    // yield_milli is in thousandths (milli), so divide by 1000
-    // Use u128 intermediate to avoid overflow
-    ((base as u128 * yield_milli as u128) / 1000) as FlakeAmount
+    // yield_milli is in thousandths (milli), so divide by 1000.
+    saturating_u128_to_flakes((base as u128 * yield_milli as u128) / 1000)
 }
 
 /// Compute the base block reward without vein yield.
@@ -87,7 +179,6 @@ pub fn compute_base_reward(base_reward: FlakeAmount, difficulty: u64) -> FlakeAm
 /// seen in practice. This mirrors real gold: most ore is low-grade, good veins
 /// are weekly, bonanzas are once-in-a-career.
 ///
-/// Uses f64 ratio computation for overflow safety and precision.
 /// The result is clamped to a minimum of 1000 (1.0x) — every valid block
 /// earns at least the base reward.
 pub fn compute_vein_yield(difficulty: u64, hash_int: u64) -> u64 {
@@ -108,34 +199,24 @@ pub fn compute_vein_yield(difficulty: u64, hash_int: u64) -> u64 {
         // This shouldn't happen for a valid PoW, but handle it safely
         return 1000;
     }
-    // Compute sqrt(ln(target / hash_int)) using f64 for overflow safety.
-    // The sqrt compression makes the yield distribution half-normal:
-    // rare bonanzas, most blocks near the median.
-    let ratio = target as f64 / hash_int as f64;
-    let ln_val = ratio.ln().sqrt() * 1000.0;
+    // Compute sqrt(ln(target / hash_int)) using integer milli-units.
+    let ln_ratio_milli = ln_ratio_milli(target, hash_int);
+    let ln_val = integer_sqrt_round(ln_ratio_milli as u128 * 1000);
     // vein_yield = 1 + sqrt(ln(ratio)), in milli
-    1000u64.saturating_add(ln_val.round().max(0.0) as u64)
+    1000u64.saturating_add(ln_val.min(u64::MAX as u128) as u64)
 }
 
 /// Natural log computation returning ln(x / 1000) × 1000, where x is in
 /// milli units (1000 = 1.0, 2000 = 2.0, etc.).
 ///
-/// Uses IEEE 754 double-precision internally for the log computation, then
-/// rounds to the nearest integer. IEEE 754 guarantees deterministic results
-/// across all platforms, making this safe for consensus.
-///
 /// For x < 1000 (sub-unity values), returns 0.
-/// For x ≥ 1000, the result is accurate to within ±1 milli.
+/// For x >= 1000, the result is computed with deterministic fixed-point
+/// integer arithmetic.
 pub fn ln_milli(x: u64) -> u64 {
     if x < 1000 {
         return 0;
     }
-    // Compute ln(x / 1000) × 1000 using f64::ln()
-    // IEEE 754 guarantees deterministic results on all platforms.
-    // Rounding to nearest integer ensures consensus agreement.
-    let value = x as f64 / 1000.0;
-    let result = value.ln() * 1000.0;
-    result.round().max(0.0) as u64
+    ln_ratio_milli(x, 1000)
 }
 
 /// Compute a refiner's share of the block reward based on their total weight
@@ -154,8 +235,7 @@ pub fn compute_refiner_reward(
     }
     // Compute refiner weight using integer-only seniority
     let weight = compute_refiner_weight(refiner_stake, refiner_age_years);
-    // u128 intermediate prevents overflow on large reward × weight products
-    ((block_reward as u128 * weight as u128) / total_weight as u128) as FlakeAmount
+    saturating_u128_to_flakes((block_reward as u128 * weight as u128) / total_weight as u128)
 }
 
 /// Compute a single entry's weighting factor using integer-only arithmetic.
@@ -176,7 +256,7 @@ pub fn compute_refiner_weight(stake: FlakeAmount, age_years_milli: u64) -> Flake
     // total multiplier in milli: 1000 + ln_bonus
     let multiplier_milli = 1000u64.saturating_add(ln_bonus);
     // weight = stake × multiplier / 1000
-    ((stake as u128 * multiplier_milli as u128) / 1000) as FlakeAmount
+    saturating_u128_to_flakes((stake as u128 * multiplier_milli as u128) / 1000)
 }
 
 /// Compute stake coverage — the ratio of total bonded $OPL to total issued
@@ -323,6 +403,16 @@ mod tests {
         let base = compute_base_reward(BASE_REWARD, 1);
         let with_yield = compute_block_reward(BASE_REWARD, 1, 1);
         assert!(with_yield >= base);
+    }
+
+    #[test]
+    fn reward_math_saturates_instead_of_truncating() {
+        assert_eq!(compute_block_reward(u64::MAX, 1, 1), u64::MAX);
+        assert_eq!(compute_refiner_weight(u64::MAX, u64::MAX), u64::MAX);
+        assert_eq!(
+            compute_refiner_reward(u64::MAX, u64::MAX, u64::MAX, 1),
+            u64::MAX
+        );
     }
 
     #[test]

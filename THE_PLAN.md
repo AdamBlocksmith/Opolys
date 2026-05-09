@@ -1538,4 +1538,14 @@ A comprehensive audit of all consensus-critical formulas and constants in the co
 
 ---
 
+#### H2/M4: Floating-point reward math and truncating reward casts
+**Location:** `consensus/emission.rs`
+**Status:** **FIXED**
+
+**What it is:** Vein yield and refiner seniority used `f64::ln()` / `sqrt()` in consensus reward math. Transcendental floating-point functions are not guaranteed to produce identical results across libc/platform implementations. Reward and weight products also used truncating `u128 as u64` casts, which could wrap in overflow edge cases.
+
+**How fixed:** Emission math now uses deterministic fixed-point integer natural log and integer square root helpers. Block reward, refiner reward, and refiner weight conversions saturate at `u64::MAX` instead of truncating. Regression tests cover known log values, yield behavior, and overflow saturation.
+
+---
+
 *This document is the single source of truth for Opolys development. Update it with every design decision and implementation change.*
