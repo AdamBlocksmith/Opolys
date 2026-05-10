@@ -3,9 +3,10 @@
 //! Opolys has **no fixed emission schedule** and no halvings. Instead, block
 //! rewards emerge from chain state:
 //!
-//! - **Vein yield** = `1 + ln(target / hash_int)`, where `target = 2^(64-D) - 1`
-//!   and D is the EVO-OMAP difficulty (leading zero bits). This uses fixed-point
-//!   integer math only, so every platform computes the same consensus reward.
+//! - **Vein yield** = `1 + sqrt(ln(target / hash_int))`, where
+//!   `target = 2^(64-D) - 1` and D is the EVO-OMAP difficulty (leading zero
+//!   bits). This uses fixed-point integer math only, so every platform computes
+//!   the same consensus reward.
 //! - **Base reward** = `BASE_REWARD / effective_difficulty`. As difficulty
 //!   rises, the per-block reward naturally declines — mimicking the
 //!   diminishing returns of real-world gold extraction.

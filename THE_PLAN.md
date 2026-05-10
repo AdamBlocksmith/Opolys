@@ -251,7 +251,7 @@ net_block_reward = gross_block_reward - mine_assay
 Where:
 - `BASE_REWARD` = ceremony-determined value (default fallback: 332 OPL) from `ChainState.base_reward`
 - `difficulty` = effective difficulty (max of retarget, consensus_floor, MIN_DIFFICULTY)
-- `vein_yield` = `1 + ln(target / hash_int)` (see Section 12)
+- `vein_yield` = `1 + sqrt(ln(target / hash_int))` (see Section 12)
 
 ### Natural Equilibrium
 

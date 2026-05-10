@@ -148,8 +148,8 @@ fn compute_retarget(
 ///
 /// This is the correct semantics for EVO-OMAP, NOT the u64-target divisor
 /// model (`hash < u64::MAX / difficulty`). At difficulty 1, the target is
-/// u64::MAX (any non-zero hash is valid). At difficulty 20, the target is
-/// 2^44 - 1 (only hashes starting with 20 zero bits pass).
+/// 2^63 - 1 (roughly half of u64 values pass). At difficulty 20, the target
+/// is 2^44 - 1 (about one in 2^20 hashes pass).
 pub fn check_proof_of_work(hash_value: u64, difficulty: u64) -> bool {
     let target = difficulty_to_target(difficulty);
     if target == 0 {
