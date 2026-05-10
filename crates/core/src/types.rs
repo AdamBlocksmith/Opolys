@@ -196,10 +196,10 @@ pub enum RefinerStatus {
     None,
     /// The refiner has bonded stake but is not yet past their activation epoch.
     Bonding,
-    /// Eligible by epoch maturity but outside the top-N active set by weight.
+    /// Eligible by epoch maturity but outside the top-N active set by stake.
     /// Promoted to Active by rerank_refiners() at epoch boundaries.
     Waiting,
-    /// The refiner is actively producing and attesting blocks (top-N by weight).
+    /// The refiner is actively producing and attesting blocks (top-N by stake).
     Active,
     /// The refiner has unbonded and stake is being returned.
     Unbonding,

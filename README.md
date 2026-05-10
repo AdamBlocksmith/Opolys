@@ -447,7 +447,7 @@ RefinerUnbond { amount: FlakeAmount }
 
 Oldest entries are consumed first. If the unbond amount exceeds an entry's stake, that entry is fully consumed and the remainder comes from the next entry. Residuals keep their original `bonded_at_timestamp` (preserving seniority). Entries with the same `bonded_at_timestamp` are auto-merged.
 
-After unbonding, stake enters the **unbonding queue** for `UNBONDING_DELAY_BLOCKS` (960 blocks = exactly 24 hours). During the delay, the unbonding stake still earns rewards. Once matured, it's automatically credited back to the sender.
+After unbonding, stake enters the **unbonding queue** for `UNBONDING_DELAY_BLOCKS` (960 blocks = exactly 24 hours). During the delay, the unbonding stake no longer counts for active-set ranking, producer selection, refiner rewards, or finality weight, but it remains slashable until it matures. Once matured, it's automatically credited back to the sender.
 
 ### Refiner Activation
 

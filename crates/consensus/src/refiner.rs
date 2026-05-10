@@ -368,6 +368,9 @@ impl RefinerSet {
                 return Err("Slashed refiners cannot re-bond".to_string());
             }
             refiner.add_entry(stake, height, timestamp)?;
+            if refiner.status == RefinerStatus::Unbonding {
+                refiner.status = RefinerStatus::Bonding;
+            }
             self.dirty_refiners.insert(object_id);
         } else {
             // New refiner: create with first bond entry
@@ -391,8 +394,9 @@ impl RefinerSet {
     /// mature after `UNBONDING_DELAY_BLOCKS` (960 blocks = one epoch).
     ///
     /// Requests must be non-zero and cannot exceed the refiner's current total
-    /// stake. If the refiner has no remaining entries after unbonding, they are
-    /// removed from the refiner set but not slashed.
+    /// stake. If the refiner has no remaining entries after unbonding, they
+    /// move to `Unbonding` until the queued withdrawal matures. Pending
+    /// unbonding stake remains slashable during that delay.
     pub fn unbond_amount(
         &mut self,
         object_id: &ObjectId,
@@ -428,9 +432,10 @@ impl RefinerSet {
             matures_at,
         });
 
-        // If no entries remain, remove the refiner entirely
+        // If no entries remain, keep a slashable Unbonding marker until the
+        // queued withdrawal matures.
         if refiner.entries.is_empty() {
-            self.cached_refiners.remove(object_id);
+            refiner.status = RefinerStatus::Unbonding;
             self.active_set.retain(|id| id != object_id);
         }
         self.dirty_refiners.insert(object_id.clone());
@@ -465,6 +470,21 @@ impl RefinerSet {
         }
 
         self.unbonding_queue = remaining;
+        for (account, _) in &matured {
+            let still_pending = self
+                .unbonding_queue
+                .iter()
+                .any(|entry| &entry.account == account);
+            let should_remove = self.cached_refiners.get(account).is_some_and(|refiner| {
+                refiner.status == RefinerStatus::Unbonding
+                    && refiner.total_stake() == 0
+                    && !still_pending
+            });
+            if should_remove {
+                self.cached_refiners.remove(account);
+                self.active_set.retain(|id| id != account);
+            }
+        }
         matured
     }
 
@@ -647,25 +667,38 @@ impl RefinerSet {
     /// blocks at the same height. The entire stake is burned (no recovery),
     /// and the refiner is permanently set to `Slashed` status.
     ///
-    /// Returns the Flake amount burned. Returns `Ok(0)` if the refiner is already
-    /// `Slashed` (idempotent for already-punished refiners).
+    /// Returns the Flake amount burned. Pending unbonding entries are burned too,
+    /// because stake remains in protocol custody until maturity. Returns `Ok(0)`
+    /// if the refiner is already `Slashed` and has no pending unbonding entries.
     pub fn slash_refiner(
         &mut self,
         object_id: &ObjectId,
         _current_height: u64,
     ) -> Result<FlakeAmount, String> {
-        let refiner = self
-            .cached_refiners
-            .get_mut(object_id)
-            .ok_or_else(|| "Refiner not found".to_string())?;
+        let mut pending_burn = 0u64;
+        let mut remaining_unbonds = Vec::with_capacity(self.unbonding_queue.len());
+        for entry in self.unbonding_queue.drain(..) {
+            if &entry.account == object_id {
+                pending_burn = pending_burn.saturating_add(entry.amount);
+            } else {
+                remaining_unbonds.push(entry);
+            }
+        }
+        self.unbonding_queue = remaining_unbonds;
+
+        let refiner = match self.cached_refiners.get_mut(object_id) {
+            Some(refiner) => refiner,
+            None if pending_burn > 0 => return Ok(pending_burn),
+            None => return Err("Refiner not found".to_string()),
+        };
 
         // Already permanently slashed — nothing more to take
         if refiner.status == RefinerStatus::Slashed {
-            return Ok(0);
+            return Ok(pending_burn);
         }
 
         // 100% burn; permanent Slashed status
-        let burn = refiner.total_stake();
+        let burn = refiner.total_stake().saturating_add(pending_burn);
         refiner.status = RefinerStatus::Slashed;
         for entry in &mut refiner.entries {
             entry.stake = 0;
@@ -985,7 +1018,7 @@ mod tests {
     }
 
     #[test]
-    fn unbond_fifo_removes_refiner_when_empty() {
+    fn unbond_fifo_marks_refiner_unbonding_when_empty() {
         let mut vs = RefinerSet::new();
         let id = test_id(b"refiner1");
         vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0, 0).unwrap();
@@ -993,7 +1026,12 @@ mod tests {
         // Unbond the entire stake
         let unbonded = vs.unbond_amount(&id, MIN_BOND_STAKE, 100).unwrap();
         assert_eq!(unbonded, MIN_BOND_STAKE);
-        assert_eq!(vs.refiner_count(), 0);
+        assert_eq!(vs.refiner_count(), 1);
+        assert_eq!(
+            vs.get_refiner(&id).unwrap().status,
+            RefinerStatus::Unbonding
+        );
+        assert_eq!(vs.get_refiner(&id).unwrap().total_stake(), 0);
         // Unbonding queue holds the pending entry
         assert_eq!(vs.unbonding_queue.len(), 1);
     }
@@ -1028,16 +1066,21 @@ mod tests {
     fn process_matured_unbonds_returns_matured_entries() {
         let mut vs = RefinerSet::new();
         let id = test_id(b"refiner1");
-        vs.bond(id.clone(), MIN_BOND_STAKE * 3, 0, 0, 0).unwrap();
+        vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0, 0).unwrap();
 
         // Unbond at height 100, matures at 100 + EPOCH
         let unbonded = vs.unbond_amount(&id, MIN_BOND_STAKE, 100).unwrap();
         assert_eq!(unbonded, MIN_BOND_STAKE);
+        assert_eq!(
+            vs.get_refiner(&id).unwrap().status,
+            RefinerStatus::Unbonding
+        );
 
         // One block before maturity — nothing matured yet
         let matured = vs.process_matured_unbonds(100 + EPOCH - 1);
         assert!(matured.is_empty());
         assert_eq!(vs.unbonding_queue.len(), 1);
+        assert!(vs.get_refiner(&id).is_some());
 
         // At maturity height, the entry matures
         let matured = vs.process_matured_unbonds(100 + EPOCH);
@@ -1045,6 +1088,7 @@ mod tests {
         assert_eq!(matured[0].0, id);
         assert_eq!(matured[0].1, MIN_BOND_STAKE);
         assert!(vs.unbonding_queue.is_empty());
+        assert!(vs.get_refiner(&id).is_none());
     }
 
     #[test]
@@ -1167,6 +1211,54 @@ mod tests {
         let v = vs.get_refiner(&id).unwrap();
         assert_eq!(v.total_stake(), 0);
         assert_eq!(v.status, RefinerStatus::Slashed);
+    }
+
+    #[test]
+    fn slash_refiner_burns_pending_unbonding_stake() {
+        let mut vs = RefinerSet::new();
+        let id = test_id(b"refiner1");
+        vs.bond(id.clone(), MIN_BOND_STAKE * 10, 0, 0, 0).unwrap();
+        vs.activate(&id, 1).unwrap();
+
+        vs.unbond_amount(&id, MIN_BOND_STAKE * 4, 100).unwrap();
+        assert_eq!(
+            vs.get_refiner(&id).unwrap().total_stake(),
+            MIN_BOND_STAKE * 6
+        );
+        assert_eq!(vs.unbonding_queue.len(), 1);
+
+        let burned = vs.slash_refiner(&id, 200).unwrap();
+        assert_eq!(burned, MIN_BOND_STAKE * 10);
+        assert!(vs.unbonding_queue.is_empty());
+        let v = vs.get_refiner(&id).unwrap();
+        assert_eq!(v.total_stake(), 0);
+        assert_eq!(v.status, RefinerStatus::Slashed);
+    }
+
+    #[test]
+    fn rebond_during_unbonding_returns_to_bonding() {
+        let mut vs = RefinerSet::new();
+        let id = test_id(b"refiner1");
+        vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0, 0).unwrap();
+        vs.activate(&id, 1).unwrap();
+
+        vs.unbond_amount(&id, MIN_BOND_STAKE, 100).unwrap();
+        assert_eq!(
+            vs.get_refiner(&id).unwrap().status,
+            RefinerStatus::Unbonding
+        );
+        assert_eq!(vs.unbonding_queue.len(), 1);
+
+        vs.bond(id.clone(), MIN_BOND_STAKE * 2, 200, 200, 0)
+            .unwrap();
+        let refiner = vs.get_refiner(&id).unwrap();
+        assert_eq!(refiner.status, RefinerStatus::Bonding);
+        assert_eq!(refiner.total_stake(), MIN_BOND_STAKE * 2);
+        assert_eq!(vs.unbonding_queue.len(), 1);
+
+        let burned = vs.slash_refiner(&id, 300).unwrap();
+        assert_eq!(burned, MIN_BOND_STAKE * 3);
+        assert!(vs.unbonding_queue.is_empty());
     }
 
     #[test]

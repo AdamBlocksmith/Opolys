@@ -424,6 +424,8 @@ Withdraws `amount` OPL using **FIFO order** — oldest entries consumed first:
 
 Unbonded stake enters the **unbonding queue** — a list of `PendingUnbond` entries. After `UNBONDING_DELAY_BLOCKS` (960 blocks = exactly 24 hours), matured entries are automatically credited back to the sender's account.
 
+Unbonding stake stops counting for active-set ranking, producer selection, refiner rewards, and finality weight immediately. It remains slashable while it is still in the unbonding queue, mirroring gold that has left the vault ledger but is still in custody during withdrawal.
+
 ---
 
 ## 10. Fees & Burning
