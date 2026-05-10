@@ -795,10 +795,13 @@ async fn handle_get_mining_job(state: &RpcState) -> Result<serde_json::Value, Js
     let slash_evidence = vec![];
     let attestations = vec![];
     let genesis_ceremony = None;
-    let evidence_root = opolys_consensus::block::compute_evidence_root(&slash_evidence);
-    let attestation_root = opolys_consensus::block::compute_attestation_root(&attestations);
+    let evidence_root = opolys_consensus::block::compute_evidence_root(&slash_evidence)
+        .map_err(|e| JsonRpcError::internal_error(&e.to_string()))?;
+    let attestation_root = opolys_consensus::block::compute_attestation_root(&attestations)
+        .map_err(|e| JsonRpcError::internal_error(&e.to_string()))?;
     let genesis_ceremony_hash =
-        opolys_consensus::block::compute_genesis_ceremony_hash(&genesis_ceremony);
+        opolys_consensus::block::compute_genesis_ceremony_hash(&genesis_ceremony)
+            .map_err(|e| JsonRpcError::internal_error(&e.to_string()))?;
     let transaction_root_hex = transaction_root.to_hex();
 
     // Build a template block header for mining

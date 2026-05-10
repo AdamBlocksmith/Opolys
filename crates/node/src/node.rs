@@ -296,7 +296,8 @@ impl ChainState {
     /// Create chain state from the genesis configuration, computing the
     /// genesis block hash and setting initial values.
     pub fn new(genesis_config: &GenesisConfig) -> Self {
-        let genesis = opolys_consensus::build_genesis_block(genesis_config);
+        let genesis = opolys_consensus::build_genesis_block(genesis_config)
+            .unwrap_or_else(|e| panic!("Failed to build genesis block: {}", e));
         let genesis_hash = compute_block_hash(&genesis.header);
 
         ChainState {
@@ -1350,9 +1351,9 @@ impl OpolysNode {
         let pending_attestations = self.drain_pending_attestations_for_block(next_height).await;
         let genesis_ceremony = None;
         let transaction_root = compute_transaction_root(&transactions);
-        let evidence_root = compute_evidence_root(&pending_evidence);
-        let attestation_root = compute_attestation_root(&pending_attestations);
-        let genesis_ceremony_hash = compute_genesis_ceremony_hash(&genesis_ceremony);
+        let evidence_root = compute_evidence_root(&pending_evidence).ok()?;
+        let attestation_root = compute_attestation_root(&pending_attestations).ok()?;
+        let genesis_ceremony_hash = compute_genesis_ceremony_hash(&genesis_ceremony).ok()?;
         let bonded_stake = refiners.total_bonded_stake();
         let total_issued = chain.total_issued;
 
@@ -1468,9 +1469,9 @@ impl OpolysNode {
         let pending_attestations = self.drain_pending_attestations_for_block(next_height).await;
         let genesis_ceremony = None;
         let transaction_root = compute_transaction_root(&transactions);
-        let evidence_root = compute_evidence_root(&pending_evidence);
-        let attestation_root = compute_attestation_root(&pending_attestations);
-        let genesis_ceremony_hash = compute_genesis_ceremony_hash(&genesis_ceremony);
+        let evidence_root = compute_evidence_root(&pending_evidence).ok()?;
+        let attestation_root = compute_attestation_root(&pending_attestations).ok()?;
+        let genesis_ceremony_hash = compute_genesis_ceremony_hash(&genesis_ceremony).ok()?;
         let bonded_stake = refiners.total_bonded_stake();
 
         let diff_target = compute_next_difficulty(
@@ -2146,8 +2147,10 @@ impl OpolysNode {
         let mut account_hasher = opolys_crypto::Blake3Hasher::new();
         account_hasher.update(DOMAIN_STATE_ROOT);
         account_hasher.update(b"chain");
-        account_hasher.update(accounts.compute_state_root().as_bytes());
-        account_hasher.update(refiners.compute_state_root().as_bytes());
+        let accounts_root = accounts.compute_state_root().map_err(|e| e.to_string())?;
+        let refiners_root = refiners.compute_state_root().map_err(|e| e.to_string())?;
+        account_hasher.update(accounts_root.as_bytes());
+        account_hasher.update(refiners_root.as_bytes());
         account_hasher.update(&chain.total_issued.to_be_bytes());
         account_hasher.update(&chain.total_burned.to_be_bytes());
         account_hasher.update(&chain.current_height.to_be_bytes());
@@ -2273,7 +2276,7 @@ mod tests {
     }
 
     fn refresh_body_roots_and_refiner_signature(node: &OpolysNode, block: &mut Block) {
-        set_body_roots(block);
+        set_body_roots(block).expect("test block body roots should serialize");
         block.header.refiner_signature = None;
         let block_hash = compute_block_hash(&block.header);
         let payload = refiner_block_signing_payload(&block_hash);

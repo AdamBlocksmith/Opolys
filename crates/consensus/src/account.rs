@@ -269,7 +269,7 @@ impl AccountStore {
     /// nodes. Each account is serialized using Borsh and streamed into the
     /// hasher. The resulting hash captures the complete account state:
     /// balances, nonces, and public keys.
-    pub fn compute_state_root(&self) -> opolys_core::Hash {
+    pub fn compute_state_root(&self) -> Result<opolys_core::Hash, OpolysError> {
         let mut sorted_ids: Vec<&ObjectId> = self.accounts.keys().collect();
         sorted_ids.sort_by_key(|a| a.0.0);
 
@@ -278,12 +278,13 @@ impl AccountStore {
         hasher.update(b"accounts");
         for id in sorted_ids {
             if let Some(account) = self.accounts.get(id) {
-                let bytes = borsh::to_vec(account)
-                    .expect("Account serialization must not fail; this is a consensus bug");
+                let bytes = borsh::to_vec(account).map_err(|e| {
+                    OpolysError::SerializationError(format!("Account serialization failed: {}", e))
+                })?;
                 hasher.update(&bytes);
             }
         }
-        hasher.finalize()
+        Ok(hasher.finalize())
     }
 }
 

@@ -316,7 +316,7 @@ pub fn verify_transaction_for_mempool(
     }
 
     let expected_tx_id =
-        compute_mempool_tx_id(&tx.sender, &tx.action, tx.fee, tx.nonce, tx.chain_id);
+        compute_mempool_tx_id(&tx.sender, &tx.action, tx.fee, tx.nonce, tx.chain_id)?;
     if tx.tx_id != expected_tx_id {
         return Err(OpolysError::InvalidTransaction(format!(
             "Transaction ID mismatch: expected {}, got {}",
@@ -365,10 +365,14 @@ fn compute_mempool_tx_id(
     fee: FlakeAmount,
     nonce: u64,
     chain_id: u64,
-) -> ObjectId {
-    let data = borsh::to_vec(&(sender.clone(), action, fee, nonce, chain_id))
-        .expect("Transaction ID serialization must not fail");
-    hash_to_object_id_with_domain(DOMAIN_TX_ID, &data)
+) -> Result<ObjectId, OpolysError> {
+    let data = borsh::to_vec(&(sender.clone(), action, fee, nonce, chain_id)).map_err(|e| {
+        OpolysError::SerializationError(format!(
+            "Mempool transaction ID serialization failed: {}",
+            e
+        ))
+    })?;
+    Ok(hash_to_object_id_with_domain(DOMAIN_TX_ID, &data))
 }
 
 impl Default for Mempool {
@@ -397,7 +401,8 @@ mod tests {
             amount: 100,
         };
         let tx_id =
-            compute_mempool_tx_id(&sender, &action, fee, nonce, opolys_core::MAINNET_CHAIN_ID);
+            compute_mempool_tx_id(&sender, &action, fee, nonce, opolys_core::MAINNET_CHAIN_ID)
+                .unwrap();
         let message = transaction_signing_payload(
             &sender,
             &action,

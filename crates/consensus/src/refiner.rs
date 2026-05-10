@@ -30,7 +30,7 @@
 use borsh::{BorshDeserialize, BorshSerialize};
 use opolys_core::{
     ANNUAL_ATTRITION_PERMILLE, EPOCH, FlakeAmount, MAX_ACTIVE_REFINERS, MIN_BOND_STAKE, ObjectId,
-    RefinerStatus,
+    OpolysError, RefinerStatus,
 };
 use opolys_crypto::{Blake3Hasher, DOMAIN_STATE_ROOT};
 use serde::{Deserialize, Serialize};
@@ -681,7 +681,7 @@ impl RefinerSet {
     /// Compute a deterministic Blake3-256 state root hash over all refiners
     /// and their bond entries. Refiners are sorted by ObjectId for determinism.
     /// Also includes the unbonding queue to capture pending stake withdrawals.
-    pub fn compute_state_root(&self) -> opolys_core::Hash {
+    pub fn compute_state_root(&self) -> Result<opolys_core::Hash, OpolysError> {
         let mut sorted_ids: Vec<&ObjectId> = self.cached_refiners.keys().collect();
         sorted_ids.sort_by_key(|a| a.0.0);
 
@@ -692,20 +692,25 @@ impl RefinerSet {
         // Hash all refiner state (sorted by ObjectId)
         for id in sorted_ids {
             if let Some(refiner) = self.cached_refiners.get(id) {
-                let bytes = borsh::to_vec(refiner)
-                    .expect("Refiner serialization must not fail; this is a consensus bug");
+                let bytes = borsh::to_vec(refiner).map_err(|e| {
+                    OpolysError::SerializationError(format!("Refiner serialization failed: {}", e))
+                })?;
                 hasher.update(&bytes);
             }
         }
 
         // Hash the unbonding queue (order matters — it's FIFO)
         for entry in &self.unbonding_queue {
-            let bytes = borsh::to_vec(entry)
-                .expect("Unbonding entry serialization must not fail; this is a consensus bug");
+            let bytes = borsh::to_vec(entry).map_err(|e| {
+                OpolysError::SerializationError(format!(
+                    "Unbonding entry serialization failed: {}",
+                    e
+                ))
+            })?;
             hasher.update(&bytes);
         }
 
-        hasher.finalize()
+        Ok(hasher.finalize())
     }
 
     /// Select the next block producer via weighted random sampling.

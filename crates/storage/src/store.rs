@@ -820,7 +820,7 @@ mod tests {
         let store = BlockchainStore::open(dir.path()).unwrap();
 
         let genesis_config = GenesisConfig::default();
-        let block = opolys_consensus::build_genesis_block(&genesis_config);
+        let block = opolys_consensus::build_genesis_block(&genesis_config).unwrap();
 
         store.save_block(&block).unwrap();
 
@@ -835,7 +835,7 @@ mod tests {
         let store = BlockchainStore::open(dir.path()).unwrap();
 
         let genesis_config = GenesisConfig::default();
-        let block = opolys_consensus::build_genesis_block(&genesis_config);
+        let block = opolys_consensus::build_genesis_block(&genesis_config).unwrap();
         let block_hash = opolys_consensus::block::compute_block_hash(&block.header);
 
         let mut accounts = AccountStore::new();
@@ -939,7 +939,7 @@ mod tests {
         let store = BlockchainStore::open(dir.path()).unwrap();
 
         let genesis_config = GenesisConfig::default();
-        let block = opolys_consensus::build_genesis_block(&genesis_config);
+        let block = opolys_consensus::build_genesis_block(&genesis_config).unwrap();
         store.save_block(&block).unwrap();
 
         let err = store.load_chain_state().unwrap_err();
@@ -953,7 +953,7 @@ mod tests {
         let store = BlockchainStore::open(dir.path()).unwrap();
 
         let genesis_config = GenesisConfig::default();
-        let block = opolys_consensus::build_genesis_block(&genesis_config);
+        let block = opolys_consensus::build_genesis_block(&genesis_config).unwrap();
         store.save_block(&block).unwrap();
 
         let cf = store.db.cf_handle("chain_state").unwrap();

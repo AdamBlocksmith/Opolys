@@ -21,7 +21,7 @@ use opolys_core::{
     BASE_REWARD, BLOCK_TARGET_TIME_MS, BLOCK_VERSION, Block, BlockHeader, CURRENCY_NAME,
     CURRENCY_SMALLEST_UNIT, CURRENCY_TICKER, EPOCH, FLAKES_PER_OPL, FlakeAmount,
     GENESIS_DIFFICULTY, GenesisCeremonyData, Hash, MIN_BOND_STAKE, MIN_DIFFICULTY, MIN_FEE,
-    NETWORK_PROTOCOL_VERSION, ObjectId,
+    NETWORK_PROTOCOL_VERSION, ObjectId, OpolysError,
 };
 use opolys_crypto::{Blake3Hasher, DOMAIN_STATE_ROOT};
 
@@ -116,7 +116,7 @@ impl Default for GenesisConfig {
 ///   attestation fields, and genesis account balances, ensuring every node
 ///   arrives at the same state.
 /// - No transactions — genesis accounts are credited off-chain, not via tx.
-pub fn build_genesis_block(config: &GenesisConfig) -> Block {
+pub fn build_genesis_block(config: &GenesisConfig) -> Result<Block, OpolysError> {
     // Compute the state root by hashing every protocol constant, attestation
     // field, and genesis account in a fixed order. This makes the genesis
     // state fully deterministic — any node with the same config produces
@@ -156,16 +156,16 @@ pub fn build_genesis_block(config: &GenesisConfig) -> Block {
     let attestations = vec![];
     let genesis_ceremony = config.ceremony_data.clone();
 
-    Block {
+    Ok(Block {
         header: BlockHeader {
             version: BLOCK_VERSION,
             height: 0,
             previous_hash: Hash::zero(),
             state_root,
             transaction_root: compute_transaction_root(&transactions),
-            evidence_root: compute_evidence_root(&slash_evidence),
-            attestation_root: compute_attestation_root(&attestations),
-            genesis_ceremony_hash: compute_genesis_ceremony_hash(&genesis_ceremony),
+            evidence_root: compute_evidence_root(&slash_evidence)?,
+            attestation_root: compute_attestation_root(&attestations)?,
+            genesis_ceremony_hash: compute_genesis_ceremony_hash(&genesis_ceremony)?,
             timestamp: config.attestation.ceremony_timestamp,
             difficulty: config.initial_difficulty,
             suggested_fee: MIN_FEE,
@@ -178,7 +178,7 @@ pub fn build_genesis_block(config: &GenesisConfig) -> Block {
         slash_evidence,
         attestations,
         genesis_ceremony,
-    }
+    })
 }
 
 /// Apply genesis account balances to the AccountStore.
@@ -236,13 +236,18 @@ pub fn validate_genesis_block(block: &Block) -> Result<(), String> {
     if block.header.transaction_root != compute_transaction_root(&block.transactions) {
         return Err("Genesis transaction root mismatch".to_string());
     }
-    if block.header.evidence_root != compute_evidence_root(&block.slash_evidence) {
+    if block.header.evidence_root
+        != compute_evidence_root(&block.slash_evidence).map_err(|e| e.to_string())?
+    {
         return Err("Genesis evidence root mismatch".to_string());
     }
-    if block.header.attestation_root != compute_attestation_root(&block.attestations) {
+    if block.header.attestation_root
+        != compute_attestation_root(&block.attestations).map_err(|e| e.to_string())?
+    {
         return Err("Genesis attestation root mismatch".to_string());
     }
-    if block.header.genesis_ceremony_hash != compute_genesis_ceremony_hash(&block.genesis_ceremony)
+    if block.header.genesis_ceremony_hash
+        != compute_genesis_ceremony_hash(&block.genesis_ceremony).map_err(|e| e.to_string())?
     {
         return Err("Genesis ceremony hash mismatch".to_string());
     }
@@ -256,7 +261,7 @@ mod tests {
     #[test]
     fn genesis_block_creation() {
         let config = GenesisConfig::default();
-        let genesis = build_genesis_block(&config);
+        let genesis = build_genesis_block(&config).unwrap();
         assert_eq!(genesis.header.height, 0);
         assert_eq!(genesis.header.previous_hash, Hash::zero());
         assert!(genesis.header.pow_proof.is_none());
@@ -266,15 +271,15 @@ mod tests {
     #[test]
     fn genesis_block_deterministic() {
         let config = GenesisConfig::default();
-        let g1 = build_genesis_block(&config);
-        let g2 = build_genesis_block(&config);
+        let g1 = build_genesis_block(&config).unwrap();
+        let g2 = build_genesis_block(&config).unwrap();
         assert_eq!(g1.header.state_root, g2.header.state_root);
     }
 
     #[test]
     fn genesis_block_validation() {
         let config = GenesisConfig::default();
-        let genesis = build_genesis_block(&config);
+        let genesis = build_genesis_block(&config).unwrap();
         assert!(validate_genesis_block(&genesis).is_ok());
     }
 
