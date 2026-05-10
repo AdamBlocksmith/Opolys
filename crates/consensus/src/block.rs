@@ -194,7 +194,7 @@ pub fn format_opl(flakes: u64) -> String {
 ///
 /// Checks every invariant that a well-formed block must satisfy:
 ///
-/// 1. **Version**: Must match `BLOCK_VERSION` (currently 1).
+/// 1. **Version**: Must match `BLOCK_VERSION` (currently 2).
 /// 2. **Height**: Must be exactly `expected_height` (parent height + 1).
 /// 3. **Previous hash**: Must match the parent block's hash (or `Hash::zero()` for genesis).
 /// 4. **Timestamp**: Must advance by a target-derived minimum from

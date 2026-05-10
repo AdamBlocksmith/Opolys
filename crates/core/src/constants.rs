@@ -14,7 +14,7 @@
 //! | Annual gold production | 3,630 tonnes | USGS/WGC 2024-2025 avg |
 //! | Annual production in troy oz | ~116,707,041 | 3,630 × 32,150.7 |
 //! | Blocks per year | 350,640 | 365.25 × 86400 / 90 |
-//! | **BASE_REWARD** | **312 OPL** | floor(116,707,041 ÷ 374,016) |
+//! | **BASE_REWARD** | **332 OPL** | floor(116,707,041 ÷ 350,640) |
 //!
 //! # Currency Units (6 decimal places)
 //!

@@ -362,15 +362,15 @@ pub struct GenesisCeremonyData {
     pub production_tonnes_milli: u64,
     /// Gold spot price in USD cents at ceremony time.
     pub price_usd_cents: u64,
-    /// Blocks per year used in the BASE_REWARD derivation (374,016 for 84.375 s blocks).
+    /// Blocks per year used in the BASE_REWARD derivation (350,640 for 90 s blocks).
     pub blocks_per_year: u64,
 }
 
 /// A complete block: header + ordered list of transactions.
 ///
 /// Blocks are the atomic unit of the chain. The first transaction in a block
-/// is always a coinbase (reward) transaction crediting the block producer
-/// with the chain's base reward Flakes plus any burned fees.
+/// carries no implicit coinbase transaction. Rewards, fees, burns, and refiner
+/// state changes are applied by the node's deterministic block application path.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize, Serialize, Deserialize)]
 pub struct Block {
     /// The header containing consensus-critical metadata.
@@ -379,7 +379,7 @@ pub struct Block {
     pub transactions: Vec<Transaction>,
     /// Double-sign evidence to be processed at this block's height.
     /// Each item is independently verified (ed25519 + pubkey→ObjectId check) before
-    /// graduated slashing is applied. Empty for most blocks.
+    /// 100% refiner-stake burn is applied. Empty for most blocks.
     pub slash_evidence: Vec<DoubleSignEvidence>,
     /// Refiner attestations collected for prior canonical blocks.
     /// Verification and confidence scoring are enabled in Pass 2.

@@ -376,7 +376,7 @@ Where:
 - `target = 2^(64-D) - 1` (from difficulty D)
 - `hash_int` = first 8 bytes of the EVO-OMAP PoW hash, interpreted as little-endian u64
 
-Most mined blocks earn above the 1.0x floor. Exceptionally lucky blocks earn more. The math is natural: `ln(x)` is the same curve that describes ore concentration in a gold vein. Implementation uses `f64::ln()` and `f64::sqrt()` with deterministic IEEE 754 behavior.
+Most mined blocks earn above the 1.0x floor. Exceptionally lucky blocks earn more. The math is natural: `ln(x)` is the same curve that describes ore concentration in a gold vein. Implementation uses deterministic fixed-point integer `ln` and integer square-root arithmetic; no floating-point math is used on the consensus reward path.
 
 ### Block Reward Formula
 
@@ -460,7 +460,7 @@ A deterministic seed derived from the previous block hash selects the refiner bl
 
 ```rust
 BlockHeader {
-    version: u32,                       // Protocol version (currently 1)
+    version: u32,                       // Protocol version (currently 2)
     height: u64,                        // 0 for genesis
     previous_hash: Hash,                 // Blake3-256 of prior block
     state_root: Hash,                    // Blake3-256 of post-execution state
@@ -477,6 +477,9 @@ BlockHeader {
 Block {
     header: BlockHeader,
     transactions: Vec<Transaction>,
+    slash_evidence: Vec<DoubleSignEvidence>,
+    attestations: Vec<BlockAttestation>,
+    genesis_ceremony: Option<GenesisCeremonyData>,
 }
 ```
 
@@ -738,7 +741,7 @@ Every block applied to the chain must pass these checks:
 
 ### Block Reward
 ```
-vein_yield = 1 + sqrt(ln(target / hash_int))        // f64, rounded to nearest milli
+vein_yield = 1 + sqrt(ln(target / hash_int))        // integer fixed-point, rounded to nearest milli
 gross_block_reward = (BASE_REWARD / effective_difficulty) × vein_yield
 net_block_reward = gross_block_reward - mine_assay
 ```
@@ -843,7 +846,8 @@ Opolys implements layered P2P defenses to protect honest nodes from adversarial 
 | **No hardcoded fees** | Fees are market-driven and burned entirely |
 | **Only double-signing slashed** | No reversal windows, no confiscation for any other reason |
 | **Gold-derived emission** | BASE_REWARD from genesis ceremony, derived from annual gold production (~3,630 tonnes) |
-| **Integer-only consensus** | No floating-point arithmetic in consensus-critical code (except `f64::ln()` for vein yield, which is IEEE 754 deterministic) |
+| **Integer-only consensus** | No floating-point arithmetic in consensus-critical code; vein yield and refiner seniority use deterministic integer math |
+| **Holder safety** | Ordinary dormant holder balances do not decay. Attrition comes from fees, assay burns, refiner stake decay, slashing, and naturally lost keys. |
 | **Single key** | One ed25519 key for both transactions and validation, derived from BIP-39 mnemonic |
 | **Core only** | The node is the protocol layer (like Bitcoin Core). Community builds explorers, wallets, and mining pools |
 

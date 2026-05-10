@@ -490,7 +490,7 @@ The `sqrt(ln)` formula produces a natural distribution with rare bonanzas:
 | 5.0× | Essentially never (~1 in 10^9) |
 | 10.0× | Impossible (out of range) |
 
-Implementation uses `f64::ln()` and `f64::sqrt()`. IEEE 754 guarantees deterministic results across all platforms.
+Implementation uses deterministic fixed-point integer natural log and integer square-root helpers. No floating-point math is used on the consensus reward path.
 
 ### Vein Bonus Isolation (Coverage Split)
 
@@ -511,7 +511,7 @@ Gold analogy: refineries charge per ounce processed, not per ore grade. The mine
 
 ```rust
 BlockHeader {
-    version: u32,                          // Protocol version (currently 1)
+    version: u32,                          // Protocol version (currently 2)
     height: u64,                           // 0 for genesis
     previous_hash: Hash,                   // Blake3-256 of prior block
     state_root: Hash,                      // Blake3-256 of post-execution state
@@ -676,7 +676,7 @@ Opolys/
 │   │   ├── account.rs                  # AccountStore with fee-burning transfers
 │   │   ├── block.rs                    # compute_block_hash(), compute_transaction_root(), validate_block()
 │   │   ├── difficulty.rs               # Retarget (expected/actual), consensus floor, no clamp
-│   │   ├── emission.rs                 # Vein yield, ln_milli (f64), suggested_fee EMA, refiner weight
+│   │   ├── emission.rs                 # Integer vein yield, ln_milli, suggested_fee EMA, refiner weight
 │   │   ├── mempool.rs                  # Fee-priority mempool with min fee, nonce gap, expiry
 │   │   ├── refiner.rs                  # RefinerSet with FIFO unbonding, 100% slash
 │   │   ├── pow.rs                      # EVO-OMAP PowContext, verify, compute_pow_hash_value
