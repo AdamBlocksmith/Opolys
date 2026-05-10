@@ -449,7 +449,7 @@ pub fn verify_transaction(tx: &Transaction, expected_chain_id: u64) -> Result<()
     }
 
     // 2. Verify tx_id integrity
-    let expected_tx_id = compute_tx_id(&tx.sender, &tx.action, tx.fee, tx.nonce, tx.chain_id);
+    let expected_tx_id = compute_tx_id(&tx.sender, &tx.action, tx.fee, tx.nonce, tx.chain_id)?;
     if tx.tx_id != expected_tx_id {
         return Err(OpolysError::InvalidTransaction(format!(
             "Transaction ID mismatch: expected {}, got {}",
@@ -494,7 +494,7 @@ pub fn verify_transaction(tx: &Transaction, expected_chain_id: u64) -> Result<()
 
     // 6. Verify ed25519 signature over domain-separated transaction payload
     let unsigned_data =
-        transaction_signing_payload(&tx.sender, &tx.action, tx.fee, tx.nonce, tx.chain_id);
+        transaction_signing_payload(&tx.sender, &tx.action, tx.fee, tx.nonce, tx.chain_id)?;
 
     if !opolys_crypto::verify_ed25519(&tx.public_key, &unsigned_data, &tx.signature) {
         return Err(OpolysError::InvalidSignature);
@@ -513,10 +513,11 @@ fn compute_tx_id(
     fee: FlakeAmount,
     nonce: u64,
     chain_id: u64,
-) -> ObjectId {
-    let data = borsh::to_vec(&(sender.clone(), action, fee, nonce, chain_id))
-        .expect("Transaction ID serialization must not fail");
-    hash_to_object_id_with_domain(DOMAIN_TX_ID, &data)
+) -> Result<ObjectId, OpolysError> {
+    let data = borsh::to_vec(&(sender.clone(), action, fee, nonce, chain_id)).map_err(|e| {
+        OpolysError::SerializationError(format!("Transaction ID serialization failed: {}", e))
+    })?;
+    Ok(hash_to_object_id_with_domain(DOMAIN_TX_ID, &data))
 }
 
 #[cfg(test)]
@@ -548,8 +549,9 @@ mod tests {
             recipient: to.clone(),
             amount,
         };
-        let tx_id = compute_tx_id(sender, &action, fee, nonce, MAINNET_CHAIN_ID);
-        let msg = transaction_signing_payload(sender, &action, fee, nonce, MAINNET_CHAIN_ID);
+        let tx_id = compute_tx_id(sender, &action, fee, nonce, MAINNET_CHAIN_ID).unwrap();
+        let msg =
+            transaction_signing_payload(sender, &action, fee, nonce, MAINNET_CHAIN_ID).unwrap();
         Transaction {
             tx_id,
             sender: sender.clone(),
@@ -573,8 +575,9 @@ mod tests {
         nonce: u64,
     ) -> Transaction {
         let action = TransactionAction::RefinerBond { amount };
-        let tx_id = compute_tx_id(sender, &action, fee, nonce, MAINNET_CHAIN_ID);
-        let msg = transaction_signing_payload(sender, &action, fee, nonce, MAINNET_CHAIN_ID);
+        let tx_id = compute_tx_id(sender, &action, fee, nonce, MAINNET_CHAIN_ID).unwrap();
+        let msg =
+            transaction_signing_payload(sender, &action, fee, nonce, MAINNET_CHAIN_ID).unwrap();
         Transaction {
             tx_id,
             sender: sender.clone(),
@@ -598,8 +601,9 @@ mod tests {
         nonce: u64,
     ) -> Transaction {
         let action = TransactionAction::RefinerUnbond { amount };
-        let tx_id = compute_tx_id(sender, &action, fee, nonce, MAINNET_CHAIN_ID);
-        let msg = transaction_signing_payload(sender, &action, fee, nonce, MAINNET_CHAIN_ID);
+        let tx_id = compute_tx_id(sender, &action, fee, nonce, MAINNET_CHAIN_ID).unwrap();
+        let msg =
+            transaction_signing_payload(sender, &action, fee, nonce, MAINNET_CHAIN_ID).unwrap();
         Transaction {
             tx_id,
             sender: sender.clone(),
@@ -626,7 +630,7 @@ mod tests {
             recipient: recipient.clone(),
             amount,
         };
-        let tx_id = compute_tx_id(sender, &action, fee, nonce, MAINNET_CHAIN_ID);
+        let tx_id = compute_tx_id(sender, &action, fee, nonce, MAINNET_CHAIN_ID).unwrap();
         Transaction {
             tx_id,
             sender: sender.clone(),
@@ -649,7 +653,7 @@ mod tests {
         nonce: u64,
     ) -> Transaction {
         let action = TransactionAction::RefinerBond { amount };
-        let tx_id = compute_tx_id(sender, &action, fee, nonce, MAINNET_CHAIN_ID);
+        let tx_id = compute_tx_id(sender, &action, fee, nonce, MAINNET_CHAIN_ID).unwrap();
         Transaction {
             tx_id,
             sender: sender.clone(),

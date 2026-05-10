@@ -351,7 +351,7 @@ pub fn verify_transaction_for_mempool(
     }
 
     let signing_payload =
-        transaction_signing_payload(&tx.sender, &tx.action, tx.fee, tx.nonce, tx.chain_id);
+        transaction_signing_payload(&tx.sender, &tx.action, tx.fee, tx.nonce, tx.chain_id)?;
     if !opolys_crypto::verify_ed25519(&tx.public_key, &signing_payload, &tx.signature) {
         return Err(OpolysError::InvalidSignature);
     }
@@ -410,6 +410,7 @@ mod tests {
             nonce,
             opolys_core::MAINNET_CHAIN_ID,
         );
+        let message = message.unwrap();
         Transaction {
             tx_id,
             sender,

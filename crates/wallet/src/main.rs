@@ -274,7 +274,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 fee_flakes,
                 nonce_val,
                 chain_id,
-            );
+            )?;
 
             let tx_bytes = borsh::to_vec(&tx)?;
             println!("{}", hex::encode(tx_bytes));
@@ -305,7 +305,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 fee_flakes,
                 nonce_val,
                 chain_id,
-            );
+            )?;
 
             let tx_bytes = borsh::to_vec(&tx)?;
             println!("{}", hex::encode(tx_bytes));
@@ -336,7 +336,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 fee_flakes,
                 nonce_val,
                 chain_id,
-            );
+            )?;
 
             let tx_bytes = borsh::to_vec(&tx)?;
             println!("{}", hex::encode(tx_bytes));

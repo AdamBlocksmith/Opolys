@@ -11,7 +11,9 @@
 //! - **RefinerUnbond** — release stake using FIFO order (oldest entries first)
 
 use crate::key::KeyPair;
-use opolys_core::{FlakeAmount, ObjectId, SIGNATURE_TYPE_ED25519, Transaction, TransactionAction};
+use opolys_core::{
+    FlakeAmount, ObjectId, OpolysError, SIGNATURE_TYPE_ED25519, Transaction, TransactionAction,
+};
 use opolys_crypto::{DOMAIN_TX_ID, hash_to_object_id_with_domain, transaction_signing_payload};
 
 /// Stateless transaction signer — all methods are associated functions.
@@ -38,15 +40,15 @@ impl TransactionSigner {
         fee: FlakeAmount,
         nonce: u64,
         chain_id: u64,
-    ) -> Transaction {
+    ) -> Result<Transaction, OpolysError> {
         let action = TransactionAction::Transfer { recipient, amount };
         let sender_id = sender.object_id().clone();
 
-        let tx_id = Self::compute_tx_id(&sender_id, &action, fee, nonce, chain_id);
-        let unsigned_data = transaction_signing_payload(&sender_id, &action, fee, nonce, chain_id);
+        let tx_id = Self::compute_tx_id(&sender_id, &action, fee, nonce, chain_id)?;
+        let unsigned_data = transaction_signing_payload(&sender_id, &action, fee, nonce, chain_id)?;
         let signature = sender.sign(&unsigned_data);
 
-        Transaction {
+        Ok(Transaction {
             tx_id,
             sender: sender_id,
             action,
@@ -57,7 +59,7 @@ impl TransactionSigner {
             chain_id,
             data: vec![],
             public_key: sender.public_key_bytes(),
-        }
+        })
     }
 
     /// Create a signed refiner bond transaction.
@@ -74,15 +76,15 @@ impl TransactionSigner {
         fee: FlakeAmount,
         nonce: u64,
         chain_id: u64,
-    ) -> Transaction {
+    ) -> Result<Transaction, OpolysError> {
         let action = TransactionAction::RefinerBond { amount };
         let sender_id = sender.object_id().clone();
 
-        let tx_id = Self::compute_tx_id(&sender_id, &action, fee, nonce, chain_id);
-        let unsigned_data = transaction_signing_payload(&sender_id, &action, fee, nonce, chain_id);
+        let tx_id = Self::compute_tx_id(&sender_id, &action, fee, nonce, chain_id)?;
+        let unsigned_data = transaction_signing_payload(&sender_id, &action, fee, nonce, chain_id)?;
         let signature = sender.sign(&unsigned_data);
 
-        Transaction {
+        Ok(Transaction {
             tx_id,
             sender: sender_id,
             action,
@@ -93,7 +95,7 @@ impl TransactionSigner {
             chain_id,
             data: vec![],
             public_key: sender.public_key_bytes(),
-        }
+        })
     }
 
     /// Create a signed refiner unbond transaction for FIFO amount-based unbonding.
@@ -111,15 +113,15 @@ impl TransactionSigner {
         fee: FlakeAmount,
         nonce: u64,
         chain_id: u64,
-    ) -> Transaction {
+    ) -> Result<Transaction, OpolysError> {
         let action = TransactionAction::RefinerUnbond { amount };
         let sender_id = sender.object_id().clone();
 
-        let tx_id = Self::compute_tx_id(&sender_id, &action, fee, nonce, chain_id);
-        let unsigned_data = transaction_signing_payload(&sender_id, &action, fee, nonce, chain_id);
+        let tx_id = Self::compute_tx_id(&sender_id, &action, fee, nonce, chain_id)?;
+        let unsigned_data = transaction_signing_payload(&sender_id, &action, fee, nonce, chain_id)?;
         let signature = sender.sign(&unsigned_data);
 
-        Transaction {
+        Ok(Transaction {
             tx_id,
             sender: sender_id,
             action,
@@ -130,7 +132,7 @@ impl TransactionSigner {
             chain_id,
             data: vec![],
             public_key: sender.public_key_bytes(),
-        }
+        })
     }
 
     /// Deterministic transaction ID derived from a canonical Borsh tuple:
@@ -142,10 +144,11 @@ impl TransactionSigner {
         fee: FlakeAmount,
         nonce: u64,
         chain_id: u64,
-    ) -> ObjectId {
-        let data = borsh::to_vec(&(sender.clone(), action, fee, nonce, chain_id))
-            .expect("Transaction ID serialization must not fail");
-        hash_to_object_id_with_domain(DOMAIN_TX_ID, &data)
+    ) -> Result<ObjectId, OpolysError> {
+        let data = borsh::to_vec(&(sender.clone(), action, fee, nonce, chain_id)).map_err(|e| {
+            OpolysError::SerializationError(format!("Transaction ID serialization failed: {}", e))
+        })?;
+        Ok(hash_to_object_id_with_domain(DOMAIN_TX_ID, &data))
     }
 }
 
@@ -166,7 +169,8 @@ mod tests {
             FLAKES_PER_OPL / 10,
             0,
             MAINNET_CHAIN_ID,
-        );
+        )
+        .unwrap();
         assert_eq!(tx.nonce, 0);
         assert_eq!(tx.fee, FLAKES_PER_OPL / 10);
         assert_eq!(tx.chain_id, MAINNET_CHAIN_ID);
@@ -184,7 +188,8 @@ mod tests {
             FLAKES_PER_OPL,
             0,
             MAINNET_CHAIN_ID,
-        );
+        )
+        .unwrap();
         assert!(
             matches!(tx.action, TransactionAction::RefinerBond { amount } if amount == bond_amount)
         );
@@ -201,7 +206,8 @@ mod tests {
             FLAKES_PER_OPL / 100,
             1,
             MAINNET_CHAIN_ID,
-        );
+        )
+        .unwrap();
         assert!(
             matches!(tx.action, TransactionAction::RefinerUnbond { amount } if amount == FLAKES_PER_OPL)
         );
@@ -221,8 +227,10 @@ mod tests {
             100,
             0,
             MAINNET_CHAIN_ID,
-        );
-        let bond = TransactionSigner::create_refiner_bond(&keypair, 1000, 100, 0, MAINNET_CHAIN_ID);
+        )
+        .unwrap();
+        let bond = TransactionSigner::create_refiner_bond(&keypair, 1000, 100, 0, MAINNET_CHAIN_ID)
+            .unwrap();
         // Same sender, same fee, same nonce, different action → different tx_id
         assert_ne!(transfer.tx_id, bond.tx_id);
     }
@@ -239,7 +247,8 @@ mod tests {
             100,
             0,
             MAINNET_CHAIN_ID,
-        );
+        )
+        .unwrap();
         let other_tx = TransactionSigner::create_transfer(
             &keypair,
             recipient.clone(),
@@ -247,7 +256,8 @@ mod tests {
             100,
             0,
             other_chain_id,
-        );
+        )
+        .unwrap();
         // Same sender, action, fee, nonce — but different chain_id → different tx_id
         assert_ne!(mainnet_tx.tx_id, other_tx.tx_id);
         assert_eq!(mainnet_tx.chain_id, MAINNET_CHAIN_ID);

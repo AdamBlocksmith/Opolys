@@ -14,7 +14,7 @@
 //! generation and variable-length operations, providing deterministic
 //! arbitrary-length output from a single seed.
 
-use opolys_core::{BlockHeight, FlakeAmount, Hash, ObjectId, TransactionAction};
+use opolys_core::{BlockHeight, FlakeAmount, Hash, ObjectId, OpolysError, TransactionAction};
 
 /// Blake3 domain for transaction IDs.
 pub const DOMAIN_TX_ID: &[u8] = b"OPL_TX_ID_V1";
@@ -136,12 +136,16 @@ pub fn transaction_signing_payload(
     fee: FlakeAmount,
     nonce: u64,
     chain_id: u64,
-) -> Vec<u8> {
+) -> Result<Vec<u8>, OpolysError> {
     let mut payload = DOMAIN_TX_SIGNATURE.to_vec();
-    let tx_bytes = borsh::to_vec(&(sender.clone(), action, fee, nonce, chain_id))
-        .expect("Transaction signing payload serialization must not fail");
+    let tx_bytes = borsh::to_vec(&(sender.clone(), action, fee, nonce, chain_id)).map_err(|e| {
+        OpolysError::SerializationError(format!(
+            "Transaction signing payload serialization failed: {}",
+            e
+        ))
+    })?;
     payload.extend_from_slice(&tx_bytes);
-    payload
+    Ok(payload)
 }
 
 /// Build the exact bytes signed by refiner block producers.
