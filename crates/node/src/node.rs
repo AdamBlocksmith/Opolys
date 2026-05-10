@@ -1415,7 +1415,7 @@ impl OpolysNode {
     /// Produce a refiner block (signed by the node's refiner key).
     ///
     /// When `--refine` is enabled and this node's `miner_id` is the
-    /// **selected** block producer (determined by weighted random sampling
+    /// **selected** block producer (determined by equal-chance sampling
     /// seeded from the previous block hash), this method builds and signs a
     /// block. The block contains no PoW proof; instead, the refiner signs
     /// the block hash with their ed25519 key, and the signature is stored in
@@ -1440,9 +1440,8 @@ impl OpolysNode {
         seed_bytes.copy_from_slice(&chain.latest_block_hash.0[..8]);
         let seed = u64::from_be_bytes(seed_bytes);
 
-        // Select the block producer via weighted random sampling
-        let producer = refiners
-            .select_block_producer(chain.block_timestamps.last().copied().unwrap_or(0), seed)?;
+        // Select the block producer via equal-chance sampling.
+        let producer = refiners.select_block_producer(seed)?;
 
         // Only produce if this node is the selected producer
         if producer.object_id != self.miner_id {
@@ -1859,13 +1858,9 @@ impl OpolysNode {
             let mut seed_bytes = [0u8; 8];
             seed_bytes.copy_from_slice(&chain.latest_block_hash.0[..8]);
             let seed = u64::from_be_bytes(seed_bytes);
-            let timestamp = chain.block_timestamps.last().copied().unwrap_or(0);
-            let expected_producer =
-                refiners
-                    .select_block_producer(timestamp, seed)
-                    .ok_or_else(|| {
-                        "Refiner block rejected: no active refiner producer available".to_string()
-                    })?;
+            let expected_producer = refiners.select_block_producer(seed).ok_or_else(|| {
+                "Refiner block rejected: no active refiner producer available".to_string()
+            })?;
             if expected_producer.object_id != block.header.producer {
                 return Err(format!(
                     "Refiner block producer mismatch: expected {}, got {}",

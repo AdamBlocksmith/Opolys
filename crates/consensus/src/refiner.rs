@@ -23,9 +23,9 @@
 //! all entries is burned (not confiscated to any treasury), permanently
 //! removing it from circulation.
 //!
-//! Block producers are selected via weighted random sampling, where the seed
-//! is derived from on-chain entropy. There are no rounds, no schedules, and
-//! no fixed refiner sets — just continuous weighted selection.
+//! Block producers are selected by equal-chance sampling among Active refiners,
+//! where the seed is derived from on-chain entropy. There are no rounds and no
+//! schedules: every Active refiner gets one operational production ticket.
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use opolys_core::{
@@ -78,6 +78,32 @@ pub struct PendingUnbond {
 
 /// Block height type alias — re-exported from core for convenience.
 pub type BlockHeight = u64;
+
+fn mix_seed(seed: u64) -> u64 {
+    let mut z = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+fn uniform_index_from_seed(seed: u64, upper: usize) -> Option<usize> {
+    if upper == 0 {
+        return None;
+    }
+
+    let upper = upper as u128;
+    let range = 1u128 << 64;
+    let unbiased_zone = range - (range % upper);
+    let mut candidate = seed;
+
+    loop {
+        let value = candidate as u128;
+        if value < unbiased_zone {
+            return Some((value % upper) as usize);
+        }
+        candidate = mix_seed(candidate);
+    }
+}
 
 /// A single bond entry within a refiner's stake.
 ///
@@ -254,7 +280,7 @@ impl RefinerInfo {
 }
 
 /// The set of all bonded refiners, supporting bonding, unbonding,
-/// activating, slashing, and weighted block-producer selection.
+/// activating, slashing, and equal-chance block-producer selection.
 ///
 /// Only **double-signing** triggers slashing in Opolys — no other offense
 /// results in stake removal. Slashed stake is burned (removed from supply),
@@ -759,42 +785,23 @@ impl RefinerSet {
         Ok(hasher.finalize())
     }
 
-    /// Select the next block producer via weighted random sampling.
+    /// Select the next block producer via equal-chance sampling.
     ///
-    /// Each active refiner's total weight (sum of per-entry weights)
-    /// determines their probability of being selected. The `seed` parameter
-    /// provides on-chain entropy to make the selection deterministic and
-    /// verifiable. Returns `None` if there are no active refiners.
-    pub fn select_block_producer(&self, current_timestamp: u64, seed: u64) -> Option<&RefinerInfo> {
-        let active: Vec<&RefinerInfo> = self
+    /// Reward distribution is still weighted by stake and seniority, but
+    /// producer selection gives each Active refiner one operational ticket.
+    /// The `seed` parameter provides on-chain entropy to make the selection
+    /// deterministic and verifiable. Returns `None` if there are no active
+    /// refiners.
+    pub fn select_block_producer(&self, seed: u64) -> Option<&RefinerInfo> {
+        let mut active: Vec<&RefinerInfo> = self
             .active_set
             .iter()
             .filter_map(|id| self.cached_refiners.get(id))
             .collect();
+        active.sort_by_key(|v| v.object_id.0.0);
 
-        if active.is_empty() {
-            return None;
-        }
-
-        let total_weight: FlakeAmount = active.iter().map(|v| v.weight(current_timestamp)).sum();
-
-        if total_weight == 0 {
-            return None;
-        }
-
-        // Cumulative weighted selection: walk through refiners, accumulating
-        // weight until the cumulative total exceeds the random target.
-        let mut cumulative = 0u64;
-        let target = seed % total_weight;
-        for v in &active {
-            cumulative += v.weight(current_timestamp);
-            if cumulative > target {
-                return Some(*v);
-            }
-        }
-
-        // Fallback: if no refiner was selected due to rounding, pick the last active one.
-        active.last().copied()
+        let index = uniform_index_from_seed(seed, active.len())?;
+        active.get(index).copied()
     }
 }
 
@@ -1149,9 +1156,27 @@ mod tests {
         let id = test_id(b"refiner1");
         vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0).unwrap();
         vs.activate(&id, 1).unwrap();
-        let producer = vs.select_block_producer(0, 42);
+        let producer = vs.select_block_producer(42);
         assert!(producer.is_some());
         assert_eq!(producer.unwrap().object_id, id);
+    }
+
+    #[test]
+    fn select_block_producer_is_equal_chance_not_stake_weighted() {
+        let mut vs = RefinerSet::new();
+        let low_stake = test_id(b"low-stake-refiner");
+        let high_stake = test_id(b"high-stake-refiner");
+        vs.bond(low_stake.clone(), MIN_BOND_STAKE, 0, 0).unwrap();
+        vs.bond(high_stake.clone(), MIN_BOND_STAKE * 100, 0, 0)
+            .unwrap();
+        vs.activate(&low_stake, 1).unwrap();
+        vs.activate(&high_stake, 1).unwrap();
+
+        let mut sorted = [low_stake.clone(), high_stake.clone()];
+        sorted.sort_by_key(|id| id.0.0);
+
+        assert_eq!(vs.select_block_producer(0).unwrap().object_id, sorted[0]);
+        assert_eq!(vs.select_block_producer(1).unwrap().object_id, sorted[1]);
     }
 
     #[test]
@@ -1272,9 +1297,9 @@ mod tests {
         );
 
         // Phase 4: Block producer selection — deterministic via seed
-        let producer = vs.select_block_producer(0, 42).unwrap();
-        // Bob has 2x the stake of Alice, so Bob should be selected more often
-        // but Bob is not guaranteed — just verify selection works
+        let producer = vs.select_block_producer(42).unwrap();
+        // Producer selection is equal-chance among active refiners; stake
+        // affects rewards, not operational production tickets.
         assert!(
             producer.object_id == alice
                 || producer.object_id == bob

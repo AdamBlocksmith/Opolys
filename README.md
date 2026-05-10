@@ -280,7 +280,7 @@ Account addresses are **Blake3-256 hashes of ed25519 public keys** — not the p
 | Layer | Algorithm | Purpose |
 |---|---|---|
 | **Refiner Signatures** | ed25519 | Per-block refiner signatures and attestations |
-| **Block Producer Selection** | Previous-block hash seed | Deterministic, verifiable refiner selection |
+| **Block Producer Selection** | Previous-block hash seed | Equal-chance deterministic refiner selection |
 | **Privacy (L1)** | Stealth addresses | Receiver privacy via one-time derived addresses |
 | **Privacy (L2)** | Viewing keys | Selective transaction disclosure |
 | **ZK Foundation** | Poseidon hash | ZK-friendly hash for future SNARKs/STARKs |
@@ -453,7 +453,7 @@ Newly bonded refiners start in `Bonding` status. They activate to `Active` after
 
 ### Block Producer Selection
 
-A deterministic seed derived from the previous block hash selects the refiner block producer after the chain stalls. Weighted random sampling from active refiners lets any node verify the selection — no trust required.
+A deterministic seed derived from the previous block hash selects the refiner block producer after the chain stalls. Each active refiner gets one equal operational ticket, and any node can verify the selection with no trust required.
 
 ---
 

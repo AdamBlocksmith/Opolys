@@ -166,7 +166,7 @@ A transaction replacing another with the same nonce must pay at least 10% more: 
 |---|---|---|
 | **Refiner Attestations** | ed25519 per-block signatures | Block confidence and attestation weight |
 | **Signature Aggregation** | BLS12-381 | Efficient attestation aggregation (Pass 3+) |
-| **Block Producer Selection** | VRF | Unpredictable, verifiable refiner selection |
+| **Block Producer Selection** | Previous-block hash seed | Equal-chance deterministic refiner selection |
 | **Privacy (L1)** | Stealth addresses | Receiver privacy via one-time addresses |
 | **Privacy (L2)** | Viewing keys | Selective transaction visibility |
 | **ZK Foundation** | Poseidon hash | ZK-friendly hash for future SNARKs/STARKs |
@@ -202,7 +202,7 @@ forever:
     continue
   
   // Target interval passed with no miner block
-  producer = refiners.select_block_producer(timestamp, seed)
+  producer = refiners.select_block_producer(seed)
   if producer.object_id == self.miner_id:
     produce_refiner_block()
 ```
@@ -356,7 +356,7 @@ Genesis block (height 0) has zero reward: `block_reward = 0`.
 
 ### Block Producer Selection
 
-Weighted random sampling from active refiners. The seed is derived from the first 8 bytes of the previous block hash (`Blake3(prev_block_hash)[0..8]` as `u64`), making selection deterministic and verifiable.
+Equal-chance sampling from active refiners. The seed is derived from the first 8 bytes of the previous block hash (`prev_block_hash[0..8]` as `u64`), making selection deterministic and verifiable. Stake and seniority affect refiner rewards, not refiner block-production tickets.
 
 ### Minimum Bond
 
