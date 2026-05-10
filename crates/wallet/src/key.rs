@@ -22,7 +22,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 #[cfg(windows)]
 use std::process::Command;
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 /// Errors that can occur during wallet operations.
 #[derive(Debug)]
@@ -152,8 +152,8 @@ impl KeyPair {
     }
 
     /// Serialize the 32-byte private key seed.
-    pub fn to_bytes(&self) -> [u8; 32] {
-        *self.seed
+    pub fn to_bytes(&self) -> Zeroizing<[u8; 32]> {
+        Zeroizing::new(*self.seed)
     }
 
     /// Reconstruct a key pair from a 32-byte seed.
@@ -209,10 +209,9 @@ impl Wallet {
         let key_path = self
             .keys_dir
             .join(format!("{}_{}.key", name, &object_id.to_hex()[..16]));
-        let mut key_bytes = keypair.to_bytes();
+        let key_bytes = keypair.to_bytes();
         write_private_key_file(&key_path, &key_bytes)
             .map_err(|e| WalletError::IoError(e.to_string()))?;
-        key_bytes.zeroize();
 
         self.keys.insert(object_id.clone(), keypair);
         Ok(object_id)

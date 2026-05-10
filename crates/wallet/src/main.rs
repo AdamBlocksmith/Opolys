@@ -200,7 +200,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let mnemonic = Bip39Mnemonic::generate()?;
             let phrase = mnemonic.phrase();
             eprintln!("Mnemonic (24 words):");
-            eprintln!("{}", phrase);
+            eprintln!("{}", phrase.as_str());
             eprintln!();
 
             let seed = mnemonic.to_seed("");

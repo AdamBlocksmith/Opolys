@@ -2661,6 +2661,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "borsh",
+ "ed25519-dalek",
  "evo-omap",
  "hex",
  "opolys-core",
@@ -2669,6 +2670,7 @@ dependencies = [
  "rayon",
  "serde",
  "serde_json",
+ "subtle",
  "thiserror 2.0.18",
 ]
 

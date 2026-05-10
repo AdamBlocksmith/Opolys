@@ -18,10 +18,12 @@
 //! room for higher-fee arrivals.
 
 use opolys_core::{
-    CAPACITY_RATIO, CONGESTION_THRESHOLD_PERMILLE, MEMPOOL_MAX_SIZE_BYTES,
+    CAPACITY_RATIO, CONGESTION_THRESHOLD_PERMILLE, FlakeAmount, MEMPOOL_MAX_SIZE_BYTES,
     MEMPOOL_MAX_TXS_PER_ACCOUNT, MEMPOOL_TX_EXPIRY_SECS, MIN_FEE, ObjectId, OpolysError,
-    TX_MAX_SIZE_BYTES, Transaction,
+    SIGNATURE_TYPE_ED25519, TX_MAX_SIZE_BYTES, Transaction, TransactionAction,
 };
+use opolys_crypto::{DOMAIN_TX_ID, hash_to_object_id_with_domain, transaction_signing_payload};
+use subtle::ConstantTimeEq;
 
 /// Maximum gap between an incoming transaction's nonce and the sender's
 /// current confirmed nonce. Prevents high-nonce slot squatting attacks.
@@ -125,7 +127,10 @@ impl Mempool {
         submitted_at: u64,
         account_nonce: u64,
         suggested_fee: u64,
+        expected_chain_id: u64,
     ) -> Result<(), OpolysError> {
+        verify_transaction_for_mempool(&tx, expected_chain_id)?;
+
         // FIX 1: enforce minimum fee
         if tx.fee < MIN_FEE {
             return Err(OpolysError::InvalidTransaction(format!(
@@ -294,6 +299,78 @@ impl Mempool {
     }
 }
 
+/// Verify a transaction before it consumes mempool space.
+///
+/// This mirrors the consensus execution verifier for chain id, tx id,
+/// signature type, public-key binding, and ed25519 signature validity. Balance,
+/// nonce, and fee checks remain separate because they depend on current state.
+pub fn verify_transaction_for_mempool(
+    tx: &Transaction,
+    expected_chain_id: u64,
+) -> Result<(), OpolysError> {
+    if tx.chain_id != expected_chain_id {
+        return Err(OpolysError::InvalidTransaction(format!(
+            "Transaction chain_id {} does not match network chain_id {}",
+            tx.chain_id, expected_chain_id
+        )));
+    }
+
+    let expected_tx_id =
+        compute_mempool_tx_id(&tx.sender, &tx.action, tx.fee, tx.nonce, tx.chain_id);
+    if tx.tx_id != expected_tx_id {
+        return Err(OpolysError::InvalidTransaction(format!(
+            "Transaction ID mismatch: expected {}, got {}",
+            expected_tx_id.to_hex(),
+            tx.tx_id.to_hex()
+        )));
+    }
+
+    if tx.signature_type != SIGNATURE_TYPE_ED25519 {
+        return Err(OpolysError::InvalidTransaction(format!(
+            "Unsupported signature type: {} (only ed25519 = 0 is supported)",
+            tx.signature_type
+        )));
+    }
+
+    if tx.public_key.len() != 32 {
+        return Err(OpolysError::InvalidTransaction(format!(
+            "Invalid public key length: {} bytes (expected 32 for ed25519)",
+            tx.public_key.len()
+        )));
+    }
+
+    let pk_bytes: [u8; 32] =
+        tx.public_key.as_slice().try_into().map_err(|_| {
+            OpolysError::InvalidTransaction("Public key conversion failed".to_string())
+        })?;
+    let derived_object_id = opolys_crypto::ed25519_public_key_to_object_id(&pk_bytes);
+    if !bool::from(tx.sender.as_bytes().ct_eq(derived_object_id.as_bytes())) {
+        return Err(OpolysError::InvalidTransaction(
+            "Public key does not match sender ObjectId".to_string(),
+        ));
+    }
+
+    let signing_payload =
+        transaction_signing_payload(&tx.sender, &tx.action, tx.fee, tx.nonce, tx.chain_id);
+    if !opolys_crypto::verify_ed25519(&tx.public_key, &signing_payload, &tx.signature) {
+        return Err(OpolysError::InvalidSignature);
+    }
+
+    Ok(())
+}
+
+fn compute_mempool_tx_id(
+    sender: &ObjectId,
+    action: &TransactionAction,
+    fee: FlakeAmount,
+    nonce: u64,
+    chain_id: u64,
+) -> ObjectId {
+    let data = borsh::to_vec(&(sender.clone(), action, fee, nonce, chain_id))
+        .expect("Transaction ID serialization must not fail");
+    hash_to_object_id_with_domain(DOMAIN_TX_ID, &data)
+}
+
 impl Default for Mempool {
     fn default() -> Self {
         Self::new()
@@ -303,24 +380,42 @@ impl Default for Mempool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::{Signer, SigningKey};
     use opolys_core::{FlakeAmount, TransactionAction};
-    use opolys_crypto::hash_to_object_id;
 
     fn make_tx(sender_seed: &[u8], nonce: u64, fee: FlakeAmount) -> Transaction {
-        Transaction {
-            tx_id: hash_to_object_id(format!("{:?}_{}_{}", sender_seed, nonce, fee).as_bytes()),
-            sender: hash_to_object_id(sender_seed),
-            action: TransactionAction::Transfer {
-                recipient: hash_to_object_id(b"recipient"),
-                amount: 100,
-            },
+        let mut seed = [0u8; 32];
+        for (dst, src) in seed.iter_mut().zip(sender_seed.iter().copied()) {
+            *dst = src;
+        }
+        let signing_key = SigningKey::from_bytes(&seed);
+        let public_key = signing_key.verifying_key().as_bytes().to_vec();
+        let sender =
+            opolys_crypto::ed25519_public_key_to_object_id(signing_key.verifying_key().as_bytes());
+        let action = TransactionAction::Transfer {
+            recipient: opolys_crypto::hash_to_object_id(b"recipient"),
+            amount: 100,
+        };
+        let tx_id =
+            compute_mempool_tx_id(&sender, &action, fee, nonce, opolys_core::MAINNET_CHAIN_ID);
+        let message = transaction_signing_payload(
+            &sender,
+            &action,
             fee,
-            signature: vec![],
+            nonce,
+            opolys_core::MAINNET_CHAIN_ID,
+        );
+        Transaction {
+            tx_id,
+            sender,
+            action,
+            fee,
+            signature: signing_key.sign(&message).to_bytes().to_vec(),
             nonce,
             chain_id: opolys_core::MAINNET_CHAIN_ID,
             data: vec![],
             signature_type: opolys_core::SIGNATURE_TYPE_ED25519,
-            public_key: vec![],
+            public_key,
         }
     }
 
@@ -330,7 +425,9 @@ mod tests {
         let tx = make_tx(b"alice", 0, 100);
         let tx_id = tx.tx_id.clone();
 
-        mempool.add_transaction(tx, 1, 0, 0, 1).unwrap();
+        mempool
+            .add_transaction(tx, 1, 0, 0, 1, opolys_core::MAINNET_CHAIN_ID)
+            .unwrap();
         assert_eq!(mempool.transaction_count(), 1);
 
         let removed = mempool.remove_transaction(&tx_id);
@@ -345,9 +442,15 @@ mod tests {
         let tx2 = make_tx(b"bob", 0, 100);
         let tx3 = make_tx(b"charlie", 0, 75);
 
-        mempool.add_transaction(tx1, 1, 0, 0, 1).unwrap();
-        mempool.add_transaction(tx2, 3, 0, 0, 1).unwrap();
-        mempool.add_transaction(tx3, 2, 0, 0, 1).unwrap();
+        mempool
+            .add_transaction(tx1, 1, 0, 0, 1, opolys_core::MAINNET_CHAIN_ID)
+            .unwrap();
+        mempool
+            .add_transaction(tx2, 3, 0, 0, 1, opolys_core::MAINNET_CHAIN_ID)
+            .unwrap();
+        mempool
+            .add_transaction(tx3, 2, 0, 0, 1, opolys_core::MAINNET_CHAIN_ID)
+            .unwrap();
 
         let ordered = mempool.get_ordered_transactions();
         assert_eq!(ordered[0].fee, 100);
@@ -361,8 +464,27 @@ mod tests {
         let tx = make_tx(b"alice", 0, 100);
         let tx2 = tx.clone();
 
-        mempool.add_transaction(tx, 1, 0, 0, 1).unwrap();
-        assert!(mempool.add_transaction(tx2, 1, 0, 0, 1).is_err());
+        mempool
+            .add_transaction(tx, 1, 0, 0, 1, opolys_core::MAINNET_CHAIN_ID)
+            .unwrap();
+        assert!(
+            mempool
+                .add_transaction(tx2, 1, 0, 0, 1, opolys_core::MAINNET_CHAIN_ID)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn invalid_signature_rejected_before_admission() {
+        let mut mempool = Mempool::new();
+        let mut tx = make_tx(b"alice", 0, 100);
+        tx.signature[0] ^= 0x01;
+
+        let err = mempool
+            .add_transaction(tx, 1, 0, 0, 1, opolys_core::MAINNET_CHAIN_ID)
+            .unwrap_err();
+        assert!(matches!(err, OpolysError::InvalidSignature));
+        assert_eq!(mempool.transaction_count(), 0);
     }
 
     #[test]
@@ -375,13 +497,27 @@ mod tests {
                 // Use i as account_nonce proxy so nonce is always within gap
                 assert!(
                     mempool
-                        .add_transaction(tx, 1, 0, i.saturating_sub(1) as u64, 1)
+                        .add_transaction(
+                            tx,
+                            1,
+                            0,
+                            i.saturating_sub(1) as u64,
+                            1,
+                            opolys_core::MAINNET_CHAIN_ID
+                        )
                         .is_ok()
                 );
             } else {
                 assert!(
                     mempool
-                        .add_transaction(tx, 1, 0, i.saturating_sub(1) as u64, 1)
+                        .add_transaction(
+                            tx,
+                            1,
+                            0,
+                            i.saturating_sub(1) as u64,
+                            1,
+                            opolys_core::MAINNET_CHAIN_ID
+                        )
                         .is_err()
                 );
             }
@@ -392,21 +528,33 @@ mod tests {
     fn min_fee_enforced() {
         let mut mempool = Mempool::new();
         let tx = make_tx(b"alice", 0, 0);
-        assert!(mempool.add_transaction(tx, 0, 0, 0, 1).is_err());
+        assert!(
+            mempool
+                .add_transaction(tx, 0, 0, 0, 1, opolys_core::MAINNET_CHAIN_ID)
+                .is_err()
+        );
     }
 
     #[test]
     fn nonce_gap_rejected() {
         let mut mempool = Mempool::new();
         let tx = make_tx(b"alice", MAX_NONCE_GAP + 1, 100);
-        assert!(mempool.add_transaction(tx, 1, 0, 0, 1).is_err());
+        assert!(
+            mempool
+                .add_transaction(tx, 1, 0, 0, 1, opolys_core::MAINNET_CHAIN_ID)
+                .is_err()
+        );
     }
 
     #[test]
     fn nonce_gap_accepted_at_boundary() {
         let mut mempool = Mempool::new();
         let tx = make_tx(b"alice", MAX_NONCE_GAP, 100);
-        assert!(mempool.add_transaction(tx, 1, 0, 0, 1).is_ok());
+        assert!(
+            mempool
+                .add_transaction(tx, 1, 0, 0, 1, opolys_core::MAINNET_CHAIN_ID)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -416,9 +564,19 @@ mod tests {
         let tx2 = make_tx(b"alice", 0, 109); // 9% bump — not enough
         let tx3 = make_tx(b"alice", 0, 111); // 11% bump — accepted
 
-        mempool.add_transaction(tx1, 100, 0, 0, 1).unwrap();
-        assert!(mempool.add_transaction(tx2, 109, 0, 0, 1).is_err());
-        assert!(mempool.add_transaction(tx3, 111, 0, 0, 1).is_ok());
+        mempool
+            .add_transaction(tx1, 100, 0, 0, 1, opolys_core::MAINNET_CHAIN_ID)
+            .unwrap();
+        assert!(
+            mempool
+                .add_transaction(tx2, 109, 0, 0, 1, opolys_core::MAINNET_CHAIN_ID)
+                .is_err()
+        );
+        assert!(
+            mempool
+                .add_transaction(tx3, 111, 0, 0, 1, opolys_core::MAINNET_CHAIN_ID)
+                .is_ok()
+        );
         assert_eq!(mempool.transaction_count(), 1);
     }
 
@@ -426,7 +584,9 @@ mod tests {
     fn evict_expired_removes_old_txs() {
         let mut mempool = Mempool::new();
         let tx = make_tx(b"alice", 0, 100);
-        mempool.add_transaction(tx, 1, 0, 0, 1).unwrap();
+        mempool
+            .add_transaction(tx, 1, 0, 0, 1, opolys_core::MAINNET_CHAIN_ID)
+            .unwrap();
         assert_eq!(mempool.transaction_count(), 1);
 
         // Time well past expiry

@@ -3,6 +3,7 @@ name = "evo-omap"
 version = "0.3.0"
 edition = "2024"
 description = "EVO-OMAP: Evolving Oriented Memory-hard Algorithm for Proof-of-work"
+license = "MIT"
 
 [dependencies]
 blake3 = "1.8"

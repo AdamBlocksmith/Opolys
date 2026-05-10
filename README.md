@@ -87,7 +87,9 @@ If `--rpc-api-key` is omitted, the node generates a random API key at startup
 for write/mining RPC methods and prints it once in the startup logs.
 
 For the full ceremony, verification, and launch checklist, see
-[`docs/MAINNET_LAUNCH.md`](docs/MAINNET_LAUNCH.md).
+[`docs/MAINNET_LAUNCH.md`](docs/MAINNET_LAUNCH.md). For explicit assumptions,
+residual risks, and operator safety rules, see
+[`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md).
 
 ### CLI Flags
 

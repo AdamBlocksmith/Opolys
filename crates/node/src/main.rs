@@ -1210,6 +1210,7 @@ async fn handle_network_event(
                             now,
                             account_nonce,
                             suggested_fee,
+                            opolys_core::MAINNET_CHAIN_ID,
                         ) {
                             Ok(()) => {
                                 tracing::debug!("Added gossiped transaction to mempool");

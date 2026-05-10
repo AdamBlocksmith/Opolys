@@ -10,6 +10,19 @@ use std::time::Instant;
 const RATE_LIMIT_WINDOW_SECS: u64 = 60;
 const MAX_RATE_LIMIT_KEYS: usize = 10_000;
 
+/// JSON-RPC 2.0 request identifier.
+///
+/// The spec allows string, number, or null ids. Opolys echoes the exact id
+/// variant back in every response so off-the-shelf clients can correlate calls.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum JsonRpcId {
+    Number(u64),
+    String(String),
+    #[default]
+    Null,
+}
+
 /// JSON-RPC 2.0 request format.
 ///
 /// All Opolys RPC methods use JSON-RPC 2.0 over HTTP POST to `/rpc`.
@@ -24,7 +37,8 @@ pub struct JsonRpcRequest {
     #[serde(default = "default_params")]
     pub params: serde_json::Value,
     /// Request ID for matching responses to requests.
-    pub id: u64,
+    #[serde(default)]
+    pub id: JsonRpcId,
 }
 
 /// Default `params` value for deserialization when the field is missing.
@@ -45,7 +59,7 @@ pub struct JsonRpcResponse {
     /// The error payload on failure.
     pub error: Option<JsonRpcError>,
     /// Matches the request ID.
-    pub id: u64,
+    pub id: JsonRpcId,
 }
 
 /// JSON-RPC error object with standard error codes.
@@ -203,6 +217,7 @@ mod tests {
         let json = r#"{"jsonrpc":"2.0","method":"opl_getBlockHeight","params":null,"id":1}"#;
         let req: JsonRpcRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.method, "opl_getBlockHeight");
+        assert_eq!(req.id, JsonRpcId::Number(1));
     }
 
     #[test]
@@ -210,6 +225,29 @@ mod tests {
         let json = r#"{"jsonrpc":"2.0","method":"opl_getBalance","params":["abc123"],"id":2}"#;
         let req: JsonRpcRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.method, "opl_getBalance");
+    }
+
+    #[test]
+    fn json_rpc_request_accepts_string_and_null_ids() {
+        let string_id = r#"{"jsonrpc":"2.0","method":"opl_getBlockHeight","id":"wallet-42"}"#;
+        let req: JsonRpcRequest = serde_json::from_str(string_id).unwrap();
+        assert_eq!(req.id, JsonRpcId::String("wallet-42".to_string()));
+
+        let null_id = r#"{"jsonrpc":"2.0","method":"opl_getBlockHeight","id":null}"#;
+        let req: JsonRpcRequest = serde_json::from_str(null_id).unwrap();
+        assert_eq!(req.id, JsonRpcId::Null);
+    }
+
+    #[test]
+    fn json_rpc_response_echoes_string_id() {
+        let response = JsonRpcResponse {
+            jsonrpc: "2.0".to_string(),
+            result: Some(serde_json::json!(7)),
+            error: None,
+            id: JsonRpcId::String("abc".to_string()),
+        };
+        let encoded = serde_json::to_value(response).unwrap();
+        assert_eq!(encoded["id"], "abc");
     }
 
     #[test]

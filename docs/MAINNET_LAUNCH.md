@@ -2,6 +2,8 @@
 
 This runbook is the operator path for launching Opolys mainnet. It keeps the gold analogy honest: genesis supply is derived from real gold production data, attested once, verified by everyone, and then treated as consensus input.
 
+Read `docs/THREAT_MODEL.md` before launch. It lists the remaining trust assumptions, including the single production genesis operator key and the operational rules around RPC auth and dry-run attestations.
+
 ## 1. Build From A Clean Checkout
 
 ```bash
@@ -127,6 +129,7 @@ Before announcing the network:
 - RPC write/mining methods require an API key unless RPC is disabled.
 - Bootstrap peers are explicit and reachable.
 - At least two independent machines can mine or verify blocks from the same genesis.
+- The threat model has been reviewed, including residual risks that require testnet time or an external audit rather than another local patch.
 
 ## 6. What The Genesis Data Does
 

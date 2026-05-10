@@ -255,7 +255,7 @@ pub async fn handle_jsonrpc(
                 error: Some(JsonRpcError::invalid_request(
                     "jsonrpc must be exactly \"2.0\"",
                 )),
-                id: req.id,
+                id: req.id.clone(),
             }),
         );
     }
@@ -274,7 +274,7 @@ pub async fn handle_jsonrpc(
                         jsonrpc: "2.0".to_string(),
                         result: None,
                         error: Some(JsonRpcError::internal_error("RPC rate limiter unavailable")),
-                        id: req.id,
+                        id: req.id.clone(),
                     }),
                 );
             }
@@ -287,7 +287,7 @@ pub async fn handle_jsonrpc(
                     jsonrpc: "2.0".to_string(),
                     result: None,
                     error: Some(JsonRpcError::rate_limited()),
-                    id: req.id,
+                    id: req.id.clone(),
                 }),
             );
         }
@@ -304,7 +304,7 @@ pub async fn handle_jsonrpc(
                 jsonrpc: "2.0".to_string(),
                 result: None,
                 error: Some(JsonRpcError::unauthorized()),
-                id: req.id,
+                id: req.id.clone(),
             }),
         );
     }
@@ -336,7 +336,7 @@ pub async fn handle_jsonrpc(
                 jsonrpc: "2.0".to_string(),
                 result: None,
                 error: Some(JsonRpcError::method_not_found()),
-                id: req.id,
+                id: req.id.clone(),
             };
             return (StatusCode::OK, Json(resp));
         }
@@ -349,7 +349,7 @@ pub async fn handle_jsonrpc(
                 jsonrpc: "2.0".to_string(),
                 result: Some(value),
                 error: None,
-                id: req.id,
+                id: req.id.clone(),
             }),
         ),
         Err(e) => (
@@ -358,7 +358,7 @@ pub async fn handle_jsonrpc(
                 jsonrpc: "2.0".to_string(),
                 result: None,
                 error: Some(e),
-                id: req.id,
+                id: req.id.clone(),
             }),
         ),
     }
@@ -727,7 +727,14 @@ async fn handle_send_transaction(
     {
         let mut mempool = state.mempool.write().await;
         mempool
-            .add_transaction(tx, priority, timestamp, account_nonce, suggested_fee)
+            .add_transaction(
+                tx,
+                priority,
+                timestamp,
+                account_nonce,
+                suggested_fee,
+                MAINNET_CHAIN_ID,
+            )
             .map_err(|e| JsonRpcError::invalid_params(&format!("Mempool rejected: {:?}", e)))?;
     }
 

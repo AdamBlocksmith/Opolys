@@ -25,6 +25,9 @@ use opolys_core::{Block, Hash, ObjectId, Transaction};
 use rocksdb::{WriteBatch, WriteOptions};
 use std::path::Path;
 
+pub const STORAGE_SCHEMA_VERSION: u32 = 1;
+const STORAGE_SCHEMA_VERSION_KEY: &[u8] = b"schema_version";
+
 /// Serializable snapshot of chain state persisted across node restarts.
 ///
 /// Contains all information needed to resume the node from where it left off
@@ -136,7 +139,44 @@ impl BlockchainStore {
         let db = rocksdb::DB::open_cf(&opts, path, cf_names)
             .map_err(|e| format!("Failed to open database at {:?}: {}", path, e))?;
 
-        Ok(BlockchainStore { db })
+        let store = BlockchainStore { db };
+        store.ensure_schema_version()?;
+        Ok(store)
+    }
+
+    fn ensure_schema_version(&self) -> Result<(), String> {
+        let cf = self
+            .db
+            .cf_handle("chain_state")
+            .ok_or_else(|| "Column family 'chain_state' not found".to_string())?;
+
+        match self.db.get_cf(&cf, STORAGE_SCHEMA_VERSION_KEY) {
+            Ok(Some(data)) => {
+                let payload = decode_value("Storage schema version", &data)?;
+                let version = u32::from_le_bytes(
+                    payload
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| "Invalid storage schema version length".to_string())?,
+                );
+                if version != STORAGE_SCHEMA_VERSION {
+                    return Err(format!(
+                        "Unsupported storage schema version {}; this binary supports {}",
+                        version, STORAGE_SCHEMA_VERSION
+                    ));
+                }
+                Ok(())
+            }
+            Ok(None) => self
+                .db
+                .put_cf(
+                    &cf,
+                    STORAGE_SCHEMA_VERSION_KEY,
+                    encode_value(&STORAGE_SCHEMA_VERSION.to_le_bytes()),
+                )
+                .map_err(|e| format!("Storage schema version put failed: {}", e)),
+            Err(e) => Err(format!("Storage schema version get failed: {}", e)),
+        }
     }
 
     // ─── Block storage ───────────────────────────────────────────────
@@ -662,6 +702,46 @@ mod tests {
         let dir = temp_dir();
         let store = BlockchainStore::open(dir.path()).expect("Should open database");
         assert!(!store.has_state().unwrap());
+    }
+
+    #[test]
+    fn open_writes_storage_schema_version() {
+        let dir = temp_dir();
+        let store = BlockchainStore::open(dir.path()).unwrap();
+        let cf = store.db.cf_handle("chain_state").unwrap();
+        let raw = store
+            .db
+            .get_cf(&cf, STORAGE_SCHEMA_VERSION_KEY)
+            .unwrap()
+            .unwrap();
+        let payload = decode_value("Storage schema version", &raw).unwrap();
+        assert_eq!(
+            u32::from_le_bytes(payload.as_slice().try_into().unwrap()),
+            STORAGE_SCHEMA_VERSION
+        );
+    }
+
+    #[test]
+    fn unsupported_storage_schema_version_is_rejected() {
+        let dir = temp_dir();
+        {
+            let store = BlockchainStore::open(dir.path()).unwrap();
+            let cf = store.db.cf_handle("chain_state").unwrap();
+            store
+                .db
+                .put_cf(
+                    &cf,
+                    STORAGE_SCHEMA_VERSION_KEY,
+                    encode_value(&(STORAGE_SCHEMA_VERSION + 1).to_le_bytes()),
+                )
+                .unwrap();
+        }
+
+        let err = match BlockchainStore::open(dir.path()) {
+            Ok(_) => panic!("unsupported schema version should be rejected"),
+            Err(err) => err,
+        };
+        assert!(err.contains("Unsupported storage schema version"));
     }
 
     #[test]

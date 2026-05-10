@@ -20,7 +20,7 @@ use crate::key::{KeyPair, WalletError};
 use hmac::{Hmac, Mac};
 use sha2::Sha512;
 use std::fmt;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 type HmacSha512 = Hmac<Sha512>;
 
@@ -78,13 +78,16 @@ impl Bip39Mnemonic {
     }
 
     /// The 24-word mnemonic phrase as a space-separated string.
-    pub fn phrase(&self) -> String {
-        self.inner.to_string()
+    pub fn phrase(&self) -> Zeroizing<String> {
+        Zeroizing::new(self.inner.to_string())
     }
 
     /// Individual words of the mnemonic.
-    pub fn words(&self) -> Vec<String> {
-        self.inner.words().map(String::from).collect()
+    pub fn words(&self) -> Vec<Zeroizing<String>> {
+        self.inner
+            .words()
+            .map(|word| Zeroizing::new(word.to_string()))
+            .collect()
     }
 
     /// Derive the 64-byte seed using PBKDF2 with the standard BIP-39
@@ -269,8 +272,8 @@ mod tests {
     fn mnemonic_phrase_roundtrip() {
         let mnemonic = Bip39Mnemonic::generate().expect("Should generate mnemonic");
         let phrase = mnemonic.phrase();
-        let restored = Bip39Mnemonic::from_words(&phrase).expect("Should restore mnemonic");
-        assert_eq!(restored.phrase(), phrase);
+        let restored = Bip39Mnemonic::from_words(phrase.as_str()).expect("Should restore mnemonic");
+        assert_eq!(restored.phrase().as_str(), phrase.as_str());
     }
 
     #[test]
@@ -283,7 +286,7 @@ mod tests {
         let seed_debug = format!("{:?}", seed);
 
         assert!(mnemonic_debug.contains("[REDACTED]"));
-        assert!(!mnemonic_debug.contains(&phrase));
+        assert!(!mnemonic_debug.contains(phrase.as_str()));
         assert!(seed_debug.contains("[REDACTED]"));
         assert!(!seed_debug.contains("seed"));
     }
