@@ -19,7 +19,7 @@
 //! Key derivation: BIP-39 24-word mnemonics, SLIP-0010 ed25519.
 
 use clap::Parser;
-use ed25519_dalek::{Signer, SigningKey, Verifier};
+use ed25519_dalek::{Signer, SigningKey};
 use opolys_consensus::block::{
     MAX_SLASH_EVIDENCE_PER_BLOCK, compute_attestation_root, compute_block_hash,
     compute_evidence_root, compute_genesis_ceremony_hash, compute_transaction_root,
@@ -1435,11 +1435,9 @@ impl OpolysNode {
 
         // Derive deterministic producer selection seed from the previous block hash.
         // This ensures every node computes the same producer for the same height.
-        let seed = u64::from_be_bytes(
-            chain.latest_block_hash.0[0..8]
-                .try_into()
-                .unwrap_or([0u8; 8]),
-        );
+        let mut seed_bytes = [0u8; 8];
+        seed_bytes.copy_from_slice(&chain.latest_block_hash.0[..8]);
+        let seed = u64::from_be_bytes(seed_bytes);
 
         // Select the block producer via weighted random sampling
         let producer = refiners
@@ -1837,7 +1835,7 @@ impl OpolysNode {
             let signature = ed25519_dalek::Signature::from_bytes(&sig_array);
             let signing_payload = refiner_block_signing_payload(&block_hash);
             verifying_key
-                .verify(&signing_payload, &signature)
+                .verify_strict(&signing_payload, &signature)
                 .map_err(|_| "Refiner signature verification failed".to_string())?;
         }
 
@@ -1857,11 +1855,9 @@ impl OpolysNode {
 
         // Verify Refiner block producer was legitimately selected
         if block.header.refiner_signature.is_some() && !block.header.producer.0.is_zero() {
-            let seed = u64::from_be_bytes(
-                chain.latest_block_hash.0[0..8]
-                    .try_into()
-                    .unwrap_or([0u8; 8]),
-            );
+            let mut seed_bytes = [0u8; 8];
+            seed_bytes.copy_from_slice(&chain.latest_block_hash.0[..8]);
+            let seed = u64::from_be_bytes(seed_bytes);
             let timestamp = chain.block_timestamps.last().copied().unwrap_or(0);
             let expected_producer =
                 refiners

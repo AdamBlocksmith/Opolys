@@ -243,9 +243,9 @@ pub fn compute_pow_hash_value(header: &BlockHeader) -> Option<u64> {
     );
     let mut dataset = evo_omap::LightDataset::new(&epoch_seed);
     let hash = evo_omap::evo_omap_hash_light(&mut dataset, &header_bytes, header.height, nonce);
-    Some(u64::from_le_bytes(
-        hash.0[..8].try_into().unwrap_or([0u8; 8]),
-    ))
+    let mut hash_prefix = [0u8; 8];
+    hash_prefix.copy_from_slice(&hash.0[..8]);
+    Some(u64::from_le_bytes(hash_prefix))
 }
 
 /// Compute a deterministic EVO-OMAP hash for the memory-fingerprinting challenge protocol.
@@ -275,7 +275,9 @@ pub fn compute_challenge_hash(
     input.extend_from_slice(&(responder_peer_id.len() as u64).to_le_bytes());
     input.extend_from_slice(responder_peer_id);
     let hash = evo_omap::evo_omap_hash_light(&mut dataset, &input, height, nonce);
-    u64::from_le_bytes(hash.0[..8].try_into().unwrap_or([0u8; 8]))
+    let mut hash_prefix = [0u8; 8];
+    hash_prefix.copy_from_slice(&hash.0[..8]);
+    u64::from_le_bytes(hash_prefix)
 }
 
 /// Convenience function: mine a block without persistent caching.
