@@ -84,7 +84,7 @@ From `crates/core/src/constants.rs`:
 | `EPOCH` | `960` blocks (= exactly 24 hours at 90 s/block) | Unified epoch for retarget, dataset regen, unbonding |
 | `UNBONDING_DELAY_BLOCKS` | `960` | One epoch delay for unbonding |
 | `MIN_FEE` | `1` Flake | Floor for market-driven fees |
-| `MIN_BOND_STAKE` | `1,000,000` Flakes (1 OPL) | Minimum per new bond entry |
+| `MIN_BOND_STAKE` | `1,000,000` Flakes (1 OPL) | Floor for dynamic minimum bond |
 | `BLOCK_VERSION` | `2` | Current block header version |
 | `SIGNATURE_TYPE_ED25519` | `0` | ed25519 signature type constant |
 | `EXTENSION_TYPE_NONE` | `0` | No extension data |
@@ -360,7 +360,21 @@ Equal-chance sampling from active refiners. The seed is derived from the first 8
 
 ### Minimum Bond
 
-New bond entries require at least `MIN_BOND_STAKE` (1 OPL). Residuals from FIFO splitting are exempt from this minimum.
+New bond entries use a dynamic minimum derived from issued supply:
+
+```text
+minimum_bond = max(1 OPL, sqrt(total_issued_opl))
+```
+
+Examples:
+
+```text
+0 issued OPL          -> 1 OPL minimum
+1,000,000 issued OPL  -> 1,000 OPL minimum
+25,000,000 issued OPL -> 5,000 OPL minimum
+```
+
+The 1 OPL `MIN_BOND_STAKE` constant is only the launch floor. As the monetary base grows, refiner entry requires more bonded capital without adding a new arbitrary threshold. Residuals from FIFO splitting are exempt from this minimum.
 
 ### Refiner Activation
 
@@ -371,7 +385,7 @@ Newly bonded refiners start in `Bonding` status. They activate to `Active` once 
 - New refiners bond successfully and wait in `Bonding` status.
 - If the active set is full, the highest-weight refiners are Active and the rest are Waiting.
 - At launch with zero issued supply, the limit is 960. At 25,000,000 issued OPL, it is 5,960.
-- No `RefinerBond` transaction is ever rejected; all are queued fairly.
+- A valid `RefinerBond` transaction is never rejected because the active set is full; it is queued fairly. Bonds below the dynamic minimum are rejected.
 
 ### Attestations (Pass 2)
 

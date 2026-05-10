@@ -2031,6 +2031,7 @@ impl OpolysNode {
                 &mut refiners,
                 block.header.height,
                 block.header.timestamp,
+                chain.total_issued,
                 expected_chain_id,
             );
             if result.success {
@@ -2237,7 +2238,7 @@ mod tests {
     async fn activate_test_refiner(node: &OpolysNode) {
         let mut refiners = node.refiners.write().await;
         refiners
-            .bond(node.miner_id.clone(), MIN_BOND_STAKE, 0, 0)
+            .bond(node.miner_id.clone(), MIN_BOND_STAKE, 0, 0, 0)
             .unwrap();
         refiners.activate(&node.miner_id, 1).unwrap();
     }
@@ -3034,8 +3035,8 @@ mod tests {
         let mut refiners = RefinerSet::new();
         let a = opolys_crypto::hash_to_object_id(b"a");
         let b = opolys_crypto::hash_to_object_id(b"b");
-        refiners.bond(a.clone(), MIN_BOND_STAKE, 0, 0).unwrap();
-        refiners.bond(b.clone(), MIN_BOND_STAKE, 0, 0).unwrap();
+        refiners.bond(a.clone(), MIN_BOND_STAKE, 0, 0, 0).unwrap();
+        refiners.bond(b.clone(), MIN_BOND_STAKE, 0, 0, 0).unwrap();
         refiners.activate(&a, 1).unwrap();
         refiners.activate(&b, 1).unwrap();
 

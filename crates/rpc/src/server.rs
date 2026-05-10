@@ -1406,7 +1406,7 @@ mod tests {
         let mut refiners = RefinerSet::new();
         for id in ids {
             refiners
-                .bond(id.clone(), MIN_BOND_STAKE, 0, 0)
+                .bond(id.clone(), MIN_BOND_STAKE, 0, 0, 0)
                 .expect("bond should succeed");
             refiners.activate(id, 1).expect("activate should succeed");
         }
@@ -1500,7 +1500,7 @@ mod tests {
         let unknown = test_refiner(b"unknown");
         let mut refiners = active_refiners(std::slice::from_ref(&active));
         refiners
-            .bond(bonding.clone(), MIN_BOND_STAKE, 0, 0)
+            .bond(bonding.clone(), MIN_BOND_STAKE, 0, 0, 0)
             .expect("bonding refiner should be recorded");
         let attestations = vec![
             test_attestation(active, 7, block_hash.clone()),

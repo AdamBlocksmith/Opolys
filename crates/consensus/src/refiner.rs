@@ -15,8 +15,8 @@
 //! consumed first. If the unbond amount exceeds an entry's stake, that entry
 //! is fully consumed and the remainder comes from the next oldest. Split
 //! entries keep their original `bonded_at_timestamp` for weight calculation.
-//! The 1 OPL minimum only applies to new bond entries, not to residuals from
-//! FIFO splits.
+//! The dynamic minimum only applies to new bond entries, not to residuals from
+//! FIFO splits. It starts at 1 OPL and grows as `sqrt(total_issued_opl)`.
 //!
 //! **Slashing is narrowly scoped to double-signing only.** No governance
 //! body can slash for other reasons. A slashed refiner's entire stake across
@@ -29,8 +29,8 @@
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use opolys_core::{
-    ANNUAL_ATTRITION_PERMILLE, EPOCH, FLAKES_PER_OPL, FlakeAmount, MIN_BOND_STAKE, ObjectId,
-    OpolysError, RefinerStatus,
+    ANNUAL_ATTRITION_PERMILLE, EPOCH, FLAKES_PER_OPL, FlakeAmount, ObjectId, OpolysError,
+    RefinerStatus,
 };
 use opolys_crypto::{Blake3Hasher, DOMAIN_STATE_ROOT};
 use serde::{Deserialize, Serialize};
@@ -209,7 +209,7 @@ impl RefinerInfo {
 
     /// Add a new bond entry (top-up) to this refiner.
     ///
-    /// Each new entry must meet the `MIN_BOND_STAKE` minimum (1 OPL).
+    /// Each new entry must meet the dynamic minimum bond.
     /// The entry gets its own seniority clock starting from zero.
     /// If an entry with the same `bonded_at_timestamp` already exists,
     /// stakes are merged (auto-merge) to reduce entry count.
@@ -324,24 +324,42 @@ impl RefinerSet {
         self.dirty_refiners.clear();
     }
 
+    /// Compute the minimum new bond entry from issued supply.
+    ///
+    /// `minimum_bond = max(1 OPL, sqrt(total_issued_opl))`.
+    ///
+    /// Early chains remain accessible at 1 OPL. As the economy grows, refiner
+    /// status requires more serious bonded capital without adding a new
+    /// protocol constant.
+    pub fn minimum_bond_stake(total_issued_flakes: FlakeAmount) -> FlakeAmount {
+        let total_issued_opl = total_issued_flakes / FLAKES_PER_OPL;
+        let min_opl = integer_sqrt_floor(total_issued_opl as u128).max(1);
+        min_opl
+            .saturating_mul(FLAKES_PER_OPL as u128)
+            .min(FlakeAmount::MAX as u128) as FlakeAmount
+    }
+
     /// Bond stake as a refiner entry. If the refiner doesn't exist, creates
     /// a new refiner with this as their first entry (status: Bonding). If the
     /// refiner already exists, adds to the existing entry (auto-merge) if same
     /// timestamp, or creates a new entry (top-up) with its own seniority clock.
     ///
-    /// Each **new** entry must meet `MIN_BOND_STAKE` (1 OPL). Merged entries
-    /// have no minimum since they may be residuals from FIFO splits.
+    /// Each **new** entry must meet `minimum_bond_stake(total_issued_flakes)`.
+    /// Merged entries have no minimum since they may be residuals from FIFO
+    /// splits.
     pub fn bond(
         &mut self,
         object_id: ObjectId,
         stake: FlakeAmount,
         height: u64,
         timestamp: u64,
+        total_issued_flakes: FlakeAmount,
     ) -> Result<(), String> {
-        if stake < MIN_BOND_STAKE {
+        let minimum_bond = Self::minimum_bond_stake(total_issued_flakes);
+        if stake < minimum_bond {
             return Err(format!(
                 "Insufficient stake per entry: need {}, have {}",
-                MIN_BOND_STAKE, stake
+                minimum_bond, stake
             ));
         }
 
@@ -814,6 +832,7 @@ impl Default for RefinerSet {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opolys_core::MIN_BOND_STAKE;
     use opolys_crypto::hash_to_object_id;
 
     fn test_id(seed: &[u8]) -> ObjectId {
@@ -824,7 +843,7 @@ mod tests {
     fn bond_new_refiner() {
         let mut vs = RefinerSet::new();
         let id = test_id(b"refiner1");
-        vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0).unwrap();
+        vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0, 0).unwrap();
         assert_eq!(vs.refiner_count(), 1);
         assert_eq!(vs.get_refiner(&id).unwrap().total_stake(), MIN_BOND_STAKE);
         assert_eq!(vs.get_refiner(&id).unwrap().entries.len(), 1);
@@ -835,7 +854,7 @@ mod tests {
         let mut vs = RefinerSet::new();
         let id = test_id(b"refiner1");
         // MIN_BOND_STAKE is now 1 OPL = 1,000,000 flakes
-        assert!(vs.bond(id, 100, 0, 0).is_err());
+        assert!(vs.bond(id, 100, 0, 0, 0).is_err());
     }
 
     #[test]
@@ -852,6 +871,19 @@ mod tests {
     }
 
     #[test]
+    fn minimum_bond_stake_grows_with_issued_supply() {
+        assert_eq!(RefinerSet::minimum_bond_stake(0), MIN_BOND_STAKE);
+        assert_eq!(
+            RefinerSet::minimum_bond_stake(1_000_000 * FLAKES_PER_OPL),
+            1_000 * FLAKES_PER_OPL
+        );
+        assert_eq!(
+            RefinerSet::minimum_bond_stake(25_000_000 * FLAKES_PER_OPL),
+            5_000 * FLAKES_PER_OPL
+        );
+    }
+
+    #[test]
     fn rerank_refiners_ties_break_by_object_id() {
         let mut vs = RefinerSet::new();
         let ids = [
@@ -861,7 +893,7 @@ mod tests {
         ];
 
         for id in &ids {
-            vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0).unwrap();
+            vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0, 0).unwrap();
         }
         vs.activate_matured_refiners(EPOCH);
         vs.rerank_refiners(0, 0);
@@ -875,11 +907,12 @@ mod tests {
     fn top_up_bond_adds_entry() {
         let mut vs = RefinerSet::new();
         let id = test_id(b"refiner1");
-        vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0).unwrap();
+        vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0, 0).unwrap();
         vs.activate(&id, 1).unwrap();
 
         // Top-up: add a second entry at a different timestamp
-        vs.bond(id.clone(), MIN_BOND_STAKE * 2, 100, 1000).unwrap();
+        vs.bond(id.clone(), MIN_BOND_STAKE * 2, 100, 1000, 0)
+            .unwrap();
 
         let v = vs.get_refiner(&id).unwrap();
         assert_eq!(v.entries.len(), 2);
@@ -896,10 +929,10 @@ mod tests {
     fn auto_merge_same_timestamp() {
         let mut vs = RefinerSet::new();
         let id = test_id(b"refiner1");
-        vs.bond(id.clone(), MIN_BOND_STAKE, 0, 100).unwrap();
+        vs.bond(id.clone(), MIN_BOND_STAKE, 0, 100, 0).unwrap();
 
         // Top-up at same timestamp — should auto-merge
-        vs.bond(id.clone(), MIN_BOND_STAKE * 2, 5, 100).unwrap();
+        vs.bond(id.clone(), MIN_BOND_STAKE * 2, 5, 100, 0).unwrap();
 
         let v = vs.get_refiner(&id).unwrap();
         assert_eq!(v.entries.len(), 1); // Merged, not two entries
@@ -910,8 +943,9 @@ mod tests {
     fn unbond_fifo_consumes_oldest_first() {
         let mut vs = RefinerSet::new();
         let id = test_id(b"refiner1");
-        vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0).unwrap(); // Entry 1: 1 OPL at t=0
-        vs.bond(id.clone(), MIN_BOND_STAKE * 2, 100, 1000).unwrap(); // Entry 2: 2 OPL at t=1000
+        vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0, 0).unwrap(); // Entry 1: 1 OPL at t=0
+        vs.bond(id.clone(), MIN_BOND_STAKE * 2, 100, 1000, 0)
+            .unwrap(); // Entry 2: 2 OPL at t=1000
 
         // Unbond 1.5 OPL — should fully consume entry 1 (1 OPL) and 0.5 OPL from entry 2
         let unbonded = vs
@@ -941,7 +975,7 @@ mod tests {
     fn unbond_fifo_removes_refiner_when_empty() {
         let mut vs = RefinerSet::new();
         let id = test_id(b"refiner1");
-        vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0).unwrap();
+        vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0, 0).unwrap();
 
         // Unbond the entire stake
         let unbonded = vs.unbond_amount(&id, MIN_BOND_STAKE, 100).unwrap();
@@ -955,7 +989,7 @@ mod tests {
     fn unbond_more_than_stake() {
         let mut vs = RefinerSet::new();
         let id = test_id(b"refiner1");
-        vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0).unwrap();
+        vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0, 0).unwrap();
 
         // Try to unbond more than total stake
         let result = vs.unbond_amount(&id, MIN_BOND_STAKE * 10, 100);
@@ -981,7 +1015,7 @@ mod tests {
     fn process_matured_unbonds_returns_matured_entries() {
         let mut vs = RefinerSet::new();
         let id = test_id(b"refiner1");
-        vs.bond(id.clone(), MIN_BOND_STAKE * 3, 0, 0).unwrap();
+        vs.bond(id.clone(), MIN_BOND_STAKE * 3, 0, 0, 0).unwrap();
 
         // Unbond at height 100, matures at 100 + EPOCH
         let unbonded = vs.unbond_amount(&id, MIN_BOND_STAKE, 100).unwrap();
@@ -1004,7 +1038,7 @@ mod tests {
     fn matured_unbonds_preview_does_not_drain_queue() {
         let mut vs = RefinerSet::new();
         let id = test_id(b"refiner1");
-        vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0).unwrap();
+        vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0, 0).unwrap();
         vs.unbond_amount(&id, MIN_BOND_STAKE, 100).unwrap();
 
         let matured = vs.matured_unbonds(100 + EPOCH);
@@ -1016,7 +1050,7 @@ mod tests {
     fn activate_matured_refiners_transitions_after_epoch() {
         let mut vs = RefinerSet::new();
         let id = test_id(b"refiner1");
-        vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0).unwrap();
+        vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0, 0).unwrap();
 
         // At height 0, refiner should be in Bonding status
         assert_eq!(vs.get_refiner(&id).unwrap().status, RefinerStatus::Bonding);
@@ -1053,7 +1087,7 @@ mod tests {
         for i in 0..n {
             let seed = format!("refiner_{}", i);
             let id = test_id(seed.as_bytes());
-            vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0).unwrap();
+            vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0, 0).unwrap();
             ids.push(id);
         }
         assert_eq!(vs.total_active_refiners(), 0);
@@ -1083,7 +1117,7 @@ mod tests {
     fn slash_refiner_burns_all_stake() {
         let mut vs = RefinerSet::new();
         let id = test_id(b"refiner1");
-        vs.bond(id.clone(), MIN_BOND_STAKE * 10, 0, 0).unwrap(); // 10 OPL
+        vs.bond(id.clone(), MIN_BOND_STAKE * 10, 0, 0, 0).unwrap(); // 10 OPL
         vs.activate(&id, 1).unwrap();
 
         let burned = vs.slash_refiner(&id, 100).unwrap();
@@ -1097,7 +1131,7 @@ mod tests {
     fn slash_refiner_already_slashed_returns_zero() {
         let mut vs = RefinerSet::new();
         let id = test_id(b"refiner1");
-        vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0).unwrap();
+        vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0, 0).unwrap();
         vs.activate(&id, 1).unwrap();
 
         vs.slash_refiner(&id, 100).unwrap(); // permanently slashed
@@ -1110,7 +1144,7 @@ mod tests {
     fn record_correct_attestation_increments_active_refiner() {
         let mut vs = RefinerSet::new();
         let id = test_id(b"attester");
-        vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0).unwrap();
+        vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0, 0).unwrap();
         vs.activate(&id, 1).unwrap();
 
         assert_eq!(vs.record_correct_attestation(&id).unwrap(), 1);
@@ -1128,12 +1162,12 @@ mod tests {
     fn rebond_after_permanent_slash_rejected() {
         let mut vs = RefinerSet::new();
         let id = test_id(b"refiner1");
-        vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0).unwrap();
+        vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0, 0).unwrap();
         vs.activate(&id, 1).unwrap();
 
         vs.slash_refiner(&id, 100).unwrap(); // slashed
 
-        let result = vs.bond(id.clone(), MIN_BOND_STAKE, 400, 400);
+        let result = vs.bond(id.clone(), MIN_BOND_STAKE, 400, 400, 0);
         assert!(
             result.is_err(),
             "Slashed refiners must not be able to re-bond"
@@ -1145,8 +1179,8 @@ mod tests {
         let mut vs = RefinerSet::new();
         let id1 = test_id(b"refiner1");
         let id2 = test_id(b"refiner2");
-        vs.bond(id1, MIN_BOND_STAKE, 0, 0).unwrap();
-        vs.bond(id2, MIN_BOND_STAKE * 2, 0, 0).unwrap();
+        vs.bond(id1, MIN_BOND_STAKE, 0, 0, 0).unwrap();
+        vs.bond(id2, MIN_BOND_STAKE * 2, 0, 0, 0).unwrap();
         assert_eq!(vs.total_bonded_stake(), MIN_BOND_STAKE * 3);
     }
 
@@ -1154,7 +1188,7 @@ mod tests {
     fn select_block_producer() {
         let mut vs = RefinerSet::new();
         let id = test_id(b"refiner1");
-        vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0).unwrap();
+        vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0, 0).unwrap();
         vs.activate(&id, 1).unwrap();
         let producer = vs.select_block_producer(42);
         assert!(producer.is_some());
@@ -1166,8 +1200,8 @@ mod tests {
         let mut vs = RefinerSet::new();
         let low_stake = test_id(b"low-stake-refiner");
         let high_stake = test_id(b"high-stake-refiner");
-        vs.bond(low_stake.clone(), MIN_BOND_STAKE, 0, 0).unwrap();
-        vs.bond(high_stake.clone(), MIN_BOND_STAKE * 100, 0, 0)
+        vs.bond(low_stake.clone(), MIN_BOND_STAKE, 0, 0, 0).unwrap();
+        vs.bond(high_stake.clone(), MIN_BOND_STAKE * 100, 0, 0, 0)
             .unwrap();
         vs.activate(&low_stake, 1).unwrap();
         vs.activate(&high_stake, 1).unwrap();
@@ -1183,7 +1217,7 @@ mod tests {
     fn per_entry_seniority_increases_weight() {
         let mut vs = RefinerSet::new();
         let id = test_id(b"refiner1");
-        vs.bond(id.clone(), MIN_BOND_STAKE, 0, 100).unwrap();
+        vs.bond(id.clone(), MIN_BOND_STAKE, 0, 100, 0).unwrap();
         vs.activate(&id, 1).unwrap();
 
         // At timestamp 100, age = 0, weight = stake × 1.0
@@ -1199,12 +1233,12 @@ mod tests {
     fn top_up_entry_has_zero_seniority() {
         let mut vs = RefinerSet::new();
         let id = test_id(b"refiner1");
-        vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0).unwrap();
+        vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0, 0).unwrap();
         vs.activate(&id, 1).unwrap();
 
         // Top-up at timestamp 1,000,000 (~11.5 days)
         let top_up_time: u64 = 1_000_000;
-        vs.bond(id.clone(), MIN_BOND_STAKE, 100, top_up_time)
+        vs.bond(id.clone(), MIN_BOND_STAKE, 100, top_up_time, 0)
             .unwrap();
 
         let v = vs.get_refiner(&id).unwrap();
@@ -1234,8 +1268,9 @@ mod tests {
         let mut vs = RefinerSet::new();
         let id = test_id(b"refiner1");
         // Entry 1: 1 OPL, Entry 2: 3 OPL
-        vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0).unwrap();
-        vs.bond(id.clone(), MIN_BOND_STAKE * 3, 100, 2000).unwrap();
+        vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0, 0).unwrap();
+        vs.bond(id.clone(), MIN_BOND_STAKE * 3, 100, 2000, 0)
+            .unwrap();
 
         // Unbond 2 OPL: consumes entry 1 (1 OPL) + 1 OPL from entry 2
         let unbonded = vs.unbond_amount(&id, MIN_BOND_STAKE * 2, 500).unwrap();
@@ -1256,9 +1291,11 @@ mod tests {
         let charlie = test_id(b"charlie");
 
         // Phase 1: Three refiners bond at height 0
-        vs.bond(alice.clone(), MIN_BOND_STAKE * 10, 0, 0).unwrap(); // Alice: 10 OPL
-        vs.bond(bob.clone(), MIN_BOND_STAKE * 20, 0, 0).unwrap(); // Bob: 20 OPL
-        vs.bond(charlie.clone(), MIN_BOND_STAKE * 5, 0, 0).unwrap(); // Charlie: 5 OPL
+        vs.bond(alice.clone(), MIN_BOND_STAKE * 10, 0, 0, 0)
+            .unwrap(); // Alice: 10 OPL
+        vs.bond(bob.clone(), MIN_BOND_STAKE * 20, 0, 0, 0).unwrap(); // Bob: 20 OPL
+        vs.bond(charlie.clone(), MIN_BOND_STAKE * 5, 0, 0, 0)
+            .unwrap(); // Charlie: 5 OPL
 
         // All start as Bonding
         assert_eq!(

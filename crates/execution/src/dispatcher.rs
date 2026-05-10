@@ -27,8 +27,8 @@
 use opolys_consensus::account::{AccountStore, TransferResult};
 use opolys_consensus::refiner::RefinerSet;
 use opolys_core::{
-    ANNUAL_ATTRITION_PERMILLE, FlakeAmount, MIN_BOND_STAKE, MIN_FEE, ObjectId, OpolysError,
-    SIGNATURE_TYPE_ED25519, Transaction, TransactionAction,
+    ANNUAL_ATTRITION_PERMILLE, FlakeAmount, MIN_FEE, ObjectId, OpolysError, SIGNATURE_TYPE_ED25519,
+    Transaction, TransactionAction,
 };
 use opolys_crypto::{DOMAIN_TX_ID, hash_to_object_id_with_domain, transaction_signing_payload};
 use subtle::ConstantTimeEq;
@@ -65,6 +65,13 @@ impl ApplyResult {
             error: Some(msg.to_string()),
         }
     }
+}
+
+#[derive(Clone, Copy)]
+struct ExecutionContext {
+    block_height: u64,
+    block_timestamp: u64,
+    total_issued_flakes: FlakeAmount,
 }
 
 /// Stateless transaction dispatcher that applies transactions to chain state.
@@ -115,6 +122,7 @@ impl TransactionDispatcher {
         refiners: &mut RefinerSet,
         block_height: u64,
         block_timestamp: u64,
+        total_issued_flakes: FlakeAmount,
         expected_chain_id: u64,
     ) -> ApplyResult {
         // Verify transaction ID integrity, signature, and chain ID
@@ -131,6 +139,11 @@ impl TransactionDispatcher {
         }
 
         let sender = &tx.sender;
+        let context = ExecutionContext {
+            block_height,
+            block_timestamp,
+            total_issued_flakes,
+        };
 
         // Verify the sender exists and nonce matches
         if let Some(account) = accounts.get_account(sender) {
@@ -151,18 +164,17 @@ impl TransactionDispatcher {
             TransactionAction::Transfer { recipient, amount } => {
                 Self::apply_transfer(tx, sender, recipient, *amount, accounts)
             }
-            TransactionAction::RefinerBond { amount } => Self::apply_bond(
+            TransactionAction::RefinerBond { amount } => {
+                Self::apply_bond(tx, sender, *amount, accounts, refiners, context)
+            }
+            TransactionAction::RefinerUnbond { amount } => Self::apply_unbond(
                 tx,
                 sender,
                 *amount,
                 accounts,
                 refiners,
-                block_height,
-                block_timestamp,
+                context.block_height,
             ),
-            TransactionAction::RefinerUnbond { amount } => {
-                Self::apply_unbond(tx, sender, *amount, accounts, refiners, block_height)
-            }
         };
 
         // After a successful transaction, store the sender's public key in
@@ -202,7 +214,7 @@ impl TransactionDispatcher {
     /// If the sender is already a refiner, this creates a new bond entry
     /// (top-up) with its own seniority clock starting from zero, or merges
     /// with an existing entry at the same timestamp. Each new entry must be
-    /// at least `MIN_BOND_STAKE` (1 OPL).
+    /// at least the dynamic minimum from issued supply.
     ///
     /// If the sender is not yet a refiner, this creates a new refiner with
     /// this as their first bond entry (status: Bonding).
@@ -216,14 +228,14 @@ impl TransactionDispatcher {
         stake: FlakeAmount,
         accounts: &mut AccountStore,
         refiners: &mut RefinerSet,
-        block_height: u64,
-        block_timestamp: u64,
+        context: ExecutionContext,
     ) -> ApplyResult {
-        // Minimum stake per new entry — must be >= MIN_BOND_STAKE (1 OPL)
-        if stake < MIN_BOND_STAKE {
+        // Minimum stake per new entry is derived from issued supply.
+        let minimum_bond = RefinerSet::minimum_bond_stake(context.total_issued_flakes);
+        if stake < minimum_bond {
             return ApplyResult::err(&format!(
                 "Insufficient bond stake per entry: need {}, got {}",
-                MIN_BOND_STAKE, stake
+                minimum_bond, stake
             ));
         }
 
@@ -252,7 +264,13 @@ impl TransactionDispatcher {
 
         // Register the bond (creates new entry or merges with same-timestamp entry)
         let sender_clone = sender.clone();
-        if let Err(e) = refiners.bond(sender_clone, stake, block_height, block_timestamp) {
+        if let Err(e) = refiners.bond(
+            sender_clone,
+            stake,
+            context.block_height,
+            context.block_timestamp,
+            context.total_issued_flakes,
+        ) {
             if let Err(refund_error) = accounts.credit(sender, total_needed) {
                 return ApplyResult::err(&format!(
                     "Bond failed ({}) and refund failed: {}",
@@ -524,7 +542,7 @@ fn compute_tx_id(
 mod tests {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
-    use opolys_core::{EPOCH, MAINNET_CHAIN_ID, opl_to_flake};
+    use opolys_core::{EPOCH, MAINNET_CHAIN_ID, MIN_BOND_STAKE, opl_to_flake};
     use opolys_crypto::hash_to_object_id;
 
     /// Deterministic test keypair from a single seed byte.
@@ -685,6 +703,7 @@ mod tests {
             &mut refiners,
             1,
             100,
+            0,
             MAINNET_CHAIN_ID,
         );
         assert!(
@@ -720,6 +739,7 @@ mod tests {
             &mut refiners,
             1,
             100,
+            0,
             MAINNET_CHAIN_ID,
         );
         assert!(!result.success);
@@ -743,6 +763,7 @@ mod tests {
             &mut refiners,
             1,
             100,
+            0,
             MAINNET_CHAIN_ID,
         );
 
@@ -773,6 +794,7 @@ mod tests {
             &mut refiners,
             1,
             100,
+            0,
             MAINNET_CHAIN_ID,
         );
         assert!(result.success, "Bond should succeed: {:?}", result.error);
@@ -803,9 +825,43 @@ mod tests {
             &mut refiners,
             1,
             100,
+            0,
             MAINNET_CHAIN_ID,
         );
         assert!(!result.success);
+    }
+
+    /// Dynamic minimum bond grows with issued supply.
+    #[test]
+    fn bond_refiner_respects_dynamic_minimum() {
+        let mut accounts = AccountStore::new();
+        let mut refiners = RefinerSet::new();
+        let (sk, alice, pk) = test_keypair(1);
+
+        accounts.create_account(alice.clone()).unwrap();
+        accounts.credit(&alice, opl_to_flake(10_000)).unwrap();
+
+        let issued = 25_000_000 * opl_to_flake(1);
+        let required = RefinerSet::minimum_bond_stake(issued);
+        assert_eq!(required, opl_to_flake(5_000));
+
+        let tx = signed_bond(&sk, &alice, pk, required - 1, opl_to_flake(1), 0);
+        let result = TransactionDispatcher::apply_transaction(
+            &tx,
+            &mut accounts,
+            &mut refiners,
+            1,
+            100,
+            issued,
+            MAINNET_CHAIN_ID,
+        );
+        assert!(!result.success);
+        assert!(
+            result
+                .error
+                .unwrap()
+                .contains("Insufficient bond stake per entry")
+        );
     }
 
     /// Top-up: existing refiner bonds again, creating a second entry.
@@ -826,6 +882,7 @@ mod tests {
             &mut refiners,
             1,
             100,
+            0,
             MAINNET_CHAIN_ID,
         );
         assert!(result1.success);
@@ -838,6 +895,7 @@ mod tests {
             &mut refiners,
             2,
             200,
+            0,
             MAINNET_CHAIN_ID,
         );
         assert!(
@@ -870,6 +928,7 @@ mod tests {
             &mut refiners,
             1,
             100,
+            0,
             MAINNET_CHAIN_ID,
         );
         assert!(r1.success, "First bond should succeed: {:?}", r1.error);
@@ -889,6 +948,7 @@ mod tests {
             &mut refiners,
             2,
             1000,
+            0,
             MAINNET_CHAIN_ID,
         );
         assert!(
@@ -927,6 +987,7 @@ mod tests {
             &mut refiners,
             3,
             300,
+            0,
             MAINNET_CHAIN_ID,
         );
         assert!(result.success, "Unbond should succeed: {:?}", result.error);
@@ -977,6 +1038,7 @@ mod tests {
             &mut refiners,
             1,
             100,
+            0,
             MAINNET_CHAIN_ID,
         );
         assert!(r.success, "Bond should succeed: {:?}", r.error);
@@ -989,6 +1051,7 @@ mod tests {
             &mut refiners,
             2,
             200,
+            0,
             MAINNET_CHAIN_ID,
         );
         assert!(!result.success);
@@ -1017,6 +1080,7 @@ mod tests {
             &mut refiners,
             1,
             100,
+            0,
             MAINNET_CHAIN_ID,
         );
         assert!(!result.success);
@@ -1059,6 +1123,7 @@ mod tests {
             &mut refiners,
             1,
             100,
+            0,
             MAINNET_CHAIN_ID,
         );
         assert!(result.success, "Bond should succeed: {:?}", result.error);
@@ -1097,6 +1162,7 @@ mod tests {
             &mut refiners,
             1,
             100,
+            0,
             MAINNET_CHAIN_ID,
         );
         assert!(
@@ -1132,6 +1198,7 @@ mod tests {
             &mut refiners,
             1,
             100,
+            0,
             MAINNET_CHAIN_ID,
         );
         assert!(!result.success, "Empty public_key must be rejected");
@@ -1165,6 +1232,7 @@ mod tests {
             &mut refiners,
             1,
             100,
+            0,
             wrong_chain_id,
         );
         assert!(

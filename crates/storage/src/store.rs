@@ -801,7 +801,7 @@ mod tests {
         let mut refiners = RefinerSet::new();
         let id = opolys_crypto::hash_to_object_id(b"refiner1");
         refiners
-            .bond(id.clone(), opolys_core::MIN_BOND_STAKE, 0, 0)
+            .bond(id.clone(), opolys_core::MIN_BOND_STAKE, 0, 0, 0)
             .unwrap();
 
         store.save_refiners(&refiners).unwrap();
@@ -846,7 +846,7 @@ mod tests {
         let mut refiners = RefinerSet::new();
         let refiner_id = opolys_crypto::hash_to_object_id(b"atomic-refiner");
         refiners
-            .bond(refiner_id.clone(), opolys_core::MIN_BOND_STAKE, 0, 0)
+            .bond(refiner_id.clone(), opolys_core::MIN_BOND_STAKE, 0, 0, 0)
             .unwrap();
 
         let state = PersistedChainState {
@@ -991,7 +991,7 @@ mod tests {
         let mut refiners = RefinerSet::new();
         let id = opolys_crypto::hash_to_object_id(b"refiner1");
         refiners
-            .bond(id, opolys_core::MIN_BOND_STAKE, 0, 0)
+            .bond(id, opolys_core::MIN_BOND_STAKE, 0, 0, 0)
             .unwrap();
         store.save_refiners(&refiners).unwrap();
 

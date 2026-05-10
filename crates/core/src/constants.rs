@@ -129,11 +129,12 @@ pub const BLOCK_TARGET_TIME_MS: u64 = 90_000;
 /// Use BLOCK_TARGET_TIME_MS for precise calculations.
 pub const BLOCK_TARGET_TIME_SECS: u64 = 90;
 
-/// Minimum stake (in Flakes) required for a **new** bond entry (1 OPL).
+/// Minimum floor (in Flakes) required for a **new** bond entry (1 OPL).
 ///
-/// The natural unit — no arbitrary cap. FIFO unbonding consumes the oldest
-/// entries first, and residuals from split entries require no minimum.
-/// Only brand-new bond entries enforce this 1 OPL floor.
+/// The consensus minimum bond is dynamic:
+/// `max(MIN_BOND_STAKE, sqrt(total_issued_opl) * FLAKES_PER_OPL)`.
+/// FIFO unbonding consumes the oldest entries first, and residuals from split
+/// entries require no minimum. Only brand-new bond entries enforce the floor.
 pub const MIN_BOND_STAKE: u64 = FLAKES_PER_OPL;
 
 // Active refiner limit is derived in consensus from issued supply:

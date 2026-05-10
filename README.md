@@ -423,6 +423,14 @@ Like depositing gold in a vault — you lock it up, it earns seniority, and you 
 2. **Unbond**: `RefinerUnbond { amount }` — Withdraw OPL using FIFO order (oldest first)
 3. **Slash**: Only for double-signing. All entries' stakes are **burned** (not confiscated). This is the only slashing condition
 
+### Minimum Bond
+
+```text
+minimum_bond = max(1 OPL, sqrt(total_issued_opl))
+```
+
+The minimum applies only to new bond entries. At launch, the floor is 1 OPL. At 1,000,000 issued OPL, the minimum is 1,000 OPL. At 25,000,000 issued OPL, the minimum is 5,000 OPL. Residual entries created by FIFO unbond splitting keep their stake and seniority.
+
 ### Per-Entry Weight (Seniority)
 
 ```
@@ -449,7 +457,7 @@ Newly bonded refiners start in `Bonding` status. They activate to `Active` after
 - **Active limit**: `EPOCH + sqrt(total_issued_opl)`, derived from chain state
 - **Launch limit**: 960 active refiners when issued supply is zero
 - **Growth example**: 5,960 active refiners at 25,000,000 issued OPL
-- New refiners bond successfully and queue fairly; no `RefinerBond` is ever rejected
+- Valid bonds queue fairly even when the active set is full; bonds below the dynamic minimum are rejected
 
 ### Block Producer Selection
 
@@ -501,7 +509,7 @@ After each block, `compute_state_root()` computes `Blake3-256(sorted Borsh-seria
 | Action | Description |
 |---|---|
 | `Transfer { recipient, amount }` | Move OPL from sender to recipient; fee is burned |
-| `RefinerBond { amount }` | Lock OPL as refiner stake (new entry or top-up, min 1 OPL per new entry) |
+| `RefinerBond { amount }` | Lock OPL as refiner stake (new entry or top-up, dynamic minimum per new entry) |
 | `RefinerUnbond { amount }` | Withdraw OPL using FIFO order; fee is burned; 960-block delay |
 
 ### Transaction Structure
@@ -717,13 +725,14 @@ Every block applied to the chain must pass these checks:
 | `EPOCH` | 960 blocks | Unified epoch for retarget, dataset regen, unbonding (= exactly 24 hours) |
 | `UNBONDING_DELAY_BLOCKS` | 960 | One epoch delay for unbonding |
 | `MIN_FEE` | 1 Flake | Floor for market-driven fees |
-| `MIN_BOND_STAKE` | 1,000,000 Flakes (1 OPL) | Minimum per new bond entry |
+| `MIN_BOND_STAKE` | 1,000,000 Flakes (1 OPL) | Floor for dynamic minimum bond |
 | `BLOCK_VERSION` | 2 | Current protocol version |
 | `SIGNATURE_TYPE_ED25519` | 0 | ed25519 signature type |
 | `EXTENSION_TYPE_NONE` | 0 | No extension data |
 | `EXTENSION_TYPE_ROLLUP` | 1 | Rollup data (reserved) |
 | `BLOCK_TARGET_TIME_MS` | 90,000 | 90 seconds per block |
 | `BLOCK_TARGET_TIME_SECS` | 90 | 90 seconds per block |
+| Minimum bond | `max(1 OPL, sqrt(total_issued_opl))` | Dynamic new bond entry floor |
 | Active refiner limit | `EPOCH + sqrt(total_issued_opl)` | Dynamic active refiner set bound |
 | `NETWORK_PROTOCOL_VERSION` | `"1.0.0"` | Protocol identifier |
 | `DEFAULT_LISTEN_PORT` | 4170 | P2P listen port |
