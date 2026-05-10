@@ -166,7 +166,7 @@ A transaction replacing another with the same nonce must pay at least 10% more: 
 |---|---|---|
 | **Refiner Attestations** | ed25519 per-block signatures | Block confidence and attestation weight |
 | **Signature Aggregation** | BLS12-381 | Efficient attestation aggregation (Pass 3+) |
-| **Block Producer Selection** | Previous-block hash seed | Equal-chance deterministic refiner selection |
+| **Block Producer Selection** | Previous-block hash seed | Stake-weighted deterministic refiner selection |
 | **Privacy (L1)** | Stealth addresses | Receiver privacy via one-time addresses |
 | **Privacy (L2)** | Viewing keys | Selective transaction visibility |
 | **ZK Foundation** | Poseidon hash | ZK-friendly hash for future SNARKs/STARKs |
@@ -356,7 +356,13 @@ Genesis block (height 0) has zero reward: `block_reward = 0`.
 
 ### Block Producer Selection
 
-Equal-chance sampling from active refiners. The seed is derived from the first 8 bytes of the previous block hash (`prev_block_hash[0..8]` as `u64`), making selection deterministic and verifiable. Stake and seniority affect refiner rewards, not refiner block-production tickets.
+Stake-weighted sampling from active refiners. The seed is derived from the first 8 bytes of the previous block hash (`prev_block_hash[0..8]` as `u64`), making selection deterministic and verifiable.
+
+```text
+chance_to_produce = refiner_total_stake / total_active_stake
+```
+
+Seniority does not affect producer selection; it only affects refiner reward distribution. This gives larger bonded refiners some production advantage without making older refiners permanently dominate block production. Linear stake weighting is split-neutral: one 10,000 OPL refiner and ten 1,000 OPL refiners have the same aggregate producer weight.
 
 ### Minimum Bond
 

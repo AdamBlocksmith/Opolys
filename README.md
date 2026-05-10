@@ -280,7 +280,7 @@ Account addresses are **Blake3-256 hashes of ed25519 public keys** — not the p
 | Layer | Algorithm | Purpose |
 |---|---|---|
 | **Refiner Signatures** | ed25519 | Per-block refiner signatures and attestations |
-| **Block Producer Selection** | Previous-block hash seed | Equal-chance deterministic refiner selection |
+| **Block Producer Selection** | Previous-block hash seed | Stake-weighted deterministic refiner selection |
 | **Privacy (L1)** | Stealth addresses | Receiver privacy via one-time derived addresses |
 | **Privacy (L2)** | Viewing keys | Selective transaction disclosure |
 | **ZK Foundation** | Poseidon hash | ZK-friendly hash for future SNARKs/STARKs |
@@ -461,7 +461,13 @@ Newly bonded refiners start in `Bonding` status. They activate to `Active` after
 
 ### Block Producer Selection
 
-A deterministic seed derived from the previous block hash selects the refiner block producer after the chain stalls. Each active refiner gets one equal operational ticket, and any node can verify the selection with no trust required.
+A deterministic seed derived from the previous block hash selects the refiner block producer after the chain stalls. Selection is weighted by active bonded stake:
+
+```text
+chance_to_produce = refiner_total_stake / total_active_stake
+```
+
+Seniority does not affect producer selection; it only affects refiner reward distribution. This gives larger bonded refiners some production advantage while staying split-neutral: splitting one stake across many accounts does not create more aggregate producer weight.
 
 ---
 

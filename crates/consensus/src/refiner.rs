@@ -23,9 +23,9 @@
 //! all entries is burned (not confiscated to any treasury), permanently
 //! removing it from circulation.
 //!
-//! Block producers are selected by equal-chance sampling among Active refiners,
-//! where the seed is derived from on-chain entropy. There are no rounds and no
-//! schedules: every Active refiner gets one operational production ticket.
+//! Block producers are selected by total-stake-weighted sampling among Active
+//! refiners, where the seed is derived from on-chain entropy. Seniority does
+//! not affect producer selection; it only affects refiner reward distribution.
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use opolys_core::{
@@ -86,7 +86,7 @@ fn mix_seed(seed: u64) -> u64 {
     z ^ (z >> 31)
 }
 
-fn uniform_index_from_seed(seed: u64, upper: usize) -> Option<usize> {
+fn uniform_amount_from_seed(seed: u64, upper: FlakeAmount) -> Option<FlakeAmount> {
     if upper == 0 {
         return None;
     }
@@ -99,7 +99,7 @@ fn uniform_index_from_seed(seed: u64, upper: usize) -> Option<usize> {
     loop {
         let value = candidate as u128;
         if value < unbiased_zone {
-            return Some((value % upper) as usize);
+            return Some((value % upper) as FlakeAmount);
         }
         candidate = mix_seed(candidate);
     }
@@ -280,7 +280,7 @@ impl RefinerInfo {
 }
 
 /// The set of all bonded refiners, supporting bonding, unbonding,
-/// activating, slashing, and equal-chance block-producer selection.
+/// activating, slashing, and stake-weighted block-producer selection.
 ///
 /// Only **double-signing** triggers slashing in Opolys — no other offense
 /// results in stake removal. Slashed stake is burned (removed from supply),
@@ -803,10 +803,11 @@ impl RefinerSet {
         Ok(hasher.finalize())
     }
 
-    /// Select the next block producer via equal-chance sampling.
+    /// Select the next block producer via total-stake-weighted sampling.
     ///
-    /// Reward distribution is still weighted by stake and seniority, but
-    /// producer selection gives each Active refiner one operational ticket.
+    /// Seniority affects reward distribution, not producer selection. This
+    /// keeps production split-neutral: splitting one stake across many accounts
+    /// does not create more aggregate producer weight.
     /// The `seed` parameter provides on-chain entropy to make the selection
     /// deterministic and verifiable. Returns `None` if there are no active
     /// refiners.
@@ -815,11 +816,22 @@ impl RefinerSet {
             .active_set
             .iter()
             .filter_map(|id| self.cached_refiners.get(id))
+            .filter(|v| v.total_stake() > 0)
             .collect();
         active.sort_by_key(|v| v.object_id.0.0);
 
-        let index = uniform_index_from_seed(seed, active.len())?;
-        active.get(index).copied()
+        let total_active_stake = active.iter().fold(0u64, |acc, refiner| {
+            acc.saturating_add(refiner.total_stake())
+        });
+        let ticket = uniform_amount_from_seed(seed, total_active_stake)?;
+        let mut cumulative = 0u64;
+        for refiner in active {
+            cumulative = cumulative.saturating_add(refiner.total_stake());
+            if ticket < cumulative {
+                return Some(refiner);
+            }
+        }
+        None
     }
 }
 
@@ -1196,7 +1208,7 @@ mod tests {
     }
 
     #[test]
-    fn select_block_producer_is_equal_chance_not_stake_weighted() {
+    fn select_block_producer_is_total_stake_weighted() {
         let mut vs = RefinerSet::new();
         let low_stake = test_id(b"low-stake-refiner");
         let high_stake = test_id(b"high-stake-refiner");
@@ -1206,11 +1218,21 @@ mod tests {
         vs.activate(&low_stake, 1).unwrap();
         vs.activate(&high_stake, 1).unwrap();
 
-        let mut sorted = [low_stake.clone(), high_stake.clone()];
-        sorted.sort_by_key(|id| id.0.0);
+        let mut low_count = 0;
+        let mut high_count = 0;
+        for seed in 0..10_000 {
+            let producer = vs.select_block_producer(mix_seed(seed)).unwrap();
+            if producer.object_id == low_stake {
+                low_count += 1;
+            } else if producer.object_id == high_stake {
+                high_count += 1;
+            }
+        }
 
-        assert_eq!(vs.select_block_producer(0).unwrap().object_id, sorted[0]);
-        assert_eq!(vs.select_block_producer(1).unwrap().object_id, sorted[1]);
+        assert!(
+            high_count > low_count * 20,
+            "100x stake should dominate producer selection without seniority; low={low_count}, high={high_count}"
+        );
     }
 
     #[test]
@@ -1335,7 +1357,7 @@ mod tests {
 
         // Phase 4: Block producer selection — deterministic via seed
         let producer = vs.select_block_producer(42).unwrap();
-        // Producer selection is equal-chance among active refiners; stake
+        // Producer selection is stake-weighted among active refiners; seniority
         // affects rewards, not operational production tickets.
         assert!(
             producer.object_id == alice
