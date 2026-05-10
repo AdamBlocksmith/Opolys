@@ -288,8 +288,8 @@ impl RefinerInfo {
 ///
 /// Supports a dynamic active set derived from issued supply:
 /// `active_limit = EPOCH + sqrt(total_issued_opl)`.
-/// Refiners outside the active limit by weight sit in Waiting status.
-/// rerank_refiners() at epoch boundaries promotes/demotes as weights shift.
+/// Refiners outside the active limit by total stake sit in Waiting status.
+/// rerank_refiners() at epoch boundaries promotes/demotes as stake changes.
 #[derive(Debug)]
 pub struct RefinerSet {
     /// In-memory refiner set. All refiners stay resident because totals,
@@ -471,9 +471,9 @@ impl RefinerSet {
     /// Activate all refiners that have been bonding for at least one full epoch.
     ///
     /// Moves Bonding → Waiting. rerank_refiners() handles the Waiting → Active
-    /// promotion (top-N by weight). This separation allows fair competition for
+    /// promotion (top-N by stake). This separation allows fair competition for
     /// active slots: all epoch-matured refiners become eligible, then the highest-
-    /// weight ones are promoted.
+    /// stake ones are promoted.
     pub fn activate_matured_refiners(&mut self, current_height: u64) -> Vec<ObjectId> {
         let mut newly_waiting = Vec::new();
 
@@ -517,7 +517,7 @@ impl RefinerSet {
 
     /// Re-rank all eligible refiners at an epoch boundary.
     ///
-    /// Collects all non-Slashed refiners with stake > 0, sorts by total_weight()
+    /// Collects all non-Slashed refiners with stake > 0, sorts by total stake
     /// descending, promotes the top active_refiner_limit(total_issued) to Active,
     /// and demotes the rest to Waiting. Returns (newly_activated, newly_demoted)
     /// for logging.
@@ -526,17 +526,18 @@ impl RefinerSet {
     /// activate_matured_refiners().
     pub fn rerank_refiners(
         &mut self,
-        current_timestamp: u64,
+        _current_timestamp: u64,
         total_issued_flakes: FlakeAmount,
     ) -> (Vec<ObjectId>, Vec<ObjectId>) {
         let active_limit = Self::active_refiner_limit(total_issued_flakes);
 
-        // Sort all eligible refiners by weight descending
+        // Sort all eligible refiners by stake descending. Seniority affects
+        // rewards and finality weight, not active-set admission.
         let mut eligible: Vec<(ObjectId, u64)> = self
             .cached_refiners
             .iter()
             .filter(|(_, v)| v.status != RefinerStatus::Slashed && v.total_stake() > 0)
-            .map(|(id, v)| (id.clone(), v.weight(current_timestamp)))
+            .map(|(id, v)| (id.clone(), v.total_stake()))
             .collect();
         eligible.sort_by(|(a_id, a_weight), (b_id, b_weight)| {
             b_weight.cmp(a_weight).then_with(|| a_id.0.0.cmp(&b_id.0.0))
@@ -1123,6 +1124,35 @@ mod tests {
         assert!(activated2.is_empty());
         assert!(demoted2.is_empty());
         assert_eq!(vs.total_active_refiners(), active_limit);
+    }
+
+    #[test]
+    fn rerank_refiners_uses_stake_not_seniority_weight() {
+        let mut vs = RefinerSet::new();
+        let active_limit = RefinerSet::active_refiner_limit(0);
+        let old_small = test_id(b"old-small-refiner");
+        let fresh_large = test_id(b"fresh-large-refiner");
+
+        vs.bond(old_small.clone(), MIN_BOND_STAKE, 0, 0, 0).unwrap();
+        vs.bond(fresh_large.clone(), MIN_BOND_STAKE * 2, 0, 31_557_600, 0)
+            .unwrap();
+
+        for i in 0..(active_limit - 1) {
+            let id = test_id(format!("large-filler-{i}").as_bytes());
+            vs.bond(id, MIN_BOND_STAKE * 2, 0, 31_557_600, 0).unwrap();
+        }
+
+        vs.activate_matured_refiners(EPOCH);
+        vs.rerank_refiners(31_557_600, 0);
+
+        assert_eq!(
+            vs.get_refiner(&old_small).unwrap().status,
+            RefinerStatus::Waiting
+        );
+        assert_eq!(
+            vs.get_refiner(&fresh_large).unwrap().status,
+            RefinerStatus::Active
+        );
     }
 
     #[test]

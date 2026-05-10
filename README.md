@@ -19,7 +19,7 @@ Opolys encodes these properties directly into consensus:
 | **Gold ore varies in richness** | Vein yield: `1 + ln(target / hash_int)` | A lucky gold strike yields more than a poor one. Vein yield models this: most blocks earn ~2x base reward, exceptional ones earn more. The math is natural, not scheduled. |
 | **Gold production rate is known** | BASE_REWARD derived from world gold production via genesis ceremony | 3,630 tonnes of gold are mined annually (~116.7 million troy ounces). Divided by 350,640 blocks per year = 332 OPL per block at minimum difficulty. BASE_REWARD is set from live LBMA/USGS/WGC data at the genesis ceremony. |
 | **Gold must be refined before use** | Difficulty must be overcome to earn reward | You can't just claim gold exists — you have to prove you did the work. EVO-OMAP requires a valid proof-of-work with at least D leading zero bits. |
-| **Gold held in vaults earns trust** | Refiner staking with seniority | Bonded OPL gives refiners block production rights when the chain stalls. Senior refiners earn slightly more weight logarithmically, just as trusted vaults command higher fees. But the marginal bonus shrinks over time — no permanent aristocracy. |
+| **Gold held in vaults earns trust** | Refiner staking with seniority | Bonded OPL gives refiners block production rights when the chain stalls. Senior refiners earn slightly more reward weight logarithmically, just as trusted vaults command higher fees. But the marginal bonus shrinks over time — no permanent aristocracy. |
 | **Gold can be unvaulted** | FIFO unbonding with 1-epoch delay | Unbonding OPL is like withdrawing gold from a vault. It takes time (960 blocks = exactly 24 hours). During the delay, you still earn rewards. The oldest deposits are withdrawn first. |
 | **Gold bars are uniform** | Every OPL is identical. One sub-unit (Flake). No tokens, no assets, no governance tokens | There's no "pennyweight" gold or "grain" gold in Opolys. 1 OPL = 1,000,000 Flakes. Period. The chain tracks one asset. |
 | **Gold supply is self-regulating** | Natural equilibrium — no governance needed | When fees are burned faster than rewards are issued, supply shrinks. When mining is too easy, difficulty rises and issuance drops. The protocol never needs a vote. |
@@ -294,7 +294,7 @@ Opolys uses **hybrid miner/refiner consensus** with a smooth, continuous reward 
 ### How It Works
 
 1. **Miners compete** to find EVO-OMAP proof-of-work solutions (like physical gold miners)
-2. **Refiners bond stake** and earn the right to produce stalled-chain blocks proportional to bonded weight (like gold vaults earning trust)
+2. **Refiners bond stake** and earn the right to produce stalled-chain blocks proportional to active bonded stake (like gold vaults earning trust)
 3. **Stake coverage** (`bonded_stake / total_issued`) continuously shifts the base reward from miners to refiners
 4. At 0% coverage, the base reward goes to miners. At 100% coverage, the base reward goes to refiners. Miner vein bonuses always stay with miners. The split is smooth and mathematical — no vote needed
 
@@ -457,6 +457,7 @@ Newly bonded refiners start in `Bonding` status. They activate to `Active` after
 - **Active limit**: `EPOCH + sqrt(total_issued_opl)`, derived from chain state
 - **Launch limit**: 960 active refiners when issued supply is zero
 - **Growth example**: 5,960 active refiners at 25,000,000 issued OPL
+- **Admission ranking**: highest total-stake refiners are Active; seniority does not affect active-set admission
 - Valid bonds queue fairly even when the active set is full; bonds below the dynamic minimum are rejected
 
 ### Block Producer Selection

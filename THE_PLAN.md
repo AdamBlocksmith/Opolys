@@ -389,7 +389,7 @@ Newly bonded refiners start in `Bonding` status. They activate to `Active` once 
 **Active refiner limit: `EPOCH + sqrt(total_issued_opl)`**
 - The active set bound is derived from chain state, not a fixed cap.
 - New refiners bond successfully and wait in `Bonding` status.
-- If the active set is full, the highest-weight refiners are Active and the rest are Waiting.
+- If the active set is full, the highest total-stake refiners are Active and the rest are Waiting.
 - At launch with zero issued supply, the limit is 960. At 25,000,000 issued OPL, it is 5,960.
 - A valid `RefinerBond` transaction is never rejected because the active set is full; it is queued fairly. Bonds below the dynamic minimum are rejected.
 
