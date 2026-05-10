@@ -445,10 +445,11 @@ After unbonding, stake enters the **unbonding queue** for `UNBONDING_DELAY_BLOCK
 
 Newly bonded refiners start in `Bonding` status. They activate to `Active` after their earliest bond entry has been confirmed for at least one full epoch (960 blocks). Only `Active` refiners are eligible for stalled-chain block production.
 
-**Refiner caps:**
-- **Active set**: 5,000 refiners maximum (can be raised via protocol upgrade)
-- **Total registered**: up to 524,288 refiners can be in `Bonding`/`Waiting` status
-- New refiners bond successfully and queue fairly — no `RefinerBond` is ever rejected
+**Refiner active set:**
+- **Active limit**: `EPOCH + sqrt(total_issued_opl)`, derived from chain state
+- **Launch limit**: 960 active refiners when issued supply is zero
+- **Growth example**: 5,960 active refiners at 25,000,000 issued OPL
+- New refiners bond successfully and queue fairly; no `RefinerBond` is ever rejected
 
 ### Block Producer Selection
 
@@ -723,7 +724,7 @@ Every block applied to the chain must pass these checks:
 | `EXTENSION_TYPE_ROLLUP` | 1 | Rollup data (reserved) |
 | `BLOCK_TARGET_TIME_MS` | 90,000 | 90 seconds per block |
 | `BLOCK_TARGET_TIME_SECS` | 90 | 90 seconds per block |
-| `MAX_ACTIVE_REFINERS` | 5,000 | Active refiner set cap |
+| Active refiner limit | `EPOCH + sqrt(total_issued_opl)` | Dynamic active refiner set bound |
 | `NETWORK_PROTOCOL_VERSION` | `"1.0.0"` | Protocol identifier |
 | `DEFAULT_LISTEN_PORT` | 4170 | P2P listen port |
 | `MAX_TRANSACTIONS_PER_BLOCK` | 10,000 | Max transactions per block |

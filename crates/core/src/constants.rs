@@ -136,16 +136,14 @@ pub const BLOCK_TARGET_TIME_SECS: u64 = 90;
 /// Only brand-new bond entries enforce this 1 OPL floor.
 pub const MIN_BOND_STAKE: u64 = FLAKES_PER_OPL;
 
-/// Maximum number of simultaneously active refiners.
-///
-/// Prevents unbounded O(n) per-block computation and disk writes.
-/// Refiners that bond when the cap is full wait in `Bonding` status
-/// until a slot opens (via unbond or slash). No `RefinerBond` transaction
-/// is ever rejected — all refiners are queued fairly.
-///
-/// Can be raised via protocol upgrade.
-/// Future upgrade path: soft-cap by weight (top-N by stake × seniority).
-pub const MAX_ACTIVE_REFINERS: usize = 5_000;
+// Active refiner limit is derived in consensus from issued supply:
+// `EPOCH + sqrt(total_issued_opl)`.
+//
+// This prevents unbounded O(n) per-block computation while allowing the active
+// refining network to grow organically with the OPL economy.
+// Refiners that bond when the active set is full wait in `Bonding` status
+// until a slot opens (via unbond or slash). No `RefinerBond` transaction is
+// ever rejected; all refiners are queued fairly.
 
 /// Block header version number. Incremented for protocol upgrades.
 /// Version 2 commits slash evidence, attestations, and genesis ceremony data

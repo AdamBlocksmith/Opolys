@@ -2116,11 +2116,14 @@ impl OpolysNode {
         // and apply stake decay (gold vault storage fee: ~1.5%/year)
         if chain.current_height > 0 && chain.current_height % EPOCH == 0 {
             let current_ts = chain.block_timestamps.last().copied().unwrap_or(0);
-            let (newly_activated, newly_demoted) = refiners.rerank_refiners(current_ts);
+            let active_refiner_limit = RefinerSet::active_refiner_limit(chain.total_issued);
+            let (newly_activated, newly_demoted) =
+                refiners.rerank_refiners(current_ts, chain.total_issued);
             if !newly_activated.is_empty() || !newly_demoted.is_empty() {
                 tracing::info!(
                     activated = newly_activated.len(),
                     demoted = newly_demoted.len(),
+                    active_refiner_limit,
                     height = chain.current_height,
                     "Refiner set reranked at epoch boundary"
                 );

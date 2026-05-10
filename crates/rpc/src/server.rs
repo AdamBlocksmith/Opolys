@@ -53,8 +53,7 @@ use opolys_consensus::mempool::Mempool;
 use opolys_consensus::refiner::RefinerSet;
 use opolys_core::{
     Block, BlockAttestation, EPOCH, FLAKES_PER_OPL, FlakeAmount, Hash, MAINNET_CHAIN_ID,
-    MAX_ACTIVE_REFINERS, MAX_BLOCK_SIZE_BYTES, ObjectId, RefinerStatus, TX_MAX_SIZE_BYTES,
-    Transaction,
+    MAX_BLOCK_SIZE_BYTES, ObjectId, RefinerStatus, TX_MAX_SIZE_BYTES, Transaction,
 };
 use opolys_execution::verify_transaction;
 use opolys_storage::BlockchainStore;
@@ -387,7 +386,7 @@ async fn handle_get_chain_info(state: &RpcState) -> Result<serde_json::Value, Js
         active_refiners: refiners.total_active_refiners(),
         bonding_refiners: refiners.total_bonding_refiners(),
         waiting_refiners: refiners.total_waiting_refiners(),
-        max_active_refiners: MAX_ACTIVE_REFINERS,
+        max_active_refiners: RefinerSet::active_refiner_limit(chain.total_issued),
         bonded_stake: refiners.total_bonded_stake(),
         protocol_version: opolys_core::NETWORK_PROTOCOL_VERSION.to_string(),
         finalized_height: chain.finalized_height,
@@ -1147,7 +1146,7 @@ pub struct ChainInfoResponse {
     pub bonding_refiners: usize,
     /// Refiners in Waiting status — eligible but outside the top-N active set by weight.
     pub waiting_refiners: usize,
-    /// Protocol cap on simultaneously Active refiners.
+    /// Dynamic protocol bound on simultaneously Active refiners.
     pub max_active_refiners: usize,
     pub bonded_stake: u64,
     pub protocol_version: String,

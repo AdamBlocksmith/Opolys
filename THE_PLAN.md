@@ -91,7 +91,7 @@ From `crates/core/src/constants.rs`:
 | `EXTENSION_TYPE_ROLLUP` | `1` | Rollup data (reserved) |
 | `BLOCK_TARGET_TIME_MS` | `90,000` | 90 seconds per block |
 | `BLOCK_TARGET_TIME_SECS` | `90` | 90 seconds per block |
-| `MAX_ACTIVE_REFINERS` | `5,000` | Active refiner set cap |
+| Active refiner limit | `EPOCH + sqrt(total_issued_opl)` | Dynamic active refiner set bound |
 | `NETWORK_PROTOCOL_VERSION` | `"1.0.0"` | Protocol version string |
 | `DEFAULT_LISTEN_PORT` | `4,170` | P2P listen port |
 | `MAINNET_CHAIN_ID` | `1` | Cross-chain replay protection |
@@ -366,11 +366,12 @@ New bond entries require at least `MIN_BOND_STAKE` (1 OPL). Residuals from FIFO 
 
 Newly bonded refiners start in `Bonding` status. They activate to `Active` once their earliest bond entry has been confirmed for at least one full epoch (960 blocks) and the active set has a free slot. Checked every block via `activate_matured_refiners()` in `apply_block`.
 
-**Maximum active refiners: 5,000 (launch cap)**
-- `MAX_ACTIVE_REFINERS = 5,000` in `constants.rs`
-- New refiners bond successfully and wait in `Bonding` status
-- Promoted when a slot opens (via unbond or slash)
-- No `RefinerBond` transaction is ever rejected — all are queued fairly
+**Active refiner limit: `EPOCH + sqrt(total_issued_opl)`**
+- The active set bound is derived from chain state, not a fixed cap.
+- New refiners bond successfully and wait in `Bonding` status.
+- If the active set is full, the highest-weight refiners are Active and the rest are Waiting.
+- At launch with zero issued supply, the limit is 960. At 25,000,000 issued OPL, it is 5,960.
+- No `RefinerBond` transaction is ever rejected; all are queued fairly.
 
 ### Attestations (Pass 2)
 

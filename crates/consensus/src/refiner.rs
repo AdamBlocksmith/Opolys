@@ -29,12 +29,36 @@
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use opolys_core::{
-    ANNUAL_ATTRITION_PERMILLE, EPOCH, FlakeAmount, MAX_ACTIVE_REFINERS, MIN_BOND_STAKE, ObjectId,
+    ANNUAL_ATTRITION_PERMILLE, EPOCH, FLAKES_PER_OPL, FlakeAmount, MIN_BOND_STAKE, ObjectId,
     OpolysError, RefinerStatus,
 };
 use opolys_crypto::{Blake3Hasher, DOMAIN_STATE_ROOT};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+
+fn integer_sqrt_floor(n: u128) -> u128 {
+    if n < 2 {
+        return n;
+    }
+
+    let bit_len = 128 - n.leading_zeros() as u128;
+    let mut left = 1u128;
+    let mut right = 1u128 << bit_len.div_ceil(2);
+    let mut result = 1u128;
+
+    while left <= right {
+        let mid = (left + right) / 2;
+        let square = mid.saturating_mul(mid);
+        if square <= n {
+            result = mid;
+            left = mid + 1;
+        } else {
+            right = mid - 1;
+        }
+    }
+
+    result
+}
 
 /// A pending unbonding entry that matures after a delay of EPOCH blocks.
 ///
@@ -236,8 +260,9 @@ impl RefinerInfo {
 /// results in stake removal. Slashed stake is burned (removed from supply),
 /// not sent to any entity.
 ///
-/// Supports up to 524,288 total refiners with a 5,000-slot active set.
-/// Refiners outside the top-5,000 by weight sit in Waiting status.
+/// Supports a dynamic active set derived from issued supply:
+/// `active_limit = EPOCH + sqrt(total_issued_opl)`.
+/// Refiners outside the active limit by weight sit in Waiting status.
 /// rerank_refiners() at epoch boundaries promotes/demotes as weights shift.
 #[derive(Debug)]
 pub struct RefinerSet {
@@ -432,15 +457,36 @@ impl RefinerSet {
         newly_waiting
     }
 
+    /// Compute the active-refiner limit from issued supply.
+    ///
+    /// `active_limit = EPOCH + sqrt(total_issued_opl)`, where
+    /// `total_issued_opl = total_issued_flakes / FLAKES_PER_OPL`.
+    ///
+    /// This keeps refiner processing bounded at launch while letting the active
+    /// set grow organically as the OPL economy grows.
+    pub fn active_refiner_limit(total_issued_flakes: FlakeAmount) -> usize {
+        let total_issued_opl = total_issued_flakes / FLAKES_PER_OPL;
+        let sqrt_issued = integer_sqrt_floor(total_issued_opl as u128);
+        let limit = (EPOCH as u128).saturating_add(sqrt_issued);
+        limit.min(usize::MAX as u128) as usize
+    }
+
     /// Re-rank all eligible refiners at an epoch boundary.
     ///
     /// Collects all non-Slashed refiners with stake > 0, sorts by total_weight()
-    /// descending, promotes the top MAX_ACTIVE_REFINERS to Active, and demotes the
-    /// rest to Waiting. Returns (newly_activated, newly_demoted) for logging.
+    /// descending, promotes the top active_refiner_limit(total_issued) to Active,
+    /// and demotes the rest to Waiting. Returns (newly_activated, newly_demoted)
+    /// for logging.
     ///
     /// Must be called at epoch boundaries (height % EPOCH == 0) after
     /// activate_matured_refiners().
-    pub fn rerank_refiners(&mut self, current_timestamp: u64) -> (Vec<ObjectId>, Vec<ObjectId>) {
+    pub fn rerank_refiners(
+        &mut self,
+        current_timestamp: u64,
+        total_issued_flakes: FlakeAmount,
+    ) -> (Vec<ObjectId>, Vec<ObjectId>) {
+        let active_limit = Self::active_refiner_limit(total_issued_flakes);
+
         // Sort all eligible refiners by weight descending
         let mut eligible: Vec<(ObjectId, u64)> = self
             .cached_refiners
@@ -457,7 +503,7 @@ impl RefinerSet {
 
         for (i, (id, _)) in eligible.iter().enumerate() {
             if let Some(v) = self.cached_refiners.get_mut(id) {
-                if i < MAX_ACTIVE_REFINERS {
+                if i < active_limit {
                     if v.status == RefinerStatus::Waiting {
                         v.status = RefinerStatus::Active;
                         self.active_set.push(id.clone());
@@ -786,6 +832,19 @@ mod tests {
     }
 
     #[test]
+    fn active_refiner_limit_grows_with_issued_supply() {
+        assert_eq!(RefinerSet::active_refiner_limit(0), EPOCH as usize);
+        assert_eq!(
+            RefinerSet::active_refiner_limit(1_000_000 * FLAKES_PER_OPL),
+            EPOCH as usize + 1_000
+        );
+        assert_eq!(
+            RefinerSet::active_refiner_limit(25_000_000 * FLAKES_PER_OPL),
+            EPOCH as usize + 5_000
+        );
+    }
+
+    #[test]
     fn rerank_refiners_ties_break_by_object_id() {
         let mut vs = RefinerSet::new();
         let ids = [
@@ -798,7 +857,7 @@ mod tests {
             vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0).unwrap();
         }
         vs.activate_matured_refiners(EPOCH);
-        vs.rerank_refiners(0);
+        vs.rerank_refiners(0, 0);
 
         let mut expected = ids.to_vec();
         expected.sort_by_key(|id| id.0.0);
@@ -967,21 +1026,22 @@ mod tests {
         assert_eq!(vs.get_refiner(&id).unwrap().status, RefinerStatus::Waiting);
 
         // rerank promotes to Active (only 1 refiner, so it takes the slot)
-        let (activated, demoted) = vs.rerank_refiners(0);
+        let (activated, demoted) = vs.rerank_refiners(0, 0);
         assert_eq!(activated.len(), 1);
         assert!(demoted.is_empty());
         assert_eq!(vs.get_refiner(&id).unwrap().status, RefinerStatus::Active);
     }
 
     #[test]
-    fn refiner_cap_holds_excess_in_waiting() {
-        // Bond MAX_ACTIVE_REFINERS + 2 refiners. After activate_matured_refiners
-        // all move to Waiting. After rerank_refiners, exactly MAX_ACTIVE_REFINERS
+    fn dynamic_refiner_limit_holds_excess_in_waiting() {
+        // Bond active_refiner_limit(0) + 2 refiners. After activate_matured_refiners
+        // all move to Waiting. After rerank_refiners, exactly active_refiner_limit(0)
         // become Active and 2 remain Waiting.
 
         let mut vs = RefinerSet::new();
 
-        let n = MAX_ACTIVE_REFINERS + 2;
+        let active_limit = RefinerSet::active_refiner_limit(0);
+        let n = active_limit + 2;
         let mut ids = Vec::new();
         for i in 0..n {
             let seed = format!("refiner_{}", i);
@@ -998,18 +1058,18 @@ mod tests {
         assert_eq!(vs.total_active_refiners(), 0);
         assert_eq!(vs.total_waiting_refiners(), n);
 
-        // rerank promotes top MAX_ACTIVE_REFINERS to Active
-        let (activated, demoted) = vs.rerank_refiners(0);
-        assert_eq!(activated.len(), MAX_ACTIVE_REFINERS);
+        // rerank promotes top active_limit refiners to Active
+        let (activated, demoted) = vs.rerank_refiners(0, 0);
+        assert_eq!(activated.len(), active_limit);
         assert!(demoted.is_empty());
-        assert_eq!(vs.total_active_refiners(), MAX_ACTIVE_REFINERS);
+        assert_eq!(vs.total_active_refiners(), active_limit);
         assert_eq!(vs.total_waiting_refiners(), 2);
 
         // A second rerank at the same height — no change (cap still full)
-        let (activated2, demoted2) = vs.rerank_refiners(0);
+        let (activated2, demoted2) = vs.rerank_refiners(0, 0);
         assert!(activated2.is_empty());
         assert!(demoted2.is_empty());
-        assert_eq!(vs.total_active_refiners(), MAX_ACTIVE_REFINERS);
+        assert_eq!(vs.total_active_refiners(), active_limit);
     }
 
     #[test]
@@ -1199,7 +1259,7 @@ mod tests {
             RefinerStatus::Waiting
         );
 
-        let (activated, _) = vs.rerank_refiners(0);
+        let (activated, _) = vs.rerank_refiners(0, 0);
         assert_eq!(activated.len(), 3);
         assert_eq!(
             vs.get_refiner(&alice).unwrap().status,
