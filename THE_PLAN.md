@@ -78,7 +78,7 @@ From `crates/core/src/constants.rs`:
 | `FLAKES_PER_OPL` | `1_000_000` | Fundamental unit ratio |
 | `DECIMAL_PLACES` | `6` | Always 6 decimal places |
 | `BASE_REWARD` | `332,000,000` Flakes (332 OPL) | Default block reward (ceremony sets mainnet value; stored in `ChainState`) |
-| `ANNUAL_ATTRITION_PERMILLE` | `15` (1.5%) | Fixed mine/bond/unbond assay rate in permille |
+| `ANNUAL_ATTRITION_PERMILLE` | `15` (1.5%) | Fixed mine assay rate in permille |
 | `BLOCKS_PER_YEAR` | `350,640` | Approximate blocks per year (365.25 × 86400 / 90) |
 | `MIN_DIFFICULTY` | `1` | Mathematical floor (not a cap) |
 | `EPOCH` | `960` blocks (= exactly 24 hours at 90 s/block) | Unified epoch for retarget, dataset regen, unbonding |
@@ -317,8 +317,8 @@ effective_difficulty = max(retarget, consensus_floor, MIN_DIFFICULTY)
 
 ### Bond Lifecycle
 
-1. `RefinerBond { amount }` — Lock `amount` OPL as stake, plus a bond assay of `amount × 0.375%` (permanently burned). Creates a new entry if the refiner already exists (top-up).
-2. `RefinerUnbond { amount }` — Withdraw `amount` OPL using **FIFO order** (see Section 9), plus an unbond assay of `unbonded × 0.375%` (permanently burned). The sender must have sufficient balance to pay both the transaction fee and the unbond assay.
+1. `RefinerBond { amount }` — Lock `amount` OPL as stake, plus a dynamic bond assay (permanently burned). Creates a new entry if the refiner already exists (top-up).
+2. `RefinerUnbond { amount }` — Withdraw `amount` OPL using **FIFO order** (see Section 9), plus a dynamic unbond assay (permanently burned). The sender must have sufficient balance to pay both the transaction fee and the unbond assay.
 3. **Slashing** — Only for double-signing. **100% of stake burned** on any double-sign offense. No graduated penalties, no offense counter, no reset window. Slashed stake is removed from circulation, not confiscated to any treasury.
 
 ### Stake Decay
@@ -450,11 +450,12 @@ Opolys mirrors physical gold attrition through assay burns and system-derived cu
 |---|---|---|---|
 | **Mine assay** | ~1.5%/year of issuance | `block_reward × ANNUAL_ATTRITION_PERMILLE / 1000` | Processing waste |
 | **Stake decay** | System-derived surplus drag | `entry_stake × surplus_stake / total_bonded_stake / BLOCKS_PER_YEAR` | Overstocked vault drag |
-| **Bond assay** | 0.375% of bonded amount | `amount × ANNUAL_ATTRITION_PERMILLE / 4 / 1000` | Assay fee to enter vault |
-| **Unbond assay** | 0.375% of unbonded amount | `amount × ANNUAL_ATTRITION_PERMILLE / 4 / 1000` | Assay fee to exit vault |
+| **Bond assay** | System-derived crowding assay | `amount × sqrt(total_bonded_after / baseline_security_stake) / (DECIMAL_PLACES × sqrt(active_refiner_limit))` | Assay fee to enter a crowded vault |
+| **Unbond assay** | System-derived thinness assay | `amount × sqrt(baseline_security_stake / total_bonded_stake) / (DECIMAL_PLACES × sqrt(active_refiner_limit))` | Assay fee to exit a thin vault |
 
-- Bond assay and unbond assay are each `ANNUAL_ATTRITION_PERMILLE / 4 / 1000 = 0.00375 = 0.375%`
-- Combined (bond + unbond), this is `0.75%` per round trip
+- At baseline, bond/unbond assays land near the old 0.375% behavior, but they now come from system state
+- When the vault is thin, bonding is cheaper and unbonding is more expensive
+- When the vault is crowded, bonding is more expensive and unbonding is cheaper
 - Stake decay is applied once per epoch (960 blocks) only when bonded stake exceeds the derived baseline
 - All attrition is permanently burned — no recipient, no treasury
 
@@ -883,10 +884,11 @@ Four channels permanently burn OPL, mirroring physical gold attrition and custod
 |---|---|---|
 | Mine assay | ~1.5%/yr of issuance | `block_reward × ANNUAL_ATTRITION_PERMILLE / 1000` |
 | Stake decay | System-derived surplus drag | `entry_stake × surplus_stake / total_bonded_stake / BLOCKS_PER_YEAR` |
-| Bond assay | 0.375% of bonded amount | `amount × ANNUAL_ATTRITION_PERMILLE / 4 / 1000` |
-| Unbond assay | 0.375% of unbonded amount | `amount × ANNUAL_ATTRITION_PERMILLE / 4 / 1000` |
+| Bond assay | System-derived crowding assay | `amount × sqrt(total_bonded_after / baseline_security_stake) / (DECIMAL_PLACES × sqrt(active_refiner_limit))` |
+| Unbond assay | System-derived thinness assay | `amount × sqrt(baseline_security_stake / total_bonded_stake) / (DECIMAL_PLACES × sqrt(active_refiner_limit))` |
 
 Where `surplus_stake = max(0, total_bonded_stake - minimum_bond × active_refiner_limit)`.
+Where `baseline_security_stake = minimum_bond × active_refiner_limit`.
 
 ### Same-Nonce Replacement
 
@@ -1068,7 +1070,7 @@ Every bug below includes: **What it is**, **Why it matters**, and **How to fix i
 
 **What it was:** When processing `RefinerUnbond`, the fee burn was conditional: `if account.balance >= fee`. If balance was insufficient, the fee was silently skipped but `ApplyResult::ok(fee)` still reported the fee as burned. Accounts with zero balance could unbond without paying fees.
 
-**How fixed:** (1) Introduced unbond assay (0.375% of unbonded amount) that must be paid from the sender's balance. (2) Pre-check total fees (tx.fee + unbond_assay) before executing the unbond. If insufficient balance, the transaction is rejected entirely with no state change.
+**How fixed:** (1) Introduced a dynamic unbond assay that must be paid from the sender's balance. (2) Pre-check total fees (tx.fee + unbond_assay) before executing the unbond. If insufficient balance, the transaction is rejected entirely with no state change.
 
 ---
 

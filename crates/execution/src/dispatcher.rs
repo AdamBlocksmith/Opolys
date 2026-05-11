@@ -27,8 +27,8 @@
 use opolys_consensus::account::{AccountStore, TransferResult};
 use opolys_consensus::refiner::RefinerSet;
 use opolys_core::{
-    ANNUAL_ATTRITION_PERMILLE, FlakeAmount, MIN_FEE, ObjectId, OpolysError, SIGNATURE_TYPE_ED25519,
-    Transaction, TransactionAction,
+    DECIMAL_PLACES, FLAKES_PER_OPL, FlakeAmount, MIN_FEE, ObjectId, OpolysError,
+    SIGNATURE_TYPE_ED25519, Transaction, TransactionAction,
 };
 use opolys_crypto::{DOMAIN_TX_ID, hash_to_object_id_with_domain, transaction_signing_payload};
 use subtle::ConstantTimeEq;
@@ -83,6 +83,79 @@ struct ExecutionContext {
 pub struct TransactionDispatcher;
 
 impl TransactionDispatcher {
+    fn integer_sqrt_floor(n: u128) -> u128 {
+        if n < 2 {
+            return n;
+        }
+
+        let mut x = n;
+        let mut y = x.div_ceil(2);
+        while y < x {
+            x = y;
+            y = (x + n / x) / 2;
+        }
+        x
+    }
+
+    fn dynamic_assay(
+        amount: FlakeAmount,
+        pressure_numerator: u128,
+        pressure_denominator: u128,
+        active_refiner_limit: usize,
+    ) -> FlakeAmount {
+        if amount == 0 || pressure_numerator == 0 || pressure_denominator == 0 {
+            return 0;
+        }
+
+        let scale = FLAKES_PER_OPL as u128;
+        let sqrt_pressure_scaled = Self::integer_sqrt_floor(
+            pressure_numerator
+                .saturating_mul(scale)
+                .saturating_mul(scale)
+                / pressure_denominator,
+        );
+        let sqrt_active_limit_scaled = Self::integer_sqrt_floor(
+            (active_refiner_limit as u128)
+                .saturating_mul(scale)
+                .saturating_mul(scale),
+        );
+        let denominator = (DECIMAL_PLACES as u128).saturating_mul(sqrt_active_limit_scaled);
+        if denominator == 0 {
+            return 0;
+        }
+
+        ((amount as u128).saturating_mul(sqrt_pressure_scaled) / denominator)
+            .min(FlakeAmount::MAX as u128) as FlakeAmount
+    }
+
+    fn bond_assay(
+        amount: FlakeAmount,
+        refiners: &RefinerSet,
+        total_issued_flakes: FlakeAmount,
+    ) -> FlakeAmount {
+        let active_limit = RefinerSet::active_refiner_limit(total_issued_flakes);
+        let baseline =
+            RefinerSet::minimum_bond_stake(total_issued_flakes) as u128 * active_limit as u128;
+        let bonded_after = refiners.total_bonded_stake().saturating_add(amount) as u128;
+        Self::dynamic_assay(amount, bonded_after, baseline, active_limit)
+    }
+
+    fn unbond_assay(
+        amount: FlakeAmount,
+        refiners: &RefinerSet,
+        total_issued_flakes: FlakeAmount,
+    ) -> FlakeAmount {
+        let total_bonded = refiners.total_bonded_stake();
+        if total_bonded == 0 {
+            return 0;
+        }
+
+        let active_limit = RefinerSet::active_refiner_limit(total_issued_flakes);
+        let baseline =
+            RefinerSet::minimum_bond_stake(total_issued_flakes) as u128 * active_limit as u128;
+        Self::dynamic_assay(amount, baseline, total_bonded as u128, active_limit)
+    }
+
     fn checked_add_amounts(
         context: &str,
         a: FlakeAmount,
@@ -167,14 +240,9 @@ impl TransactionDispatcher {
             TransactionAction::RefinerBond { amount } => {
                 Self::apply_bond(tx, sender, *amount, accounts, refiners, context)
             }
-            TransactionAction::RefinerUnbond { amount } => Self::apply_unbond(
-                tx,
-                sender,
-                *amount,
-                accounts,
-                refiners,
-                context.block_height,
-            ),
+            TransactionAction::RefinerUnbond { amount } => {
+                Self::apply_unbond(tx, sender, *amount, accounts, refiners, context)
+            }
         };
 
         // After a successful transaction, store the sender's public key in
@@ -239,11 +307,10 @@ impl TransactionDispatcher {
             ));
         }
 
-        // Verify total outflow (stake + fee + assay) doesn't exceed balance
-        // Assay fee: ANNUAL_ATTRITION_PERMILLE / 4 / 1000 = 0.375% (0.25% each way for bond+unbond)
-        // Gold analogy: assay fee to enter the vault
-        let bond_assay =
-            (stake as u128 * ANNUAL_ATTRITION_PERMILLE as u128 / 4 / 1000) as FlakeAmount;
+        // Verify total outflow (stake + fee + assay) doesn't exceed balance.
+        // Bond assay rises when the vault is crowded and falls when bonded
+        // security is thin, mirroring the cost to assay and store incoming bars.
+        let bond_assay = Self::bond_assay(stake, refiners, context.total_issued_flakes);
         let total_needed = match Self::checked_total_cost("Bond cost", stake, tx.fee, bond_assay) {
             Ok(total) => total,
             Err(e) => return ApplyResult::err(&e),
@@ -310,7 +377,7 @@ impl TransactionDispatcher {
         amount: FlakeAmount,
         accounts: &mut AccountStore,
         refiners: &mut RefinerSet,
-        block_height: u64,
+        context: ExecutionContext,
     ) -> ApplyResult {
         // Check that the refiner exists
         if refiners.get_refiner(sender).is_none() {
@@ -320,12 +387,10 @@ impl TransactionDispatcher {
             return ApplyResult::err("Unbond amount must be greater than zero");
         }
 
-        // Pre-check fees before unbonding. Both the transaction fee and the unbond
-        // assay must be payable. This fixes H4: zero-balance accounts can no longer
-        // unbond for free. The assay is 0.375% of the unbonded amount.
-        // We use the requested amount as an upper bound for the assay pre-check.
-        let max_assay =
-            (amount as u128 * ANNUAL_ATTRITION_PERMILLE as u128 / 4 / 1000) as FlakeAmount;
+        // Pre-check fees before unbonding. Both the transaction fee and the
+        // dynamic unbond assay must be payable. The assay rises when bonded
+        // security is thin and falls when the vault is well-stocked.
+        let max_assay = Self::unbond_assay(amount, refiners, context.total_issued_flakes);
         let total_fee = match Self::checked_add_amounts("Unbond fee", tx.fee, max_assay) {
             Ok(total) => total,
             Err(e) => return ApplyResult::err(&e),
@@ -340,7 +405,7 @@ impl TransactionDispatcher {
         }
 
         // Perform FIFO unbond — oldest entries consumed first, queued for delayed return
-        let unbonded = match refiners.unbond_amount(sender, amount, block_height) {
+        let unbonded = match refiners.unbond_amount(sender, amount, context.block_height) {
             Ok(stake) => stake,
             Err(e) => return ApplyResult::err(&e),
         };
@@ -353,10 +418,9 @@ impl TransactionDispatcher {
         // after UNBONDING_DELAY_BLOCKS. It is NOT credited to the sender's
         // account immediately.
 
-        // Unbond assay: 0.375% of actually unbonded amount (may be less than requested)
-        // Gold analogy: assay fee to exit the vault
-        let unbond_assay =
-            (unbonded as u128 * ANNUAL_ATTRITION_PERMILLE as u128 / 4 / 1000) as FlakeAmount;
+        // The current unbond path rejects requests above total stake, so the
+        // prechecked dynamic assay is exactly the assay owed for this withdrawal.
+        let unbond_assay = max_assay;
         let total_fee = match Self::checked_add_amounts("Unbond fee", tx.fee, unbond_assay) {
             Ok(total) => total,
             Err(e) => return ApplyResult::err(&e),
@@ -379,10 +443,9 @@ impl TransactionDispatcher {
 
 /// Basic pre-validation of a transaction before it enters the mempool.
 ///
-/// Checks nonce correctness, minimum fee, and balance sufficiency for
-/// the transaction's total cost (amount + fee for transfers and bonds,
-/// fee only for unbonding). Does **not** verify the signature — that
-/// happens during block execution.
+/// Checks nonce correctness, minimum fee, and balance sufficiency for the
+/// transaction's non-assay cost. Dynamic bond/unbond assays depend on live
+/// refiner state and are enforced during block execution.
 ///
 /// This is a fast check to reject obviously invalid transactions before
 /// they consume mempool space or network bandwidth.
@@ -406,7 +469,8 @@ pub fn validate_transaction_basic(
         });
     }
 
-    // Total cost depends on the transaction type (including assay fees)
+    // Total cost depends on the transaction type. Dynamic refiner assays depend
+    // on live refiner state, so this basic helper only checks non-assay cost.
     let checked_add = |context: &str, a: FlakeAmount, b: FlakeAmount| {
         a.checked_add(b).ok_or_else(|| {
             OpolysError::InvalidParams(format!("{} overflow: {} + {}", context, a, b))
@@ -417,17 +481,8 @@ pub fn validate_transaction_basic(
         TransactionAction::Transfer { amount, .. } => {
             checked_add("Transfer cost", *amount, tx.fee)?
         }
-        TransactionAction::RefinerBond { amount } => {
-            let bond_assay =
-                (*amount as u128 * ANNUAL_ATTRITION_PERMILLE as u128 / 4 / 1000) as FlakeAmount;
-            let amount_plus_fee = checked_add("Bond cost", *amount, tx.fee)?;
-            checked_add("Bond cost", amount_plus_fee, bond_assay)?
-        }
-        TransactionAction::RefinerUnbond { amount } => {
-            let max_unbond_assay =
-                (*amount as u128 * ANNUAL_ATTRITION_PERMILLE as u128 / 4 / 1000) as FlakeAmount;
-            checked_add("Unbond fee", tx.fee, max_unbond_assay)?
-        }
+        TransactionAction::RefinerBond { amount } => checked_add("Bond cost", *amount, tx.fee)?,
+        TransactionAction::RefinerUnbond { .. } => tx.fee,
     };
 
     if sender_balance < total_cost {
@@ -787,6 +842,7 @@ mod tests {
         accounts.create_account(alice.clone()).unwrap();
         accounts.credit(&alice, opl_to_flake(200)).unwrap();
 
+        let bond_assay = TransactionDispatcher::bond_assay(MIN_BOND_STAKE, &refiners, 0);
         let tx = signed_bond(&sk, &alice, pk, MIN_BOND_STAKE, opl_to_flake(1), 0);
         let result = TransactionDispatcher::apply_transaction(
             &tx,
@@ -799,12 +855,24 @@ mod tests {
         );
         assert!(result.success, "Bond should succeed: {:?}", result.error);
         assert_eq!(refiners.refiner_count(), 1);
-        // Alice's balance: 200 - 1 (stake) - 1 (fee) - bond_assay = 197.99625 OPL
-        let bond_assay = MIN_BOND_STAKE as u128 * ANNUAL_ATTRITION_PERMILLE as u128 / 4 / 1000;
         assert_eq!(
             accounts.get_account(&alice).unwrap().balance,
-            opl_to_flake(200) - MIN_BOND_STAKE - opl_to_flake(1) - bond_assay as FlakeAmount
+            opl_to_flake(200) - MIN_BOND_STAKE - opl_to_flake(1) - bond_assay
         );
+    }
+
+    #[test]
+    fn dynamic_assay_moves_with_vault_pressure() {
+        let amount = opl_to_flake(100);
+        let active_limit = RefinerSet::active_refiner_limit(1_000_000 * opl_to_flake(1));
+
+        let baseline = TransactionDispatcher::dynamic_assay(amount, 1, 1, active_limit);
+        let low_pressure = TransactionDispatcher::dynamic_assay(amount, 1, 4, active_limit);
+        let high_pressure = TransactionDispatcher::dynamic_assay(amount, 4, 1, active_limit);
+
+        assert!(low_pressure < baseline);
+        assert!(high_pressure > baseline);
+        assert!(high_pressure >= baseline.saturating_mul(2));
     }
 
     /// Bond refiner with insufficient stake — should fail.
@@ -921,6 +989,7 @@ mod tests {
         accounts.credit(&alice, opl_to_flake(500)).unwrap();
 
         // Bond 1 OPL at t=100
+        let bond_assay_1 = TransactionDispatcher::bond_assay(MIN_BOND_STAKE, &refiners, 0);
         let tx1 = signed_bond(&sk, &alice, pk.clone(), MIN_BOND_STAKE, opl_to_flake(1), 0);
         let r1 = TransactionDispatcher::apply_transaction(
             &tx1,
@@ -934,6 +1003,7 @@ mod tests {
         assert!(r1.success, "First bond should succeed: {:?}", r1.error);
 
         // Bond 2 OPL at t=1000
+        let bond_assay_2 = TransactionDispatcher::bond_assay(MIN_BOND_STAKE * 2, &refiners, 0);
         let tx2 = signed_bond(
             &sk,
             &alice,
@@ -958,21 +1028,20 @@ mod tests {
         );
 
         // Alice balance: 500 - 1 (stake) - 1 (fee) - bond_assay_1 - 2 (stake) - 1 (fee) - bond_assay_2
-        let bond_assay_1 = MIN_BOND_STAKE as u128 * ANNUAL_ATTRITION_PERMILLE as u128 / 4 / 1000;
-        let bond_assay_2 =
-            (MIN_BOND_STAKE * 2) as u128 * ANNUAL_ATTRITION_PERMILLE as u128 / 4 / 1000;
         assert_eq!(
             accounts.get_account(&alice).unwrap().balance,
             opl_to_flake(500)
                 - MIN_BOND_STAKE
                 - opl_to_flake(1)
-                - bond_assay_1 as FlakeAmount
+                - bond_assay_1
                 - MIN_BOND_STAKE * 2
                 - opl_to_flake(1)
-                - bond_assay_2 as FlakeAmount
+                - bond_assay_2
         );
 
         // Unbond 1.5 OPL — consumes first entry (1 OPL) + 0.5 OPL from second entry
+        let unbond_amount = MIN_BOND_STAKE + MIN_BOND_STAKE / 2; // 1.5 OPL
+        let unbond_assay = TransactionDispatcher::unbond_assay(unbond_amount, &refiners, 0);
         let tx3 = signed_unbond(
             &sk,
             &alice,
@@ -1006,18 +1075,16 @@ mod tests {
         assert_eq!(refiners.unbonding_queue[0].matures_at, 3 + EPOCH);
 
         // Alice's balance after unbond: previous balance - 1 (fee) - unbond_assay
-        let unbond_amount = MIN_BOND_STAKE + MIN_BOND_STAKE / 2; // 1.5 OPL
-        let unbond_assay = unbond_amount as u128 * ANNUAL_ATTRITION_PERMILLE as u128 / 4 / 1000;
         let prev_balance = opl_to_flake(500)
             - MIN_BOND_STAKE
             - opl_to_flake(1)
-            - bond_assay_1 as FlakeAmount
+            - bond_assay_1
             - MIN_BOND_STAKE * 2
             - opl_to_flake(1)
-            - bond_assay_2 as FlakeAmount;
+            - bond_assay_2;
         assert_eq!(
             accounts.get_account(&alice).unwrap().balance,
-            prev_balance - opl_to_flake(1) - unbond_assay as FlakeAmount
+            prev_balance - opl_to_flake(1) - unbond_assay
         );
     }
 
@@ -1099,9 +1166,7 @@ mod tests {
     fn validate_transaction_basic_bond() {
         let alice = hash_to_object_id(b"alice");
         let tx = unsigned_bond(&alice, MIN_BOND_STAKE, opl_to_flake(1), 0);
-        // Total cost = MIN_BOND_STAKE + 1 OPL fee + bond_assay
-        let bond_assay = MIN_BOND_STAKE as u128 * ANNUAL_ATTRITION_PERMILLE as u128 / 4 / 1000;
-        let total_cost = MIN_BOND_STAKE + opl_to_flake(1) + bond_assay as FlakeAmount;
+        let total_cost = MIN_BOND_STAKE + opl_to_flake(1);
         assert!(validate_transaction_basic(&tx, total_cost, 0).is_ok());
         assert!(validate_transaction_basic(&tx, total_cost - 1, 0).is_err());
     }

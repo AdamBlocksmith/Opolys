@@ -95,12 +95,12 @@ pub const BLOCKS_PER_YEAR: u64 = (365 * 86400 + 86400 / 4) / 90; // 350_640
 /// Annual gold attrition rate in permille (1.5% = 15 permille).
 /// Derived from USGS/WGC data: ~1.5% of above-ground gold is lost annually
 /// through wear, loss, and industrial consumption.
-/// Applied across three fixed-rate assay channels:
+/// Applied to the fixed mine assay:
 /// - Mine assay: reduced issuance at block reward time
-/// - Bond/unbond assay: entry/exit fees
 ///
 /// Refiner stake decay is no longer fixed to this rate. It is derived from
-/// bonded-stake surplus relative to the system's security baseline.
+/// bonded-stake surplus relative to the system's security baseline. Bond and
+/// unbond assays are derived from vault crowding/thinness.
 pub const ANNUAL_ATTRITION_PERMILLE: u64 = 15;
 
 /// Number of blocks a refiner must wait before unbonded stake is returned.
