@@ -29,8 +29,7 @@
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use opolys_core::{
-    ANNUAL_ATTRITION_PERMILLE, EPOCH, FLAKES_PER_OPL, FlakeAmount, ObjectId, OpolysError,
-    RefinerStatus,
+    BLOCKS_PER_YEAR, EPOCH, FLAKES_PER_OPL, FlakeAmount, ObjectId, OpolysError, RefinerStatus,
 };
 use opolys_crypto::{Blake3Hasher, DOMAIN_STATE_ROOT};
 use serde::{Deserialize, Serialize};
@@ -589,34 +588,60 @@ impl RefinerSet {
         (newly_activated, newly_demoted)
     }
 
-    /// Apply annual stake decay to all non-slashed refiners.
+    /// Apply surplus-based stake decay to bonded refiners.
     ///
-    /// Mirrors gold vault storage fees: ~1.5% of bonded stake decays per year.
-    /// Applied once per epoch (960 blocks = 24 hours).
-    /// Per-epoch decay factor: (1 - ANNUAL_ATTRITION_PERMILLE/1000)^(1/365) ≈ 999_959/1_000_000.
+    /// The baseline security stake is derived from the current issued supply:
+    /// `minimum_bond_stake(total_issued) * active_refiner_limit(total_issued)`.
+    /// If bonded stake is at or below that baseline, no stake decays. If bonded
+    /// stake exceeds the baseline, only the surplus pressure creates a small
+    /// epoch burn:
+    /// `entry_decay = entry_stake * surplus_stake / total_bonded_stake / BLOCKS_PER_YEAR`.
     ///
     /// Returns the total amount of stake burned across all refiners.
-    pub fn decay_stake(&mut self) -> FlakeAmount {
-        // Per-epoch decay: (1 - 0.015)^(1/365) ≈ 0.999959 per epoch
-        // Each entry: stake = stake * DECAY_NUMERATOR / DECAY_DENOMINATOR
-        // where DECAY_NUMERATOR ≈ 999_959, DECAY_DENOMINATOR = 1_000_000
-        const DECAY_NUMERATOR: u64 = 1_000_000 - (ANNUAL_ATTRITION_PERMILLE * 1_000 / 365);
-        const DECAY_DENOMINATOR: u64 = 1_000_000;
+    pub fn decay_stake(&mut self, total_issued_flakes: FlakeAmount) -> FlakeAmount {
+        let total_bonded = self.total_bonded_stake();
+        if total_bonded == 0 {
+            return 0;
+        }
+
+        let baseline_security_stake = Self::minimum_bond_stake(total_issued_flakes) as u128
+            * Self::active_refiner_limit(total_issued_flakes) as u128;
+        let surplus_stake = (total_bonded as u128).saturating_sub(baseline_security_stake);
+        if surplus_stake == 0 {
+            return 0;
+        }
+
         let mut total_burned: FlakeAmount = 0;
-        for refiner in self.cached_refiners.values_mut() {
+        let mut dirty = Vec::new();
+        for (id, refiner) in &mut self.cached_refiners {
             if refiner.status == RefinerStatus::Slashed {
                 continue;
             }
+            let mut refiner_burned = 0u64;
             for entry in &mut refiner.entries {
                 if entry.stake == 0 {
                     continue;
                 }
-                let new_stake = ((entry.stake as u128 * DECAY_NUMERATOR as u128)
-                    / DECAY_DENOMINATOR as u128) as FlakeAmount;
-                let burned = entry.stake.saturating_sub(new_stake);
+                let burned = (entry.stake as u128)
+                    .saturating_mul(surplus_stake)
+                    .checked_div(total_bonded as u128)
+                    .unwrap_or(0)
+                    .checked_div(BLOCKS_PER_YEAR as u128)
+                    .unwrap_or(0)
+                    .min(entry.stake as u128) as FlakeAmount;
+                if burned == 0 {
+                    continue;
+                }
                 total_burned = total_burned.saturating_add(burned);
-                entry.stake = new_stake;
+                refiner_burned = refiner_burned.saturating_add(burned);
+                entry.stake = entry.stake.saturating_sub(burned);
             }
+            if refiner_burned > 0 {
+                dirty.push(id.clone());
+            }
+        }
+        for id in dirty {
+            self.dirty_refiners.insert(id);
         }
         total_burned
     }
@@ -927,6 +952,45 @@ mod tests {
             RefinerSet::minimum_bond_stake(25_000_000 * FLAKES_PER_OPL),
             5_000 * FLAKES_PER_OPL
         );
+    }
+
+    #[test]
+    fn surplus_decay_is_zero_below_security_baseline() {
+        let mut vs = RefinerSet::new();
+        let id = test_id(b"refiner1");
+        vs.bond(id.clone(), MIN_BOND_STAKE * 10, 0, 0, 0).unwrap();
+        vs.activate(&id, 1).unwrap();
+
+        let burned = vs.decay_stake(0);
+        assert_eq!(burned, 0);
+        assert_eq!(
+            vs.get_refiner(&id).unwrap().total_stake(),
+            MIN_BOND_STAKE * 10
+        );
+    }
+
+    #[test]
+    fn surplus_decay_burns_only_when_bonded_stake_exceeds_baseline() {
+        let mut vs = RefinerSet::new();
+        let id = test_id(b"refiner1");
+        vs.bond(id.clone(), MIN_BOND_STAKE * 1000, 0, 0, 0).unwrap();
+        vs.activate(&id, 1).unwrap();
+
+        let baseline =
+            RefinerSet::minimum_bond_stake(0) as u128 * RefinerSet::active_refiner_limit(0) as u128;
+        let total_bonded = MIN_BOND_STAKE * 1000;
+        let surplus = total_bonded as u128 - baseline;
+        let expected = ((total_bonded as u128 * surplus / total_bonded as u128)
+            / BLOCKS_PER_YEAR as u128) as FlakeAmount;
+
+        let burned = vs.decay_stake(0);
+        assert_eq!(burned, expected);
+        assert!(burned > 0);
+        assert_eq!(
+            vs.get_refiner(&id).unwrap().total_stake(),
+            total_bonded - expected
+        );
+        assert!(vs.dirty_refiners.contains(&id));
     }
 
     #[test]

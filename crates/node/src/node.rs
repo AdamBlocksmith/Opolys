@@ -2109,7 +2109,7 @@ impl OpolysNode {
         }
 
         // At epoch boundaries: rerank refiners (Waiting→Active / Active→Waiting)
-        // and apply stake decay (gold vault storage fee: ~1.5%/year)
+        // and apply surplus-based stake decay.
         if chain.current_height > 0 && chain.current_height % EPOCH == 0 {
             let current_ts = chain.block_timestamps.last().copied().unwrap_or(0);
             let active_refiner_limit = RefinerSet::active_refiner_limit(chain.total_issued);
@@ -2124,9 +2124,10 @@ impl OpolysNode {
                     "Refiner set reranked at epoch boundary"
                 );
             }
-            // Stake decay: burn ANNUAL_ATTRITION_PERMILLE of bonded stake per year.
-            // Applied per epoch (24 hours). Mirrors gold vault storage fees.
-            let decayed = refiners.decay_stake();
+            // Stake decay appears only when bonded stake exceeds the system's
+            // derived baseline security stake. Mirrors vault drag only when
+            // custody is overstocked, without weakening thin security periods.
+            let decayed = refiners.decay_stake(chain.total_issued);
             if decayed > 0 {
                 chain.total_burned = chain.total_burned.saturating_add(decayed);
                 tracing::info!(

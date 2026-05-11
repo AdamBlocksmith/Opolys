@@ -78,7 +78,7 @@ From `crates/core/src/constants.rs`:
 | `FLAKES_PER_OPL` | `1_000_000` | Fundamental unit ratio |
 | `DECIMAL_PLACES` | `6` | Always 6 decimal places |
 | `BASE_REWARD` | `332,000,000` Flakes (332 OPL) | Default block reward (ceremony sets mainnet value; stored in `ChainState`) |
-| `ANNUAL_ATTRITION_PERMILLE` | `15` (1.5%) | Annual gold attrition rate in permille |
+| `ANNUAL_ATTRITION_PERMILLE` | `15` (1.5%) | Fixed mine/bond/unbond assay rate in permille |
 | `BLOCKS_PER_YEAR` | `350,640` | Approximate blocks per year (365.25 × 86400 / 90) |
 | `MIN_DIFFICULTY` | `1` | Mathematical floor (not a cap) |
 | `EPOCH` | `960` blocks (= exactly 24 hours at 90 s/block) | Unified epoch for retarget, dataset regen, unbonding |
@@ -323,15 +323,17 @@ effective_difficulty = max(retarget, consensus_floor, MIN_DIFFICULTY)
 
 ### Stake Decay
 
-Bonded stake decays once per epoch (960 blocks) at an annual rate of `ANNUAL_ATTRITION_PERMILLE` (1.5%):
+Bonded stake decay is system-derived. It appears only when total bonded stake exceeds the chain's natural security baseline:
 
 ```
-decay_numerator = 1_000_000 - (ANNUAL_ATTRITION_PERMILLE × 1000 / 365)
-               ≈ 999_959
-entry.stake = entry.stake × decay_numerator / 1_000_000
+minimum_bond = sqrt(total_issued_opl)
+active_refiner_limit = EPOCH + sqrt(total_issued_opl)
+baseline_security_stake = minimum_bond × active_refiner_limit
+surplus_stake = max(0, total_bonded_stake - baseline_security_stake)
+entry_decay = entry_stake × surplus_stake / total_bonded_stake / BLOCKS_PER_YEAR
 ```
 
-All decayed stake is permanently burned. This mirrors vault storage fees in gold custody.
+If there is no surplus bonded stake, decay is zero. All decayed stake is permanently burned. This mirrors vault drag only when custody is overstocked, without weakening thin-security periods.
 
 ### Per-Entry Weight
 
@@ -442,18 +444,18 @@ Invalid transactions (wrong nonce, insufficient balance, invalid unbond amount):
 
 ### Supply Attrition
 
-Opolys mirrors physical gold attrition (~1.5% of above-ground gold lost annually, USGS/WGC). Three channels burn OPL from circulation:
+Opolys mirrors physical gold attrition through assay burns and system-derived custody drag. Four channels burn OPL from circulation:
 
 | Channel | Rate | Formula | Gold Analogy |
 |---|---|---|---|
 | **Mine assay** | ~1.5%/year of issuance | `block_reward × ANNUAL_ATTRITION_PERMILLE / 1000` | Processing waste |
-| **Stake decay** | ~1.5%/year of bonded stake | `entry.stake × (ANNUAL_ATTRITION_PERMILLE × 1000 / 365) / 1_000_000` per epoch | Vault storage fees |
+| **Stake decay** | System-derived surplus drag | `entry_stake × surplus_stake / total_bonded_stake / BLOCKS_PER_YEAR` | Overstocked vault drag |
 | **Bond assay** | 0.375% of bonded amount | `amount × ANNUAL_ATTRITION_PERMILLE / 4 / 1000` | Assay fee to enter vault |
 | **Unbond assay** | 0.375% of unbonded amount | `amount × ANNUAL_ATTRITION_PERMILLE / 4 / 1000` | Assay fee to exit vault |
 
 - Bond assay and unbond assay are each `ANNUAL_ATTRITION_PERMILLE / 4 / 1000 = 0.00375 = 0.375%`
 - Combined (bond + unbond), this is `0.75%` per round trip
-- Stake decay is applied once per epoch (960 blocks) at a per-epoch rate derived from the annual rate
+- Stake decay is applied once per epoch (960 blocks) only when bonded stake exceeds the derived baseline
 - All attrition is permanently burned — no recipient, no treasury
 
 ---
@@ -875,16 +877,16 @@ Where `CAPACITY_RATIO = MEMPOOL_MAX_SIZE_BYTES / MAX_BLOCK_SIZE_BYTES ≈ 10` an
 
 ### Supply Attrition
 
-Three channels permanently burn OPL, mirroring physical gold attrition (~1.5%/year):
+Four channels permanently burn OPL, mirroring physical gold attrition and custody drag:
 
 | Channel | Rate | Formula |
 |---|---|---|
 | Mine assay | ~1.5%/yr of issuance | `block_reward × ANNUAL_ATTRITION_PERMILLE / 1000` |
-| Stake decay | ~1.5%/yr of bonded stake | `entry.stake × decay_numerator / 1_000_000` per epoch |
+| Stake decay | System-derived surplus drag | `entry_stake × surplus_stake / total_bonded_stake / BLOCKS_PER_YEAR` |
 | Bond assay | 0.375% of bonded amount | `amount × ANNUAL_ATTRITION_PERMILLE / 4 / 1000` |
 | Unbond assay | 0.375% of unbonded amount | `amount × ANNUAL_ATTRITION_PERMILLE / 4 / 1000` |
 
-Where `decay_numerator = 1_000_000 - (ANNUAL_ATTRITION_PERMILLE × 1000 / 365) ≈ 999_959`.
+Where `surplus_stake = max(0, total_bonded_stake - minimum_bond × active_refiner_limit)`.
 
 ### Same-Nonce Replacement
 

@@ -864,7 +864,7 @@ Opolys implements layered P2P defenses to protect honest nodes from adversarial 
 | **Only double-signing slashed** | No reversal windows, no confiscation for any other reason |
 | **Gold-derived emission** | BASE_REWARD from genesis ceremony, derived from annual gold production (~3,630 tonnes) |
 | **Integer-only consensus** | No floating-point arithmetic in consensus-critical code; vein yield and refiner seniority use deterministic integer math |
-| **Holder safety** | Ordinary dormant holder balances do not decay. Attrition comes from fees, assay burns, refiner stake decay, slashing, and naturally lost keys. |
+| **Holder safety** | Ordinary dormant holder balances do not decay. Attrition comes from fees, assay burns, surplus-based refiner stake decay, slashing, and naturally lost keys. |
 | **Single key** | One ed25519 key for both transactions and validation, derived from BIP-39 mnemonic |
 | **Core only** | The node is the protocol layer (like Bitcoin Core). Community builds explorers, wallets, and mining pools |
 
