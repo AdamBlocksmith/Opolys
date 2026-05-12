@@ -1995,7 +1995,7 @@ impl OpolysNode {
         };
 
         // Split the block reward into base and vein bonus components.
-        // The coverage split (miner vs refiner) applies to base_reward ONLY.
+        // The coverage split (producer vs refiner pool) applies to base_reward ONLY.
         // The vein bonus (luck component) goes 100% to the block producer.
         // This mirrors gold: refineries charge per ounce, not per grade.
         // A rich vein doesn't increase the refinery's cut.
@@ -2005,7 +2005,7 @@ impl OpolysNode {
             chain.base_reward / block.header.difficulty.max(MIN_DIFFICULTY)
         };
         // Mine assay burns part of the gross ore before rewards are credited.
-        // Split the net reward between miners and refiners based on stake coverage.
+        // Split the net reward between the producer and refiners based on stake coverage.
         // The split is on the net base reward only. The net vein bonus goes to the producer.
         // coverage_milli = (bonded_stake × 1000) / total_issued, avoiding floating point.
         let coverage_milli: u64 = if chain.total_issued > 0 {
@@ -2013,7 +2013,7 @@ impl OpolysNode {
         } else {
             0
         };
-        // miner_share = net_base_reward * (1000 - coverage_milli) / 1000 + net_vein_bonus
+        // producer_share = net_base_reward * (1000 - coverage_milli) / 1000 + net_vein_bonus
         // refiner_share = net_base_reward * coverage_milli / 1000
         let reward_distribution = compute_reward_distribution(
             block_reward,
@@ -2025,7 +2025,7 @@ impl OpolysNode {
         let refiner_share_amount = reward_distribution.refiner_share;
         let mut planned_reward_credits: HashMap<ObjectId, FlakeAmount> = HashMap::new();
 
-        // Credit the PoW share to the block producer (miner or selected refiner).
+        // Credit the producer share to the block producer (miner or selected refiner).
         // The producer is identified by block.header.producer.
         let producer = &block.header.producer;
         if !producer.0.is_zero() && miner_share_amount > 0 {
@@ -2493,6 +2493,23 @@ mod tests {
         assert_eq!(
             distribution.miner_share + distribution.refiner_share,
             1_995_834
+        );
+    }
+
+    #[test]
+    fn refiner_block_reward_has_no_vein_bonus() {
+        // Refiner-produced blocks use hash_int = 0, so emission returns flat 1.0x yield.
+        // That makes gross_reward == base_reward_amount: no vein bonus exists to route
+        // to the selected producer.
+        let distribution = compute_reward_distribution(960_000, 960_000, 4, 500);
+
+        assert_eq!(distribution.mine_assay, 2_000);
+        assert_eq!(distribution.net_reward, 958_000);
+        assert_eq!(distribution.miner_share, 479_000);
+        assert_eq!(distribution.refiner_share, 479_000);
+        assert_eq!(
+            distribution.miner_share + distribution.refiner_share,
+            distribution.net_reward
         );
     }
 
