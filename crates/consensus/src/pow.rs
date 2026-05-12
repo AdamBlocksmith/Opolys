@@ -265,6 +265,28 @@ pub fn compute_challenge_hash(
 ) -> u64 {
     let epoch_seed = evo_omap::compute_epoch_seed_with_epoch_length(height, EPOCH);
     let mut dataset = evo_omap::LightDataset::new(&epoch_seed);
+    let input = build_challenge_input(
+        chain_id,
+        parent_hash,
+        height,
+        nonce,
+        challenger_peer_id,
+        responder_peer_id,
+    );
+    let hash = evo_omap::evo_omap_hash_light(&mut dataset, &input, height, nonce);
+    let mut hash_prefix = [0u8; 8];
+    hash_prefix.copy_from_slice(&hash.0[..8]);
+    u64::from_le_bytes(hash_prefix)
+}
+
+fn build_challenge_input(
+    chain_id: u64,
+    parent_hash: &Hash,
+    height: u64,
+    nonce: u64,
+    challenger_peer_id: &[u8],
+    responder_peer_id: &[u8],
+) -> Vec<u8> {
     let mut input = Vec::with_capacity(72 + challenger_peer_id.len() + responder_peer_id.len());
     input.extend_from_slice(&chain_id.to_le_bytes());
     input.extend_from_slice(parent_hash.as_bytes());
@@ -274,10 +296,7 @@ pub fn compute_challenge_hash(
     input.extend_from_slice(challenger_peer_id);
     input.extend_from_slice(&(responder_peer_id.len() as u64).to_le_bytes());
     input.extend_from_slice(responder_peer_id);
-    let hash = evo_omap::evo_omap_hash_light(&mut dataset, &input, height, nonce);
-    let mut hash_prefix = [0u8; 8];
-    hash_prefix.copy_from_slice(&hash.0[..8]);
-    u64::from_le_bytes(hash_prefix)
+    input
 }
 
 /// Convenience function: mine a block without persistent caching.
@@ -438,15 +457,15 @@ mod tests {
         let responder = b"responder-peer";
 
         let expected =
-            compute_challenge_hash(chain_id, &parent_hash, height, nonce, challenger, responder);
+            build_challenge_input(chain_id, &parent_hash, height, nonce, challenger, responder);
 
         assert_eq!(
             expected,
-            compute_challenge_hash(chain_id, &parent_hash, height, nonce, challenger, responder)
+            build_challenge_input(chain_id, &parent_hash, height, nonce, challenger, responder)
         );
         assert_ne!(
             expected,
-            compute_challenge_hash(
+            build_challenge_input(
                 chain_id + 1,
                 &parent_hash,
                 height,
@@ -457,7 +476,7 @@ mod tests {
         );
         assert_ne!(
             expected,
-            compute_challenge_hash(
+            build_challenge_input(
                 chain_id,
                 &Hash([4u8; 32]),
                 height,
@@ -468,7 +487,7 @@ mod tests {
         );
         assert_ne!(
             expected,
-            compute_challenge_hash(
+            build_challenge_input(
                 chain_id,
                 &parent_hash,
                 height,
@@ -479,7 +498,7 @@ mod tests {
         );
         assert_ne!(
             expected,
-            compute_challenge_hash(
+            build_challenge_input(
                 chain_id,
                 &parent_hash,
                 height,
@@ -490,7 +509,7 @@ mod tests {
         );
         assert_ne!(
             expected,
-            compute_challenge_hash(chain_id, &parent_hash, height, nonce, responder, challenger)
+            build_challenge_input(chain_id, &parent_hash, height, nonce, responder, challenger)
         );
     }
 
