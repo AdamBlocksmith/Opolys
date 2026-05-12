@@ -382,7 +382,7 @@ Most mined blocks earn above the 1.0x floor. Exceptionally lucky blocks earn mor
 
 ```
 gross_block_reward = (BASE_REWARD / effective_difficulty) × vein_yield
-mine_assay = gross_block_reward × ANNUAL_ATTRITION_PERMILLE / 1000
+mine_assay = gross_block_reward × sqrt(effective_difficulty) / EPOCH
 net_block_reward = gross_block_reward - mine_assay
 ```
 
@@ -760,6 +760,7 @@ Every block applied to the chain must pass these checks:
 ```
 vein_yield = 1 + sqrt(ln(target / hash_int))        // integer fixed-point, rounded to nearest milli
 gross_block_reward = (BASE_REWARD / effective_difficulty) × vein_yield
+mine_assay = gross_block_reward × sqrt(effective_difficulty) / EPOCH
 net_block_reward = gross_block_reward - mine_assay
 ```
 

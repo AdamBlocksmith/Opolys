@@ -831,9 +831,42 @@ struct RewardDistribution {
     refiner_share: FlakeAmount,
 }
 
+fn integer_sqrt_round(n: u128) -> u128 {
+    if n < 2 {
+        return n;
+    }
+
+    let mut x = n;
+    let mut y = x.div_ceil(2);
+    while y < x {
+        x = y;
+        y = (x + n / x) / 2;
+    }
+
+    let floor = x;
+    let next = floor.saturating_add(1);
+    if next.saturating_mul(next).saturating_sub(n) < n.saturating_sub(floor.saturating_mul(floor)) {
+        next
+    } else {
+        floor
+    }
+}
+
+fn compute_mine_assay(gross_reward: FlakeAmount, effective_difficulty: u64) -> FlakeAmount {
+    if gross_reward == 0 {
+        return 0;
+    }
+
+    let difficulty = effective_difficulty.max(MIN_DIFFICULTY);
+    let difficulty_pressure = integer_sqrt_round(difficulty as u128).max(1);
+    ((gross_reward as u128).saturating_mul(difficulty_pressure) / EPOCH as u128)
+        .min(FlakeAmount::MAX as u128) as FlakeAmount
+}
+
 fn compute_reward_distribution(
     gross_reward: FlakeAmount,
     base_reward_amount: FlakeAmount,
+    effective_difficulty: u64,
     coverage_milli: u64,
 ) -> RewardDistribution {
     if gross_reward == 0 {
@@ -846,8 +879,7 @@ fn compute_reward_distribution(
         };
     }
 
-    let mine_assay =
-        ((gross_reward as u128 * ANNUAL_ATTRITION_PERMILLE as u128) / 1000) as FlakeAmount;
+    let mine_assay = compute_mine_assay(gross_reward, effective_difficulty);
     let net_reward = gross_reward.saturating_sub(mine_assay);
 
     let net_base_reward =
@@ -1983,8 +2015,12 @@ impl OpolysNode {
         };
         // miner_share = net_base_reward * (1000 - coverage_milli) / 1000 + net_vein_bonus
         // refiner_share = net_base_reward * coverage_milli / 1000
-        let reward_distribution =
-            compute_reward_distribution(block_reward, base_reward_amount, coverage_milli);
+        let reward_distribution = compute_reward_distribution(
+            block_reward,
+            base_reward_amount,
+            block.header.difficulty,
+            coverage_milli,
+        );
         let miner_share_amount = reward_distribution.miner_share;
         let refiner_share_amount = reward_distribution.refiner_share;
         let mut planned_reward_credits: HashMap<ObjectId, FlakeAmount> = HashMap::new();
@@ -2432,13 +2468,13 @@ mod tests {
 
     #[test]
     fn reward_distribution_credits_only_net_after_assay() {
-        let distribution = compute_reward_distribution(1_000_000, 800_000, 250);
+        let distribution = compute_reward_distribution(1_000_000, 800_000, 1, 250);
 
-        assert_eq!(distribution.mine_assay, 15_000);
-        assert_eq!(distribution.net_reward, 985_000);
+        assert_eq!(distribution.mine_assay, 1_041);
+        assert_eq!(distribution.net_reward, 998_959);
         assert_eq!(
             distribution.miner_share + distribution.refiner_share,
-            985_000
+            998_959
         );
         assert_eq!(
             distribution.gross_reward - distribution.mine_assay,
@@ -2448,16 +2484,27 @@ mod tests {
 
     #[test]
     fn reward_distribution_caps_coverage_and_preserves_vein_for_producer() {
-        let distribution = compute_reward_distribution(2_000_000, 1_000_000, 1_500);
+        let distribution = compute_reward_distribution(2_000_000, 1_000_000, 4, 1_500);
 
-        assert_eq!(distribution.mine_assay, 30_000);
-        assert_eq!(distribution.net_reward, 1_970_000);
-        assert_eq!(distribution.miner_share, 985_000);
-        assert_eq!(distribution.refiner_share, 985_000);
+        assert_eq!(distribution.mine_assay, 4_166);
+        assert_eq!(distribution.net_reward, 1_995_834);
+        assert_eq!(distribution.miner_share, 997_917);
+        assert_eq!(distribution.refiner_share, 997_917);
         assert_eq!(
             distribution.miner_share + distribution.refiner_share,
-            1_970_000
+            1_995_834
         );
+    }
+
+    #[test]
+    fn mine_assay_rises_with_difficulty_pressure() {
+        let gross_reward = 1_000_000;
+        let low_difficulty = compute_mine_assay(gross_reward, 1);
+        let higher_difficulty = compute_mine_assay(gross_reward, 100);
+
+        assert_eq!(low_difficulty, 1_041);
+        assert_eq!(higher_difficulty, 10_416);
+        assert!(higher_difficulty > low_difficulty);
     }
 
     #[test]

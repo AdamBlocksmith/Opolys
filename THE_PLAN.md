@@ -78,7 +78,7 @@ From `crates/core/src/constants.rs`:
 | `FLAKES_PER_OPL` | `1_000_000` | Fundamental unit ratio |
 | `DECIMAL_PLACES` | `6` | Always 6 decimal places |
 | `BASE_REWARD` | `332,000,000` Flakes (332 OPL) | Default block reward (ceremony sets mainnet value; stored in `ChainState`) |
-| `ANNUAL_ATTRITION_PERMILLE` | `15` (1.5%) | Fixed mine assay rate in permille |
+| `ANNUAL_ATTRITION_PERMILLE` | `15` (1.5%) | Physical-gold attrition reference; not used as a fixed tax |
 | `BLOCKS_PER_YEAR` | `350,640` | Approximate blocks per year (365.25 × 86400 / 90) |
 | `MIN_DIFFICULTY` | `1` | Mathematical floor (not a cap) |
 | `EPOCH` | `960` blocks (= exactly 24 hours at 90 s/block) | Unified epoch for retarget, dataset regen, unbonding |
@@ -244,7 +244,7 @@ Default derivation (2024 USGS/WGC data):
 
 ```
 gross_block_reward = (BASE_REWARD / difficulty) × vein_yield
-mine_assay = gross_block_reward × ANNUAL_ATTRITION_PERMILLE / 1000
+mine_assay = gross_block_reward × sqrt(effective_difficulty) / EPOCH
 net_block_reward = gross_block_reward - mine_assay
 ```
 
@@ -448,7 +448,7 @@ Opolys mirrors physical gold attrition through assay burns and system-derived cu
 
 | Channel | Rate | Formula | Gold Analogy |
 |---|---|---|---|
-| **Mine assay** | ~1.5%/year of issuance | `block_reward × ANNUAL_ATTRITION_PERMILLE / 1000` | Processing waste |
+| **Mine assay** | System-derived difficulty pressure | `gross_block_reward × sqrt(effective_difficulty) / EPOCH` | Harder ore creates more refining loss |
 | **Stake decay** | System-derived surplus drag | `entry_stake × surplus_stake / total_bonded_stake / BLOCKS_PER_YEAR` | Overstocked vault drag |
 | **Bond assay** | System-derived crowding assay | `amount × sqrt(total_bonded_after / baseline_security_stake) / (DECIMAL_PLACES × sqrt(active_refiner_limit))` | Assay fee to enter a crowded vault |
 | **Unbond assay** | System-derived thinness assay | `amount × sqrt(baseline_security_stake / total_bonded_stake) / (DECIMAL_PLACES × sqrt(active_refiner_limit))` | Assay fee to exit a thin vault |
@@ -824,7 +824,7 @@ Every block applied to the chain must pass these checks:
 yield_milli = 1000 + sqrt(ln(target / hash_int)) × 1000   // integer, rounded to nearest milli
 vein_yield = yield_milli / 1000.0
 gross_block_reward = (BASE_REWARD / difficulty) × vein_yield
-mine_assay = gross_block_reward × ANNUAL_ATTRITION_PERMILLE / 1000  // burned at source
+mine_assay = gross_block_reward × sqrt(effective_difficulty) / EPOCH  // burned at source
 net_block_reward = gross_block_reward - mine_assay
 miner_share = net_base_share + net_vein_bonus             // vein bonus goes 100% to miner
 ```
@@ -882,7 +882,7 @@ Four channels permanently burn OPL, mirroring physical gold attrition and custod
 
 | Channel | Rate | Formula |
 |---|---|---|
-| Mine assay | ~1.5%/yr of issuance | `block_reward × ANNUAL_ATTRITION_PERMILLE / 1000` |
+| Mine assay | System-derived difficulty pressure | `gross_block_reward × sqrt(effective_difficulty) / EPOCH` |
 | Stake decay | System-derived surplus drag | `entry_stake × surplus_stake / total_bonded_stake / BLOCKS_PER_YEAR` |
 | Bond assay | System-derived crowding assay | `amount × sqrt(total_bonded_after / baseline_security_stake) / (DECIMAL_PLACES × sqrt(active_refiner_limit))` |
 | Unbond assay | System-derived thinness assay | `amount × sqrt(baseline_security_stake / total_bonded_stake) / (DECIMAL_PLACES × sqrt(active_refiner_limit))` |
