@@ -783,11 +783,11 @@ mod tests {
     fn suggested_fee_ema() {
         use crate::emission::compute_suggested_fee;
         // Initial fee
-        let fee = compute_suggested_fee(0, 0);
+        let fee = compute_suggested_fee(0, 0, 0);
         assert_eq!(fee, 1); // MIN_FEE floor
 
         // EMA: (10000 + 9 * 1000) / 10 = 1900
-        let fee = compute_suggested_fee(10_000, 1_000);
+        let fee = compute_suggested_fee(10_000, 1, 1_000);
         assert_eq!(fee, 1900);
     }
 

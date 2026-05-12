@@ -434,11 +434,11 @@ Unbonding stake stops counting for active-set ranking, producer selection, refin
 
 All transaction fees are **permanently burned** — not collected by refiners or miners.
 
-- **Suggested fee**: `suggested_fee` field in `BlockHeader`, computed via EMA of previous block's fees. Starts at `MIN_FEE` (1 Flake).
+- **Suggested fee**: `suggested_fee` field in `BlockHeader`, computed via EMA of the previous block's average explicit fee from successful transactions. Starts at `MIN_FEE` (1 Flake).
 - **No minimum fee beyond 1 Flake**: Market determines inclusion
 - **Refiner income**: Block rewards only, not fees
 - **Deflationary**: Fee burning reduces circulating supply
-- **Suggested fee uses burned fees, not declared fees**: Computed from `total_fees_burned` after transaction execution, not `total_fees` before execution. This prevents failed transactions from inflating the fee market signal.
+- **Suggested fee uses successful explicit fees, not declared fees or assays**: Computed from explicit `tx.fee` values after transaction execution. Failed transactions and bond/unbond assay burns do not inflate the ordinary fee market signal.
 
 Invalid transactions (wrong nonce, insufficient balance, invalid unbond amount): no fee burn, no nonce advance.
 
@@ -860,10 +860,11 @@ Where `account_root` is the Merkle-like root of all account states, and `refiner
 
 ### Suggested Fee
 ```
-suggested_fee = EMA(total_fees_burned, previous_suggested_fee)
-              = (burned + 9 × old) / 10, floored at MIN_FEE
+average_fee = explicit_fees_from_successful_txs / successful_tx_count
+suggested_fee = EMA(average_fee, previous_suggested_fee)
+              = (average_fee + 9 × old) / 10, floored at MIN_FEE
 ```
-Computed from `total_fees_burned` (actually burned by successful transactions), not `total_fees` (declared). This prevents failed transactions from inflating the fee signal.
+Computed from explicit fees on successful transactions, not declared fees from failed transactions and not bond/unbond assay burns. Empty blocks use `MIN_FEE` as the current signal, so the suggestion cools back toward the floor.
 
 ### Mempool Congestion Pricing
 

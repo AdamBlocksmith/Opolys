@@ -2059,7 +2059,9 @@ impl OpolysNode {
 
         // Execute all transactions in order
         let expected_chain_id = MAINNET_CHAIN_ID;
-        let mut total_fees_burned: FlakeAmount = 0;
+        let mut total_transaction_burned: FlakeAmount = 0;
+        let mut total_fee_signal: FlakeAmount = 0;
+        let mut successful_transaction_count: u64 = 0;
         for tx in &block.transactions {
             let result = TransactionDispatcher::apply_transaction(
                 tx,
@@ -2071,7 +2073,15 @@ impl OpolysNode {
                 expected_chain_id,
             );
             if result.success {
-                total_fees_burned = total_fees_burned.saturating_add(result.fee_burned);
+                total_transaction_burned = total_transaction_burned
+                    .checked_add(result.fee_burned)
+                    .ok_or_else(|| "Total transaction burns overflow".to_string())?;
+                total_fee_signal = total_fee_signal
+                    .checked_add(tx.fee)
+                    .ok_or_else(|| "Total transaction fee signal overflow".to_string())?;
+                successful_transaction_count = successful_transaction_count
+                    .checked_add(1)
+                    .ok_or_else(|| "Successful transaction count overflow".to_string())?;
             } else {
                 tracing::warn!(
                     tx_id = %tx.tx_id.to_hex(),
@@ -2094,12 +2104,19 @@ impl OpolysNode {
             }
         }
 
-        chain.total_burned = chain.total_burned.saturating_add(total_fees_burned);
+        chain.total_burned = chain
+            .total_burned
+            .checked_add(total_transaction_burned)
+            .ok_or_else(|| "Total burned overflow after transaction burns".to_string())?;
 
-        // Compute suggested fee for the next block via EMA of BURNED fees (not declared).
-        // Fixes H3: previously used total_fees (declared) instead of total_fees_burned (actually burned),
-        // which overstated the fee market signal when transactions failed.
-        let next_suggested_fee = compute_suggested_fee(total_fees_burned, chain.suggested_fee);
+        // Compute suggested fee for the next block via EMA of the average explicit
+        // fee per successful transaction. Bond/unbond assays are burned, but they
+        // are vault friction rather than the ordinary transaction-fee market.
+        let next_suggested_fee = compute_suggested_fee(
+            total_fee_signal,
+            successful_transaction_count,
+            chain.suggested_fee,
+        );
 
         // Update chain state. total_issued tracks gross ore found; total_burned
         // tracks assay waste. Their difference is the net amount distributed.
@@ -2108,7 +2125,8 @@ impl OpolysNode {
             .saturating_add(reward_distribution.gross_reward);
         chain.total_burned = chain
             .total_burned
-            .saturating_add(reward_distribution.mine_assay);
+            .checked_add(reward_distribution.mine_assay)
+            .ok_or_else(|| "Total burned overflow after mine assay".to_string())?;
         chain.current_height = block.header.height;
         chain.current_difficulty = block.header.difficulty;
         chain.latest_block_hash = block_hash.clone();

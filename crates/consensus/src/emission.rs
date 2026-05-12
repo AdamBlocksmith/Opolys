@@ -270,8 +270,8 @@ pub fn compute_stake_coverage(total_bonded: FlakeAmount, total_issued: FlakeAmou
     ((total_bonded as u128 * 1000) / total_issued as u128).min(1000) as u64
 }
 
-/// Compute the suggested fee for the next block using an EMA of the
-/// previous block's transaction fees.
+/// Compute the suggested fee for the next block using an EMA of the previous
+/// block's average explicit fee from successful transactions.
 ///
 /// The suggested fee starts at MIN_FEE (1 Flake) and adjusts via exponential
 /// moving average with a smoothing factor of 0.1. This provides a market-
@@ -279,14 +279,17 @@ pub fn compute_stake_coverage(total_bonded: FlakeAmount, total_issued: FlakeAmou
 /// and block producers.
 pub fn compute_suggested_fee(
     previous_block_fees: FlakeAmount,
+    successful_transaction_count: u64,
     previous_suggested_fee: FlakeAmount,
 ) -> FlakeAmount {
     // EMA with α = 0.1: new = α × current + (1 - α) × old
     // In integer arithmetic: new = (current + 9 × old) / 10
-    let current = previous_block_fees;
+    let current = previous_block_fees
+        .checked_div(successful_transaction_count)
+        .unwrap_or(opolys_core::MIN_FEE);
     let old = previous_suggested_fee;
     let ema = (current.saturating_add(old.saturating_mul(9))) / 10;
-    ema.max(1) // Floor at MIN_FEE (1 Flake)
+    ema.max(opolys_core::MIN_FEE)
 }
 
 #[cfg(test)]
@@ -482,19 +485,31 @@ mod tests {
 
     #[test]
     fn suggested_fee_starts_at_minimum() {
-        let fee = compute_suggested_fee(0, 0);
+        let fee = compute_suggested_fee(0, 0, 0);
         assert_eq!(fee, 1);
     }
 
     #[test]
     fn suggested_fee_updates_via_ema() {
-        let fee = compute_suggested_fee(10_000, 1_000);
+        let fee = compute_suggested_fee(10_000, 1, 1_000);
         assert_eq!(fee, 1900);
     }
 
     #[test]
+    fn suggested_fee_uses_average_burned_fee_not_total_block_fees() {
+        let fee = compute_suggested_fee(100_000, 100, 1_000);
+        assert_eq!(fee, 1_000);
+    }
+
+    #[test]
+    fn suggested_fee_empty_block_drifts_toward_min_fee() {
+        let fee = compute_suggested_fee(0, 0, 1_000);
+        assert_eq!(fee, 900);
+    }
+
+    #[test]
     fn suggested_fee_floors_at_min_fee() {
-        let fee = compute_suggested_fee(0, 0);
+        let fee = compute_suggested_fee(0, 0, 0);
         assert_eq!(fee, 1);
     }
 

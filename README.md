@@ -406,10 +406,11 @@ refiner_share_amount = net_base_reward × coverage_milli / 1000
 ### Suggested Fee (EMA)
 
 ```
-suggested_fee = (current_fees + 9 × previous_suggested_fee) / 10
+average_fee = explicit_fees_from_successful_txs / successful_tx_count
+suggested_fee = (average_fee + 9 × previous_suggested_fee) / 10
 ```
 
-Floored at `MIN_FEE` (1 Flake). Starts at 1 Flake. This is a *suggestion* — the mempool accepts any fee ≥ 1 Flake. Markets set the real price.
+Floored at `MIN_FEE` (1 Flake). Empty blocks use `MIN_FEE` as the current signal, so the suggestion cools back toward the floor. Bond/unbond assays are burned as vault friction, but they do not inflate the ordinary transaction-fee signal.
 
 ---
 
@@ -788,7 +789,8 @@ valid if: little_endian_u64(pow_hash[..8]) ≤ target
 
 ### Suggested Fee
 ```
-suggested_fee = (current_fees + 9 × previous_suggested_fee) / 10, floored at MIN_FEE
+average_fee = explicit_fees_from_successful_txs / successful_tx_count
+suggested_fee = (average_fee + 9 × previous_suggested_fee) / 10, floored at MIN_FEE
 ```
 
 ### Refiner Weight

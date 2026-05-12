@@ -185,14 +185,14 @@ impl Mempool {
             .entries
             .values()
             .find(|e| e.transaction.sender == tx.sender && e.transaction.nonce == tx.nonce)
-            .map(|e| (e.transaction.tx_id.clone(), e.priority_score));
+            .map(|e| (e.transaction.tx_id.clone(), e.transaction.fee));
 
-        if let Some((old_id, old_priority)) = replacement {
-            let min_replacement_fee = old_priority.saturating_mul(11) / 10;
+        if let Some((old_id, old_fee)) = replacement {
+            let min_replacement_fee = old_fee.saturating_mul(11).div_ceil(10);
             if tx.fee < min_replacement_fee {
                 return Err(OpolysError::InvalidTransaction(format!(
                     "Replacement fee {} must be at least 10% higher than existing fee {}",
-                    tx.fee, old_priority
+                    tx.fee, old_fee
                 )));
             }
             self.remove_transaction(&old_id);
@@ -584,6 +584,24 @@ mod tests {
                 .is_ok()
         );
         assert_eq!(mempool.transaction_count(), 1);
+    }
+
+    #[test]
+    fn same_nonce_replacement_compares_against_fee_not_priority_score() {
+        let mut mempool = Mempool::new();
+        let tx1 = make_tx(b"alice", 0, 100);
+        let tx2 = make_tx(b"alice", 0, 110);
+
+        mempool
+            .add_transaction(tx1, 1_000_000, 0, 0, 1, opolys_core::MAINNET_CHAIN_ID)
+            .unwrap();
+        mempool
+            .add_transaction(tx2, 1, 0, 0, 1, opolys_core::MAINNET_CHAIN_ID)
+            .unwrap();
+
+        let ordered = mempool.get_ordered_transactions();
+        assert_eq!(ordered.len(), 1);
+        assert_eq!(ordered[0].fee, 110);
     }
 
     #[test]
