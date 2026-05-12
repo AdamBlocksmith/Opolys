@@ -76,9 +76,9 @@ enum Command {
         /// Amount in OPL (e.g. "10.5")
         amount: String,
 
-        /// Fee in OPL (default: 0.000001 = 1 Flake)
-        #[arg(long, default_value = "0.000001")]
-        fee: String,
+        /// Fee in OPL. If omitted, uses the chain's current suggested fee.
+        #[arg(long)]
+        fee: Option<String>,
 
         /// Nonce for this account (query from RPC if not provided)
         #[arg(long)]
@@ -97,9 +97,9 @@ enum Command {
         /// Amount to bond in OPL
         amount: String,
 
-        /// Fee in OPL (default: 0.000001)
-        #[arg(long, default_value = "0.000001")]
-        fee: String,
+        /// Fee in OPL. If omitted, uses the chain's current suggested fee.
+        #[arg(long)]
+        fee: Option<String>,
 
         /// Nonce for this account
         #[arg(long)]
@@ -118,9 +118,9 @@ enum Command {
         /// Amount to unbond in OPL
         amount: String,
 
-        /// Fee in OPL (default: 0.000001)
-        #[arg(long, default_value = "0.000001")]
-        fee: String,
+        /// Fee in OPL. If omitted, uses the chain's current suggested fee.
+        #[arg(long)]
+        fee: Option<String>,
 
         /// Nonce for this account
         #[arg(long)]
@@ -260,7 +260,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let recipient_id = opolys_core::ObjectId::from_hex(&recipient)
                 .map_err(|e| format!("Invalid recipient address: {}", e))?;
             let amount_flakes = parse_opl_amount(&amount)?;
-            let fee_flakes = parse_opl_amount(&fee)?;
+            let fee_flakes = resolve_fee(&cli.rpc_url, fee).await?;
 
             let nonce_val = match nonce {
                 Some(n) => n,
@@ -292,7 +292,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let keypair = seed.derive_keypair(account);
 
             let amount_flakes = parse_opl_amount(&amount)?;
-            let fee_flakes = parse_opl_amount(&fee)?;
+            let fee_flakes = resolve_fee(&cli.rpc_url, fee).await?;
 
             let nonce_val = match nonce {
                 Some(n) => n,
@@ -323,7 +323,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let keypair = seed.derive_keypair(account);
 
             let amount_flakes = parse_opl_amount(&amount)?;
-            let fee_flakes = parse_opl_amount(&fee)?;
+            let fee_flakes = resolve_fee(&cli.rpc_url, fee).await?;
 
             let nonce_val = match nonce {
                 Some(n) => n,
@@ -420,6 +420,47 @@ async fn query_nonce(rpc_url: &str, address: String) -> Result<u64, Box<dyn std:
     Ok(nonce)
 }
 
+async fn query_suggested_fee(rpc_url: &str) -> Result<FlakeAmount, Box<dyn std::error::Error>> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/rpc", rpc_url))
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "opl_getChainInfo",
+            "params": [],
+            "id": 1
+        }))
+        .send()
+        .await?;
+
+    let body: serde_json::Value = resp.json().await?;
+    if let Some(error) = body.get("error") {
+        return Err(format!("RPC error while querying suggested fee: {}", error).into());
+    }
+    let result = body.get("result").ok_or("No result in RPC response")?;
+    let suggested_fee = result
+        .get("suggested_fee")
+        .and_then(|n| n.as_u64())
+        .ok_or("No suggested_fee in chain info response")?;
+    Ok(suggested_fee.max(opolys_core::MIN_FEE))
+}
+
+async fn resolve_fee(
+    rpc_url: &str,
+    explicit_fee: Option<String>,
+) -> Result<FlakeAmount, Box<dyn std::error::Error>> {
+    match explicit_fee {
+        Some(fee) => Ok(parse_opl_amount(&fee)?),
+        None => query_suggested_fee(rpc_url).await.map_err(|e| {
+            format!(
+                "Could not query chain suggested fee from RPC: {}. Pass --fee explicitly for offline signing.",
+                e
+            )
+            .into()
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -442,6 +483,40 @@ mod tests {
         let cli = Cli::parse_from(["opl", "new"]);
 
         assert_eq!(cli.rpc_url, DEFAULT_RPC_URL);
+    }
+
+    #[test]
+    fn transfer_fee_defaults_to_chain_suggestion() {
+        let cli = Cli::parse_from([
+            "opl",
+            "transfer",
+            "--from-env",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "1",
+        ]);
+
+        let Command::Transfer { fee, .. } = cli.command else {
+            panic!("expected transfer command");
+        };
+        assert!(fee.is_none());
+    }
+
+    #[test]
+    fn transfer_fee_allows_explicit_override() {
+        let cli = Cli::parse_from([
+            "opl",
+            "transfer",
+            "--from-env",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "1",
+            "--fee",
+            "0.123456",
+        ]);
+
+        let Command::Transfer { fee, .. } = cli.command else {
+            panic!("expected transfer command");
+        };
+        assert_eq!(fee.as_deref(), Some("0.123456"));
     }
 
     #[test]

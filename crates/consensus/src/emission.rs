@@ -21,7 +21,7 @@
 //! There is no governance body and no parameter votes. Fee markets and chain
 //! state drive everything.
 
-use opolys_core::{FlakeAmount, MIN_DIFFICULTY};
+use opolys_core::{CAPACITY_RATIO, FlakeAmount, MIN_DIFFICULTY};
 
 const Q32_ONE: u128 = 1u128 << 32;
 const LN_2_Q32: u128 = 2_977_044_471;
@@ -274,7 +274,7 @@ pub fn compute_stake_coverage(total_bonded: FlakeAmount, total_issued: FlakeAmou
 /// block's average explicit fee from successful transactions.
 ///
 /// The suggested fee starts at MIN_FEE (1 Flake) and adjusts via exponential
-/// moving average with a smoothing factor of 0.1. This provides a market-
+/// moving average with a window derived from `CAPACITY_RATIO`. This provides a market-
 /// driven fee signal without governance — fees are purely between transactors
 /// and block producers.
 pub fn compute_suggested_fee(
@@ -288,7 +288,11 @@ pub fn compute_suggested_fee(
         .checked_div(successful_transaction_count)
         .unwrap_or(opolys_core::MIN_FEE);
     let old = previous_suggested_fee;
-    let ema = (current.saturating_add(old.saturating_mul(9))) / 10;
+    // Weighting is derived from chain capacity: one block of new demand plus
+    // the remaining mempool/block capacity window of prior fee pressure.
+    let window = CAPACITY_RATIO.max(1);
+    let old_weight = window.saturating_sub(1);
+    let ema = (current.saturating_add(old.saturating_mul(old_weight))) / window;
     ema.max(opolys_core::MIN_FEE)
 }
 

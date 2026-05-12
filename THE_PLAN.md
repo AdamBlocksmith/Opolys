@@ -436,6 +436,7 @@ All transaction fees are **permanently burned** — not collected by refiners or
 
 - **Suggested fee**: `suggested_fee` field in `BlockHeader`, computed via EMA of the previous block's average explicit fee from successful transactions. Starts at `MIN_FEE` (1 Flake).
 - **No minimum fee beyond 1 Flake**: Market determines inclusion
+- **System-derived wallet default**: Wallets use live chain `suggested_fee` when `--fee` is omitted
 - **Refiner income**: Block rewards only, not fees
 - **Deflationary**: Fee burning reduces circulating supply
 - **Suggested fee uses successful explicit fees, not declared fees or assays**: Computed from explicit `tx.fee` values after transaction execution. Failed transactions and bond/unbond assay burns do not inflate the ordinary fee market signal.
@@ -861,8 +862,9 @@ Where `account_root` is the Merkle-like root of all account states, and `refiner
 ### Suggested Fee
 ```
 average_fee = explicit_fees_from_successful_txs / successful_tx_count
-suggested_fee = EMA(average_fee, previous_suggested_fee)
-              = (average_fee + 9 × old) / 10, floored at MIN_FEE
+suggested_fee =
+    (average_fee + (CAPACITY_RATIO - 1) × previous_suggested_fee) / CAPACITY_RATIO,
+    floored at MIN_FEE
 ```
 Computed from explicit fees on successful transactions, not declared fees from failed transactions and not bond/unbond assay burns. Empty blocks use `MIN_FEE` as the current signal, so the suggestion cools back toward the floor.
 

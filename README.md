@@ -407,7 +407,8 @@ refiner_share_amount = net_base_reward × coverage_milli / 1000
 
 ```
 average_fee = explicit_fees_from_successful_txs / successful_tx_count
-suggested_fee = (average_fee + 9 × previous_suggested_fee) / 10
+suggested_fee =
+    (average_fee + (CAPACITY_RATIO - 1) × previous_suggested_fee) / CAPACITY_RATIO
 ```
 
 Floored at `MIN_FEE` (1 Flake). Empty blocks use `MIN_FEE` as the current signal, so the suggestion cools back toward the floor. Bond/unbond assays are burned as vault friction, but they do not inflate the ordinary transaction-fee signal.
@@ -550,6 +551,7 @@ All fees are **permanently burned** — not transferred to refiners or miners. T
 
 - **No minimum fee beyond 1 Flake**: The mempool accepts any transaction
 - **No fee schedule**: Markets determine inclusion priority
+- **System-derived default**: Wallets use the chain's live `suggested_fee` when `--fee` is omitted
 - **Refiner income**: Block rewards only, never fees
 - **Deflationary**: Fee burning can make circulating supply decrease over time
 
@@ -790,7 +792,9 @@ valid if: little_endian_u64(pow_hash[..8]) ≤ target
 ### Suggested Fee
 ```
 average_fee = explicit_fees_from_successful_txs / successful_tx_count
-suggested_fee = (average_fee + 9 × previous_suggested_fee) / 10, floored at MIN_FEE
+suggested_fee =
+    (average_fee + (CAPACITY_RATIO - 1) × previous_suggested_fee) / CAPACITY_RATIO,
+    floored at MIN_FEE
 ```
 
 ### Refiner Weight
