@@ -6,8 +6,9 @@
 //! identification. Transaction integrity is guaranteed by a streaming Merkle-
 //! like root over each transaction's ID, fee, and nonce.
 //!
-//! Fees included in blocks are **burned** rather than collected by any party,
-//! keeping the fee market pure and deflationary.
+//! Fees included in blocks are routed by production kind: mined-block fees are
+//! burned, while Proof-of-Refinement block fees pay the selected refiner
+//! producer.
 
 use opolys_core::{
     BLOCK_TARGET_TIME_SECS, BLOCK_VERSION, Block, BlockAttestation, BlockHeader,
@@ -38,27 +39,27 @@ pub fn minimum_block_timestamp_delta_secs() -> u64 {
 
 /// Metadata extracted from a block for indexing and querying.
 ///
-/// Captures the header, transaction count, and total fees **burned** in the
-/// block. Because Opolys burns all fees, `total_fees_burned` directly
-/// measures the deflationary pressure applied by this block.
+/// Captures the header, transaction count, and total ordinary fees declared in
+/// the block. The node decides whether those fees burn or pay a refiner based
+/// on the block production kind.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize, Serialize, Deserialize)]
 pub struct BlockInfo {
     /// The block header containing height, hashes, timestamp, and difficulty.
     pub header: BlockHeader,
     /// Number of transactions included in this block.
     pub transaction_count: u32,
-    /// Sum of all transaction fees in this block — burned, not collected.
-    pub total_fees_burned: u64,
+    /// Sum of all ordinary transaction fees in this block.
+    pub total_transaction_fees: u64,
 }
 
 impl BlockInfo {
     /// Derive `BlockInfo` from a complete block by summing all transaction fees.
     pub fn from_block(block: &Block) -> Self {
-        let total_fees_burned: u64 = block.transactions.iter().map(|tx| tx.fee).sum();
+        let total_transaction_fees: u64 = block.transactions.iter().map(|tx| tx.fee).sum();
         Self {
             header: block.header.clone(),
             transaction_count: block.transactions.len() as u32,
-            total_fees_burned,
+            total_transaction_fees,
         }
     }
 }
@@ -387,28 +388,21 @@ pub fn validate_block(
     //   The producer's public key must be stored on-chain in the AccountStore.
     // - Genesis block (height 0): skip both
     if expected_height > 0 {
-        let has_pow = block.header.pow_proof.is_some();
-        let has_refiner_signature = block.header.refiner_signature.is_some();
-        if has_pow && has_refiner_signature {
-            return Err(OpolysError::BlockValidationFailed(
-                "Block must not have both pow_proof and refiner_signature".to_string(),
-            ));
-        }
-        if !has_pow && !has_refiner_signature {
-            return Err(OpolysError::BlockValidationFailed(
-                "Block must have either pow_proof or refiner_signature".to_string(),
-            ));
-        }
+        let production_kind = block.header.production_kind().ok_or_else(|| {
+            OpolysError::BlockValidationFailed(
+                "Block must have exactly one production proof".to_string(),
+            )
+        })?;
         if block.header.producer.0.is_zero() {
             return Err(OpolysError::BlockValidationFailed(
                 "Block producer must be a non-zero ObjectId".to_string(),
             ));
         }
 
-        if has_pow {
+        if production_kind == opolys_core::BlockProductionKind::Mined {
             // PoW block — verify the proof-of-work
             crate::pow::verify_pow_light(&block.header, block.header.difficulty)?;
-        } else if has_refiner_signature {
+        } else if production_kind == opolys_core::BlockProductionKind::Refined {
             // Refiner block — verify the refiner's ed25519 signature
             // 1. The signature must be exactly 64 bytes (ed25519)
             let sig = block.header.refiner_signature.as_ref().unwrap();
@@ -424,11 +418,8 @@ pub fn validate_block(
             //    AccountStore is available, not here in consensus-only validation.
             //    The signature length, producer non-zero, and structure checks
             //    are all we can verify without on-chain account data.
-        } else {
-            // Neither PoW proof nor refiner signature — invalid
-            return Err(OpolysError::BlockValidationFailed(
-                "Block must have either pow_proof or refiner_signature".to_string(),
-            ));
+        } else if production_kind == opolys_core::BlockProductionKind::Genesis {
+            unreachable!("height > 0 excludes genesis production kind");
         }
     }
 
@@ -647,10 +638,7 @@ mod tests {
             genesis_ceremony: None,
         };
         let err = validate_block(&block, 1, &Hash::zero(), 1000, 1, 1045).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("both pow_proof and refiner_signature")
-        );
+        assert!(err.to_string().contains("exactly one production proof"));
     }
 
     #[test]

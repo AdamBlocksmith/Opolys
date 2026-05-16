@@ -445,7 +445,9 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
         tracing::info!("Mining: disabled (run with --mine to enable block production)");
     }
     if config.refine {
-        tracing::info!("Validation: enabled (producing refiner blocks when refiner is active)");
+        tracing::info!(
+            "Proof of Refinement: enabled (producing refiner blocks when selected after miner silence)"
+        );
     }
     if config.no_rpc {
         tracing::info!("RPC: disabled (run without --no-rpc to enable)");
@@ -671,13 +673,13 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
                     chain.current_height
                 };
 
-                // Wait for the target block time
+                // POR activates only after one target interval passes with no new block.
                 tokio::time::sleep(std::time::Duration::from_millis(
                     opolys_core::BLOCK_TARGET_TIME_MS,
                 ))
                 .await;
 
-                // Check if a miner block arrived while we waited
+                // Check if any block arrived while we waited.
                 let height_after = {
                     let chain = refining_node.chain.read().await;
                     chain.current_height

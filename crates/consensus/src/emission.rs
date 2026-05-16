@@ -11,10 +11,11 @@
 //!   rises, the per-block reward naturally declines — mimicking the
 //!   diminishing returns of real-world gold extraction.
 //! - **Refiner weight** = bonded stake. Bond age is tracked for provenance and
-//!   FIFO unbonding, but it does not increase reward or finality weight.
+//!   FIFO unbonding, but it does not increase producer-selection or finality
+//!   weight.
 //! - **Stake coverage** — the ratio of bonded stake to total issued supply —
-//!   determines how much of each block reward flows to miners vs. refiners.
-//!   At 0% coverage, all rewards go to miners; at 100%, all go to refiners.
+//!   is an observability and difficulty-floor signal, not a passive reward
+//!   splitter.
 //!
 //! There is no governance body and no parameter votes. Fee markets and chain
 //! state drive everything.
@@ -181,10 +182,9 @@ pub fn compute_base_reward(base_reward: FlakeAmount, difficulty: u64) -> FlakeAm
 /// The result is clamped to a minimum of 1000 (1.0x) — every valid block
 /// earns at least the base reward.
 pub fn compute_vein_yield(difficulty: u64, hash_int: u64) -> u64 {
-    // hash_int == 0 means Refiner block — returns flat 1.0x yield by design
-    // Refiners earn predictable steady income (BASE_REWARD / difficulty)
-    // Miners earn variable income based on hash luck (1x to ~4x)
-    // This distinction is intentional: vaults earn fees, miners earn ore
+    // hash_int == 0 returns the floor and carries no ore-discovery bonus.
+    // Proof-of-Refinement blocks receive no issuance reward at the node layer.
+    // Miners earn variable income based on hash luck (1x to ~4x).
     if difficulty == 0 || hash_int == 0 {
         return 1000;
     }
@@ -216,23 +216,6 @@ pub fn ln_milli(x: u64) -> u64 {
         return 0;
     }
     ln_ratio_milli(x, 1000)
-}
-
-/// Compute a refiner's share of the block reward based on bonded stake.
-///
-/// Bond age is intentionally ignored: refiners are paid for security stake,
-/// not for the passage of time.
-pub fn compute_refiner_reward(
-    block_reward: FlakeAmount,
-    refiner_stake: FlakeAmount,
-    _refiner_age_years: u64,
-    total_weight: FlakeAmount,
-) -> FlakeAmount {
-    if total_weight == 0 {
-        return 0;
-    }
-    let weight = compute_refiner_weight(refiner_stake, 0);
-    saturating_u128_to_flakes((block_reward as u128 * weight as u128) / total_weight as u128)
 }
 
 /// Compute a single entry's weighting factor.
@@ -401,10 +384,6 @@ mod tests {
     fn reward_math_saturates_instead_of_truncating() {
         assert_eq!(compute_block_reward(u64::MAX, 1, 1), u64::MAX);
         assert_eq!(compute_refiner_weight(u64::MAX, u64::MAX), u64::MAX);
-        assert_eq!(
-            compute_refiner_reward(u64::MAX, u64::MAX, u64::MAX, 1),
-            u64::MAX
-        );
     }
 
     #[test]
@@ -505,14 +484,6 @@ mod tests {
     #[test]
     fn base_reward_is_332_opl() {
         assert_eq!(BASE_REWARD, 332 * opolys_core::FLAKES_PER_OPL);
-    }
-
-    #[test]
-    fn refiner_reward_proportional_to_weight() {
-        let reward = 1_000_000u64;
-        let r1 = compute_refiner_reward(reward, 100_000, 1000, 200_000);
-        assert!(r1 > 0);
-        assert!(r1 < reward);
     }
 
     /// Verify that vein yield uses the leading-zero-bits difficulty model

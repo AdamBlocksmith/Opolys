@@ -828,7 +828,6 @@ struct RewardDistribution {
     mine_assay: FlakeAmount,
     net_reward: FlakeAmount,
     miner_share: FlakeAmount,
-    refiner_share: FlakeAmount,
 }
 
 fn integer_sqrt_round(n: u128) -> u128 {
@@ -875,7 +874,6 @@ fn compute_reward_distribution(
             mine_assay: 0,
             net_reward: 0,
             miner_share: 0,
-            refiner_share: 0,
         };
     }
 
@@ -887,7 +885,6 @@ fn compute_reward_distribution(
         mine_assay,
         net_reward,
         miner_share: net_reward,
-        refiner_share: 0,
     }
 }
 
@@ -1689,11 +1686,11 @@ impl OpolysNode {
     /// Apply a mined or received block to the chain state.
     ///
     /// This is the core state transition function:
-    /// 1. Validate block (version, height, previous_hash, difficulty, PoW, etc.)
+    /// 1. Validate block (version, height, previous_hash, difficulty, production proof, etc.)
     /// 2. Compute the block hash and update chain linkage
-    /// 3. Execute all transactions (Transfer/Bond/Unbond), burning fees
-    /// 4. Compute block reward using vein yield (integer-only natural log)
-    /// 5. Update issuance, difficulty, suggested_fee, and consensus phase
+    /// 3. Execute all transactions (Transfer/Bond/Unbond), routing ordinary fees by block kind
+    /// 4. Compute mined-block reward using vein yield (integer-only natural log); POR blocks issue zero
+    /// 5. Update issuance, difficulty, suggested_fee, and refiner liveness
     /// 6. Remove processed transactions from the mempool
     /// 7. Persist all state to disk (if storage is available)
     pub async fn apply_block(&self, block: &Block) -> Result<Hash, String> {
@@ -1732,6 +1729,10 @@ impl OpolysNode {
             now_secs,
         )
         .map_err(|e| format!("Block validation failed: {}", e))?;
+        let production_kind = block
+            .header
+            .production_kind()
+            .ok_or_else(|| "Block has invalid Proof-of-Refinement production fields".to_string())?;
 
         // STATE ROOT CONVENTION (Ethereum-style parent-state-root):
         // block.header.state_root = state root computed at end of block N-1
@@ -1778,9 +1779,7 @@ impl OpolysNode {
                 .load_block(attestation.height)
                 .map_err(|e| format!("Failed to load attested block: {}", e))?
                 .ok_or_else(|| "Attested block is not known locally".to_string())?;
-            if attested_block.header.refiner_signature.is_none()
-                || attested_block.header.pow_proof.is_some()
-            {
+            if !attested_block.header.is_refined() {
                 return Err("Attestation target must be a refiner-produced block".to_string());
             }
             let canonical_hash = compute_block_hash(&attested_block.header);
@@ -1866,7 +1865,7 @@ impl OpolysNode {
         // PoW rewards can only be credited to a registered account whose
         // public key is known on-chain. This prevents arbitrary reward routing
         // to unregistered ObjectIds.
-        if block.header.pow_proof.is_some() {
+        if production_kind == BlockProductionKind::Mined {
             let account = accounts
                 .get_account(&block.header.producer)
                 .ok_or_else(|| "PoW block producer account not found".to_string())?;
@@ -1878,7 +1877,7 @@ impl OpolysNode {
         }
 
         // Verify Refiner block producer was legitimately selected
-        if block.header.refiner_signature.is_some() && !block.header.producer.0.is_zero() {
+        if production_kind == BlockProductionKind::Refined && !block.header.producer.0.is_zero() {
             let mut seed_bytes = [0u8; 8];
             seed_bytes.copy_from_slice(&chain.latest_block_hash.0[..8]);
             let seed = u64::from_be_bytes(seed_bytes);
@@ -1966,14 +1965,11 @@ impl OpolysNode {
         // Supply starts at exactly zero.
         // First OPL enters circulation at block 1 when real mining begins.
         // Matches gold analogy — nobody found gold until someone dug.
-        let block_reward = if block.header.height == 0 {
-            0
-        } else {
-            if block.header.pow_proof.is_none() {
-                0
-            } else {
-                // Miner block: use actual hash value for vein yield calculation
-                // Lucky hashes (small hash_int) earn higher yield
+        let block_reward = match production_kind {
+            BlockProductionKind::Genesis | BlockProductionKind::Refined => 0,
+            BlockProductionKind::Mined => {
+                // Mined block: use actual hash value for vein yield calculation.
+                // Lucky hashes (small hash_int) earn higher yield.
                 let pow_hash_value = pow::compute_pow_hash_value(&block.header).unwrap_or(0u64);
                 emission::compute_block_reward(
                     chain.base_reward,
@@ -2007,7 +2003,6 @@ impl OpolysNode {
             coverage_milli,
         );
         let miner_share_amount = reward_distribution.miner_share;
-        let refiner_share_amount = reward_distribution.refiner_share;
         let mut planned_reward_credits: HashMap<ObjectId, FlakeAmount> = HashMap::new();
 
         // Credit the producer share to the block producer (miner or selected refiner).
@@ -2015,24 +2010,6 @@ impl OpolysNode {
         let producer = &block.header.producer;
         if !producer.0.is_zero() && miner_share_amount > 0 {
             add_planned_credit(&mut planned_reward_credits, producer, miner_share_amount)?;
-        }
-
-        // Automatic refiner block reward share is intentionally disabled.
-        // This branch remains unreachable unless a future protocol version
-        // reintroduces a nonzero automatic refiner share.
-        if refiner_share_amount > 0 {
-            let current_timestamp = chain.block_timestamps.last().copied().unwrap_or(0);
-            let total_weight = refiners.total_weight(current_timestamp);
-            if total_weight > 0 {
-                for v in refiners.active_refiners() {
-                    let v_weight = v.weight(current_timestamp);
-                    let v_share = ((refiner_share_amount as u128 * v_weight as u128)
-                        / total_weight as u128) as FlakeAmount;
-                    if v_share > 0 {
-                        add_planned_credit(&mut planned_reward_credits, &v.object_id, v_share)?;
-                    }
-                }
-            }
         }
 
         ensure_planned_credits_creditable(&accounts, &planned_reward_credits)?;
@@ -2094,7 +2071,7 @@ impl OpolysNode {
             }
         }
 
-        if block.header.refiner_signature.is_some() {
+        if production_kind == BlockProductionKind::Refined {
             if !producer.0.is_zero() && total_transaction_fees > 0 {
                 let mut planned_fee_credit: HashMap<ObjectId, FlakeAmount> = HashMap::new();
                 add_planned_credit(&mut planned_fee_credit, producer, total_transaction_fees)?;
@@ -2343,6 +2320,42 @@ mod tests {
         refresh_body_roots_and_refiner_signature(node, block);
     }
 
+    fn signed_transfer(
+        signing_key: &ed25519_dalek::SigningKey,
+        recipient: ObjectId,
+        amount: FlakeAmount,
+        fee: FlakeAmount,
+        nonce: u64,
+    ) -> Transaction {
+        let sender = opolys_crypto::hash_to_object_id(signing_key.verifying_key().as_bytes());
+        let action = TransactionAction::Transfer { recipient, amount };
+        let tx_id_bytes =
+            borsh::to_vec(&(sender.clone(), action.clone(), fee, nonce, MAINNET_CHAIN_ID))
+                .expect("test transaction id should serialize");
+        let tx_id =
+            opolys_crypto::hash_to_object_id_with_domain(opolys_crypto::DOMAIN_TX_ID, &tx_id_bytes);
+        let payload = opolys_crypto::transaction_signing_payload(
+            &sender,
+            &action,
+            fee,
+            nonce,
+            MAINNET_CHAIN_ID,
+        )
+        .expect("test signing payload should serialize");
+        Transaction {
+            tx_id,
+            sender,
+            action,
+            fee,
+            signature: signing_key.sign(&payload).to_bytes().to_vec(),
+            signature_type: SIGNATURE_TYPE_ED25519,
+            nonce,
+            chain_id: MAINNET_CHAIN_ID,
+            data: vec![],
+            public_key: signing_key.verifying_key().as_bytes().to_vec(),
+        }
+    }
+
     fn dummy_slash_evidence(height: u64) -> DoubleSignEvidence {
         DoubleSignEvidence {
             producer: ObjectId(Hash::from_bytes([42u8; 32])),
@@ -2484,13 +2497,10 @@ mod tests {
 
         assert_eq!(distribution.mine_assay, 1_041);
         assert_eq!(distribution.net_reward, 998_959);
-        assert_eq!(
-            distribution.miner_share + distribution.refiner_share,
-            998_959
-        );
+        assert_eq!(distribution.miner_share, 998_959);
         assert_eq!(
             distribution.gross_reward - distribution.mine_assay,
-            distribution.miner_share + distribution.refiner_share
+            distribution.miner_share
         );
     }
 
@@ -2501,28 +2511,17 @@ mod tests {
         assert_eq!(distribution.mine_assay, 4_166);
         assert_eq!(distribution.net_reward, 1_995_834);
         assert_eq!(distribution.miner_share, 1_995_834);
-        assert_eq!(distribution.refiner_share, 0);
-        assert_eq!(
-            distribution.miner_share + distribution.refiner_share,
-            1_995_834
-        );
+        assert_eq!(distribution.miner_share, 1_995_834);
     }
 
     #[test]
-    fn refiner_block_reward_has_no_vein_bonus() {
-        // Refiner-produced blocks use hash_int = 0, so emission returns flat 1.0x yield.
-        // That makes gross_reward == base_reward_amount: no vein bonus exists to route
-        // to the selected producer.
-        let distribution = compute_reward_distribution(960_000, 960_000, 4, 500);
+    fn proof_of_refinement_has_no_issuance_reward() {
+        let distribution = compute_reward_distribution(0, 0, 4, 500);
 
-        assert_eq!(distribution.mine_assay, 2_000);
-        assert_eq!(distribution.net_reward, 958_000);
-        assert_eq!(distribution.miner_share, 958_000);
-        assert_eq!(distribution.refiner_share, 0);
-        assert_eq!(
-            distribution.miner_share + distribution.refiner_share,
-            distribution.net_reward
-        );
+        assert_eq!(distribution.gross_reward, 0);
+        assert_eq!(distribution.mine_assay, 0);
+        assert_eq!(distribution.net_reward, 0);
+        assert_eq!(distribution.miner_share, 0);
     }
 
     #[test]
@@ -3021,6 +3020,61 @@ mod tests {
                 .contains("no active refiner producer available")
         );
         assert_eq!(node.chain.read().await.current_height, 0);
+    }
+
+    #[tokio::test]
+    async fn proof_of_refinement_block_pays_fees_not_issuance() {
+        let (config, _dir) = test_config();
+        let node = OpolysNode::new(config);
+        register_test_miner_account(&node).await;
+        activate_test_refiner(&node).await;
+        node.chain.write().await.current_difficulty = MIN_DIFFICULTY;
+
+        let user_key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+        let user_id = opolys_crypto::hash_to_object_id(user_key.verifying_key().as_bytes());
+        let recipient = opolys_crypto::hash_to_object_id(b"por-fee-recipient");
+        let amount = opl_to_flake(1);
+        let fee = 1_234;
+        {
+            let mut accounts = node.accounts.write().await;
+            accounts.create_account(user_id.clone()).unwrap();
+            let account = accounts.get_account_mut(&user_id).unwrap();
+            account.public_key = Some(user_key.verifying_key().as_bytes().to_vec());
+            account.balance = opl_to_flake(10);
+        }
+
+        let tx = signed_transfer(&user_key, recipient.clone(), amount, fee, 0);
+        let mut block = produce_test_refiner_block(&node).await;
+        block.transactions = vec![tx];
+        refresh_body_roots_and_refiner_signature(&node, &mut block);
+
+        let issued_before = node.chain.read().await.total_issued;
+        let burned_before = node.chain.read().await.total_burned;
+        node.apply_block(&block)
+            .await
+            .expect("POR block with fee-paying transfer should apply");
+
+        let chain = node.chain.read().await;
+        assert_eq!(chain.total_issued, issued_before);
+        assert_eq!(chain.total_burned, burned_before);
+        drop(chain);
+
+        let accounts = node.accounts.read().await;
+        assert_eq!(
+            accounts.get_account(&node.miner_id).unwrap().balance,
+            fee,
+            "selected refiner producer receives only the ordinary transaction fee"
+        );
+        assert_eq!(
+            accounts.get_account(&recipient).unwrap().balance,
+            amount,
+            "recipient receives the transferred OPL"
+        );
+        assert_eq!(
+            accounts.get_account(&user_id).unwrap().balance,
+            opl_to_flake(10) - amount - fee,
+            "sender pays amount plus ordinary fee"
+        );
     }
 
     #[tokio::test]

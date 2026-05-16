@@ -14,7 +14,7 @@ Opolys encodes these properties directly into consensus:
 |---|---|---|
 | **Gold mining gets harder over time** | Difficulty rises as more OPL is mined | Miners must find hashes with more leading zero bits as the network grows. More hash power → faster blocks → difficulty increases → each block yields less OPL, just like real veins depleting. |
 | **Gold supply has no cap** | No maximum supply | There is no "21 million" moment. OPL issuance naturally declines as difficulty rises, but it never reaches zero. Like gold — there's always a little more to be found, it just costs more. |
-| **Gold is lost over time** | Base transaction fees are burned | Every base fee permanently destroys OPL from circulation. Shipwrecks, lost jewelry, melted coins — Opolys models this as fee burning. The circulating supply can *shrink*. |
+| **Gold is lost over time** | Mined-block fees and assays are burned | Mined-block fees and assay burns permanently destroy OPL from circulation. Shipwrecks, lost jewelry, melted coins — Opolys models this as supply attrition. The circulating supply can *shrink*. |
 | **Gold mining is a physical process** | EVO-OMAP memory-hard proof-of-work | Mining requires 256 MiB of memory and data-dependent computation. No shortcut, no ASIC cheat. Like digging a shaft — you have to move the rock. |
 | **Gold ore varies in richness** | Vein yield: `1 + ln(target / hash_int)` | A lucky gold strike yields more than a poor one. Vein yield models this: most blocks earn ~2x base reward, exceptional ones earn more. The math is natural, not scheduled. |
 | **Gold production rate is known** | BASE_REWARD derived from world gold production via genesis ceremony | 3,630 tonnes of gold are mined annually (~116.7 million troy ounces). Divided by 350,640 blocks per year = 332 OPL per block at minimum difficulty. BASE_REWARD is set from live LBMA/USGS/WGC data at the genesis ceremony. |
@@ -22,7 +22,7 @@ Opolys encodes these properties directly into consensus:
 | **Gold held in vaults secures settlement** | Refiner staking by bonded collateral | Bonded OPL gives refiners block production rights when the chain stalls. Refiner weight is stake-only: no time-based yield, no age rent, and no reward just for waiting. |
 | **Gold can be unvaulted** | FIFO unbonding with 1-epoch delay | Unbonding OPL is like withdrawing gold from a vault. It takes time (960 blocks = exactly 24 hours). During the delay, stake remains slashable but no longer earns reward weight. The oldest deposits are withdrawn first. |
 | **Gold bars are uniform** | Every OPL is identical. One sub-unit (Flake). No tokens, no assets, no governance tokens | There's no "pennyweight" gold or "grain" gold in Opolys. 1 OPL = 1,000,000 Flakes. Period. The chain tracks one asset. |
-| **Gold supply is self-regulating** | Natural equilibrium — no governance needed | When fees are burned faster than rewards are issued, supply shrinks. When mining is too easy, difficulty rises and issuance drops. The protocol never needs a vote. |
+| **Gold supply is self-regulating** | Natural equilibrium — no governance needed | When burns outpace rewards, supply shrinks. When mining is too easy, difficulty rises and issuance drops. The protocol never needs a vote. |
 
 **TL;DR**: If Bitcoin is digital gold with a cap, Opolys is digital gold *without* a cap — because real gold doesn't have one either. The value comes from the cost of production, not from a supply schedule.
 
@@ -289,14 +289,33 @@ Account addresses are **Blake3-256 hashes of ed25519 public keys** — not the p
 
 ## Consensus
 
-Opolys uses **hybrid miner/refiner consensus** with mining first and refiner production only when the chain stalls — no governance votes, no hard phase switch.
+Opolys uses **Proof of Refinement (POR)**: mining is the primary production path, and refiners act as bonded assay/vault operators who can move the chain only when miners are silent. There are no governance votes, no hard phase switch, and no passive staking yield.
 
 ### How It Works
 
 1. **Miners compete** to find EVO-OMAP proof-of-work solutions (like physical gold miners)
-2. **Refiners bond stake** and earn the right to produce stalled-chain blocks proportional to active bonded stake (like trusted vaults stepping in when mine output pauses)
+2. **Refiners bond collateral** and earn the right to produce stalled-chain blocks proportional to active bonded stake (like trusted vaults stepping in when mine output pauses)
 3. **Stake coverage** (`bonded_stake / total_issued`) raises the organic difficulty floor, so weak bonded security cannot cheaply pull mining difficulty down
 4. **Refiner income is activity-based**: mined blocks burn ordinary fees; refiner-produced blocks pay ordinary fees to the selected refiner producer
+
+### Proof of Refinement
+
+POR is not proof-of-stake yield. Stake is collateral, not a source of interest.
+
+```text
+Mined block:
+  valid EVO-OMAP proof
+  producer earns mined reward after mine assay
+  ordinary tx fees burn
+
+Refined block:
+  no mined block arrived during the target interval
+  selected active refiner signs the block
+  producer earns only the ordinary tx fees included in that block
+  no issuance reward, no vein yield, no passive stake return
+```
+
+Selection is stake-weighted to resist Sybil splitting, but bond age does not increase producer chance, finality weight, or rewards. A refiner is paid only when it actually keeps the chain moving.
 
 ### Difficulty
 
@@ -393,7 +412,7 @@ At minimum difficulty (1), the base reward starts from the ceremony value, then 
 ```
 coverage_milli = (bonded_stake × 1000) / total_issued    // integer, no float
 miner_share_amount = gross_block_reward - mine_assay
-refiner_share_amount = 0
+refiner_issuance_reward = 0
 refiner_block_fee_income = sum(tx.fee) in refiner-produced blocks
 ```
 
@@ -518,9 +537,9 @@ After each block, `compute_state_root()` computes `Blake3-256(sorted Borsh-seria
 
 | Action | Description |
 |---|---|
-| `Transfer { recipient, amount }` | Move OPL from sender to recipient; fee is burned |
+| `Transfer { recipient, amount }` | Move OPL from sender to recipient; fee is routed by block kind |
 | `RefinerBond { amount }` | Lock OPL as refiner stake (new entry or top-up, dynamic minimum per new entry) |
-| `RefinerUnbond { amount }` | Withdraw OPL using FIFO order; fee is burned; 960-block delay |
+| `RefinerUnbond { amount }` | Withdraw OPL using FIFO order; fee routes by block kind; unbond assay burns; 960-block delay |
 
 ### Transaction Structure
 
@@ -529,7 +548,7 @@ Transaction {
     tx_id: ObjectId,           // Blake3-256(sender || action || fee || nonce)
     sender: ObjectId,          // Blake3-256(ed25519_pubkey)
     action: TransactionAction,
-    fee: FlakeAmount,           // Burned, not collected
+    fee: FlakeAmount,           // Burned in mined blocks; paid to selected refiner in POR blocks
     signature: Vec<u8>,         // ed25519 signature
     signature_type: u8,          // 0 = ed25519 (reserved for future types)
     nonce: u64,                  // Replay protection
@@ -548,12 +567,12 @@ Invalid transactions (wrong nonce, insufficient balance, invalid unbond amount) 
 
 ### Fee Model
 
-All fees are **permanently burned** — not transferred to refiners or miners. This is the gold attrition model: just as gold jewelry is lost, gold coins are melted, and gold bullion sinks, OPL fees are destroyed, reducing circulating supply.
+Ordinary fees are routed by block kind. In mined blocks, fees are permanently burned, modeling gold attrition. In Proof-of-Refinement blocks, fees are paid to the selected refiner producer because that refiner moved the chain during miner silence.
 
 - **No minimum fee beyond 1 Flake**: The mempool accepts any transaction
 - **No fee schedule**: Markets determine inclusion priority
 - **System-derived default**: Wallets use the chain's live `suggested_fee` when `--fee` is omitted
-- **Refiner income**: Block rewards only, never fees
+- **Refiner income**: Ordinary fees only in refiner-produced POR blocks
 - **Deflationary**: Fee burning can make circulating supply decrease over time
 
 ---
@@ -808,7 +827,7 @@ entry_weight = stake
 coverage_milli = (bonded_stake × 1000) / total_issued        // integer, no float
 net_base_reward = (BASE_REWARD / effective_difficulty) after proportional assay
 miner_share_amount = gross_block_reward - mine_assay
-refiner_share_amount = 0
+refiner_issuance_reward = 0
 refiner_block_fee_income = sum(tx.fee) in refiner-produced blocks
 ```
 

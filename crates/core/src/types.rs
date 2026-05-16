@@ -142,7 +142,7 @@ impl ObjectId {
 /// The action payload of a transaction.
 ///
 /// Each variant carries all data needed to execute it:
-/// - **Transfer**: move OPL from sender to recipient; the fee is burned
+/// - **Transfer**: move OPL from sender to recipient; the fee is routed by block kind
 /// - **RefinerBond**: lock `amount` OPL as stake (new entry or top-up)
 /// - **RefinerUnbond**: unbond `amount` OPL using FIFO order (oldest first)
 ///
@@ -159,7 +159,8 @@ impl ObjectId {
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TransactionAction {
     /// Transfer `amount` Flakes from the sender to `recipient`.
-    /// The attached `fee` (set on the Transaction itself) is burned, not collected.
+    /// The attached `fee` is burned in mined blocks and paid to the selected
+    /// refiner producer in Proof-of-Refinement blocks.
     Transfer {
         recipient: ObjectId,
         amount: FlakeAmount,
@@ -175,9 +176,9 @@ pub enum TransactionAction {
     /// The oldest bond entries are consumed first. If the amount exceeds an
     /// entry's stake, that entry is fully consumed and the remainder comes from
     /// the next oldest. Split entries keep their original timestamp for weight.
-    /// The fee is burned. After a UNBONDING_DELAY_BLOCKS delay, the unbonded
-    /// stake is returned to the sender. Unbonding stake still earns rewards
-    /// during the delay period.
+    /// The ordinary fee is routed by block kind and the unbond assay is burned.
+    /// After a UNBONDING_DELAY_BLOCKS delay, the unbonded stake is returned to
+    /// the sender. Unbonding stake does not earn passive rewards.
     RefinerUnbond { amount: FlakeAmount },
 }
 
@@ -255,6 +256,52 @@ pub struct BlockHeader {
     /// The refiner's ed25519 signature over the block hash (present in refiner blocks).
     /// `None` for mined blocks and the genesis block.
     pub refiner_signature: Option<Vec<u8>>,
+}
+
+/// Consensus-visible way a block was produced.
+///
+/// Proof of Refinement has two non-genesis production paths:
+/// - `Mined`: a miner solved EVO-OMAP PoW and earns newly extracted OPL.
+/// - `Refined`: a selected active refiner signed a stalled-chain block and
+///   earns only the ordinary transaction fees included in that block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BlockProductionKind {
+    /// Genesis has no producer, PoW proof, or refiner signature.
+    Genesis,
+    /// EVO-OMAP proof-of-work block.
+    Mined,
+    /// Proof-of-Refinement block signed by the selected refiner.
+    Refined,
+}
+
+impl BlockHeader {
+    /// Infer the production kind from the mutually exclusive proof fields.
+    ///
+    /// Returns `None` when the header is structurally invalid, such as a
+    /// non-genesis block with both PoW and refiner signature or with neither.
+    pub fn production_kind(&self) -> Option<BlockProductionKind> {
+        match (
+            self.height,
+            self.pow_proof.is_some(),
+            self.refiner_signature.is_some(),
+        ) {
+            (0, false, false) => Some(BlockProductionKind::Genesis),
+            (0, _, _) => None,
+            (_, true, false) => Some(BlockProductionKind::Mined),
+            (_, false, true) => Some(BlockProductionKind::Refined),
+            _ => None,
+        }
+    }
+
+    /// True when this is an EVO-OMAP mined block.
+    pub fn is_mined(&self) -> bool {
+        self.production_kind() == Some(BlockProductionKind::Mined)
+    }
+
+    /// True when this is a Proof-of-Refinement block.
+    pub fn is_refined(&self) -> bool {
+        self.production_kind() == Some(BlockProductionKind::Refined)
+    }
 }
 
 /// A signed transaction that transitions the ledger state.
@@ -481,6 +528,53 @@ mod tests {
         let bytes = borsh::to_vec(&attestation).unwrap();
         let decoded = BlockAttestation::try_from_slice(&bytes).unwrap();
         assert_eq!(decoded, attestation);
+    }
+
+    fn test_header(height: BlockHeight) -> BlockHeader {
+        BlockHeader {
+            version: crate::BLOCK_VERSION,
+            height,
+            previous_hash: Hash::zero(),
+            state_root: Hash::zero(),
+            transaction_root: Hash::zero(),
+            evidence_root: Hash::zero(),
+            attestation_root: Hash::zero(),
+            genesis_ceremony_hash: Hash::zero(),
+            timestamp: 0,
+            difficulty: crate::MIN_DIFFICULTY,
+            suggested_fee: crate::MIN_FEE,
+            extension_root: None,
+            producer: ObjectId::zero(),
+            pow_proof: None,
+            refiner_signature: None,
+        }
+    }
+
+    #[test]
+    fn block_production_kind_is_explicit() {
+        let genesis = test_header(0);
+        assert_eq!(
+            genesis.production_kind(),
+            Some(BlockProductionKind::Genesis)
+        );
+
+        let mut mined = test_header(1);
+        mined.pow_proof = Some(vec![0; 8]);
+        assert_eq!(mined.production_kind(), Some(BlockProductionKind::Mined));
+        assert!(mined.is_mined());
+
+        let mut refined = test_header(1);
+        refined.refiner_signature = Some(vec![0; 64]);
+        assert_eq!(
+            refined.production_kind(),
+            Some(BlockProductionKind::Refined)
+        );
+        assert!(refined.is_refined());
+
+        let mut invalid = test_header(1);
+        invalid.pow_proof = Some(vec![0; 8]);
+        invalid.refiner_signature = Some(vec![0; 64]);
+        assert_eq!(invalid.production_kind(), None);
     }
 
     #[test]

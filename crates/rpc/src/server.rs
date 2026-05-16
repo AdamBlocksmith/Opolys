@@ -52,8 +52,9 @@ use opolys_consensus::difficulty::compute_next_difficulty;
 use opolys_consensus::mempool::Mempool;
 use opolys_consensus::refiner::RefinerSet;
 use opolys_core::{
-    Block, BlockAttestation, EPOCH, FLAKES_PER_OPL, FlakeAmount, Hash, MAINNET_CHAIN_ID,
-    MAX_BLOCK_SIZE_BYTES, ObjectId, RefinerStatus, TX_MAX_SIZE_BYTES, Transaction,
+    Block, BlockAttestation, BlockProductionKind, EPOCH, FLAKES_PER_OPL, FlakeAmount, Hash,
+    MAINNET_CHAIN_ID, MAX_BLOCK_SIZE_BYTES, ObjectId, RefinerStatus, TX_MAX_SIZE_BYTES,
+    Transaction,
 };
 use opolys_execution::verify_transaction;
 use opolys_storage::BlockchainStore;
@@ -628,7 +629,7 @@ async fn handle_get_block_confidence(
     let current_timestamp = chain.block_timestamps.last().copied().unwrap_or(0);
     drop(chain);
 
-    if target_block.header.refiner_signature.is_none() || target_block.header.pow_proof.is_some() {
+    if !target_block.header.is_refined() {
         return serde_json::to_value(BlockConfidenceResponse {
             height: target_height,
             block_hash: target_hash.to_hex(),
@@ -1111,9 +1112,16 @@ fn format_action(action: &opolys_core::TransactionAction) -> String {
 
 /// Convert a Block to a JSON-serializable response.
 fn block_to_response(block: &Block, finalized_height: u64) -> BlockResponse {
+    let production_kind = match block.header.production_kind() {
+        Some(BlockProductionKind::Genesis) => "genesis",
+        Some(BlockProductionKind::Mined) => "mined",
+        Some(BlockProductionKind::Refined) => "refined",
+        None => "invalid",
+    };
     BlockResponse {
         version: block.header.version,
         height: block.header.height,
+        production_kind: production_kind.to_string(),
         previous_hash: block.header.previous_hash.to_hex(),
         state_root: block.header.state_root.to_hex(),
         transaction_root: block.header.transaction_root.to_hex(),
@@ -1174,6 +1182,8 @@ pub struct AccountResponse {
 pub struct BlockResponse {
     pub version: u32,
     pub height: u64,
+    /// `genesis`, `mined`, or `refined` (Proof of Refinement).
+    pub production_kind: String,
     pub previous_hash: String,
     pub state_root: String,
     pub transaction_root: String,

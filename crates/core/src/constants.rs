@@ -4,7 +4,7 @@
 //!
 //! Opolys is digital gold — supply grows at the rate of real-world gold production.
 //! There is **no hard cap**. The network reaches a natural equilibrium where
-//! market-driven fees are burned, balancing new issuance.
+//! mined-block fee burns and assay burns balance new issuance.
 //!
 //! # Gold Derivation (World Gold Council 2025 data)
 //!

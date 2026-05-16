@@ -6,7 +6,7 @@
 //! and computes a deterministic transaction ID via Blake3-256.
 //!
 //! Transactions are:
-//! - **Transfer** — move OPL between accounts (fees are burned, not collected)
+//! - **Transfer** - move OPL between accounts (fees route by block kind)
 //! - **RefinerBond** — lock OPL as stake to become a refiner (min 1 OPL per entry)
 //! - **RefinerUnbond** — release stake using FIFO order (oldest entries first)
 

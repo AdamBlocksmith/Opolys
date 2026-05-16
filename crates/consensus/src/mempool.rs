@@ -1,9 +1,9 @@
 //! # Fee-prioritized transaction mempool.
 //!
 //! Opolys uses a market-driven fee model: transactions specify their own fee,
-//! and block producers select the highest-fees-first. Fees are **burned** (not
-//! collected by miners or refiners), creating deflationary pressure that
-//! scales with network usage. No governance sets fee minimums — the market
+//! and block producers select the highest-fees-first. Mined-block fees are
+//! burned; Proof-of-Refinement blocks pay ordinary fees to the selected
+//! refiner producer. No governance sets fee minimums; the market
 //! decides.
 //!
 //! The mempool uses a two-state congestion model:

@@ -367,7 +367,9 @@ impl TransactionDispatcher {
     /// next oldest. The unbonded stake enters the unbonding queue and is
     /// returned after `UNBONDING_DELAY_BLOCKS` (960 blocks = one epoch).
     ///
-    /// The transaction fee is burned from the sender's balance immediately.
+    /// The ordinary transaction fee is debited immediately. The node later
+    /// burns it for mined blocks or pays it to the selected refiner producer
+    /// for Proof-of-Refinement blocks.
     /// If the refiner has insufficient stake, the transaction fails with
     /// no fee burn and no nonce advance.
     ///

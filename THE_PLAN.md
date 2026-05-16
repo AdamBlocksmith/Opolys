@@ -179,13 +179,22 @@ Account addresses are **Blake3-256 hashes of ed25519 public keys** — not the p
 
 ## 5. Consensus Model
 
-Opolys uses **hybrid miner/refiner consensus** with mining first and refiner production only when the chain stalls.
+Opolys uses **Proof of Refinement (POR)** with mining first and refiner production only when the chain stalls.
 
 - **Miners** produce blocks by solving EVO-OMAP PoW puzzles
 - **Refiners** produce blocks when no miner has produced one within the target interval (90 seconds)
 - Stake coverage is still measured as `coverage_milli = (bonded_stake × 1000) / total_issued`, but it is observability plus difficulty-floor pressure, not passive refiner yield
 - Refiner income comes from ordinary transaction fees only when the refiner produces a valid refiner block during a mining stall
 - There is no passive staking yield, no automatic refiner reward share, and no governance vote
+
+POR rule:
+
+```text
+Mined block = EVO-OMAP proof + issuance reward + fee burn
+Refined block = selected-refiner signature + ordinary fee income + zero issuance
+```
+
+Stake is collateral for signing responsibility. It is not rented for passive yield.
 
 ### Refiner Block Production
 
@@ -512,7 +521,7 @@ Automatic refiner yield is disabled. The full mined reward after the mine assay 
 
 ```
 miner_share = gross_block_reward - mine_assay
-refiner_share = 0
+refiner_issuance_reward = 0
 refiner_block_fee_income = sum(tx.fee) in refiner-produced blocks
 ```
 
@@ -589,7 +598,7 @@ Transaction {
     tx_id: ObjectId,           // Blake3-256(domain || borsh(sender, action, fee, nonce, chain_id))
     sender: ObjectId,          // Blake3-256(ed25519_pubkey)
     action: TransactionAction,
-    fee: FlakeAmount,           // Burned, not collected
+    fee: FlakeAmount,           // Burned in mined blocks; paid to selected refiner in POR blocks
     signature: Vec<u8>,        // ed25519 signature over Borsh(sender, action, fee, nonce, chain_id)
     signature_type: u8,         // 0 = ed25519 (reserved for post-quantum)
     nonce: u64,                 // Replay protection
@@ -911,7 +920,7 @@ entry_weight = entry.stake
 ```
 coverage_milli = (bonded_stake × 1000) / total_issued   // integer, no float
 miner_share_amount = gross_block_reward - mine_assay
-refiner_share_amount = 0
+refiner_issuance_reward = 0
 refiner_block_fee_income = sum(tx.fee) in refiner-produced blocks
 ```
 Miner share goes to mined-block producers. Refiner-produced blocks receive no issuance reward; their producer receives the ordinary transaction fees included in that block.
