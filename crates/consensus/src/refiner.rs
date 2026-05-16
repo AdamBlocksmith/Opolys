@@ -1,15 +1,12 @@
 //! # Proof-of-stake refiner management for Opolys.
 //!
 //! Opolys refiners bond stake as collateral and earn block rewards
-//! proportional to their **weight**, which is the sum of per-entry weights:
+//! proportional to their bonded stake:
 //!
-//! `weight = Σ entry.stake × (1 + ln(1 + entry.age_years))`
+//! `weight = Σ entry.stake`
 //!
-//! Each bond entry has its own seniority clock that starts from zero when the
-//! entry is created. This means:
-//! - A fresh top-up earns no seniority bonus initially
-//! - Older entries earn proportionally more per-coin
-//! - The marginal gain diminishes logarithmically, preventing permanent dominance
+//! Bond timestamps are retained for FIFO unbonding and provenance, but bond age
+//! does not increase reward weight, finality weight, or producer selection odds.
 //!
 //! **Unbonding is FIFO** — when a refiner unbonds, the oldest entries are
 //! consumed first. If the unbond amount exceeds an entry's stake, that entry
@@ -24,8 +21,7 @@
 //! removing it from circulation.
 //!
 //! Block producers are selected by total-stake-weighted sampling among Active
-//! refiners, where the seed is derived from on-chain entropy. Seniority does
-//! not affect producer selection; it only affects refiner reward distribution.
+//! refiners, where the seed is derived from on-chain entropy.
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use opolys_core::{
@@ -106,25 +102,25 @@ fn uniform_amount_from_seed(seed: u64, upper: FlakeAmount) -> Option<FlakeAmount
 
 /// A single bond entry within a refiner's stake.
 ///
-/// Each entry has its own stake amount, bonding timestamp, and seniority clock.
+/// Each entry has its own stake amount and bonding timestamp.
 /// Entries are consumed in FIFO order during unbonding — oldest first.
-/// Split entries retain their original `bonded_at_timestamp` so they
-/// continue earning seniority weight as if they had never been split.
+/// Split entries retain their original `bonded_at_timestamp` for provenance
+/// and FIFO ordering.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize, Serialize, Deserialize)]
 pub struct BondEntry {
     /// Amount of OPL (in flakes) locked in this entry.
     pub stake: FlakeAmount,
     /// Block height at which this entry was bonded.
     pub bonded_at_height: u64,
-    /// Unix timestamp at which this entry was bonded, used to compute
-    /// seniority for weight calculations.
+    /// Unix timestamp at which this entry was bonded. Used for FIFO/provenance,
+    /// not for reward or finality weighting.
     pub bonded_at_timestamp: u64,
 }
 
 impl BondEntry {
-    /// Compute this entry's seniority in milli-years (× 1000) based on the
-    /// time elapsed since bonding. Returns 0 if `current_timestamp` is at or
-    /// before the bonding timestamp.
+    /// Compute this entry's age in milli-years (× 1000) based on the time
+    /// elapsed since bonding. Returns 0 if `current_timestamp` is at or before
+    /// the bonding timestamp.
     ///
     /// Returns milli-years (not fractional years) to maintain integer-only
     /// arithmetic throughout consensus code.
@@ -138,11 +134,10 @@ impl BondEntry {
         (age_secs as u128 * 1000 / 31_557_600) as u64
     }
 
-    /// Compute this entry's weight: `stake × (1 + ln(1 + age_years))`.
+    /// Compute this entry's weight.
     ///
-    /// Uses integer-only arithmetic via `ln_milli` in the emission module.
-    /// Older entries earn a logarithmic seniority bonus that diminishes over
-    /// time, preventing permanent dominance by early stakers.
+    /// Weight is exactly stake. Bond age is intentionally ignored so refiner
+    /// economics do not accrue value merely from time passing.
     pub fn weight(&self, current_timestamp: u64) -> FlakeAmount {
         crate::emission::compute_refiner_weight(self.stake, self.age_years_milli(current_timestamp))
     }
@@ -150,9 +145,8 @@ impl BondEntry {
 
 /// Information about a bonded refiner.
 ///
-/// Refiners hold one or more bond entries, each with its own stake amount
-/// and seniority clock. The total weight is the sum of per-entry weights,
-/// giving a logarithmic seniority bonus that diminishes over time.
+/// Refiners hold one or more bond entries. Total weight is the sum of bonded
+/// stake across entries.
 ///
 /// Double-signing triggers graduated slashing: 10% burn on first offense,
 /// 33% burn + suspension on second, 100% burn + permanent Slashed on third+.
@@ -161,7 +155,7 @@ impl BondEntry {
 pub struct RefinerInfo {
     /// The refiner's on-chain identity (Blake3 hash of public key).
     pub object_id: ObjectId,
-    /// The refiner's bond entries, each with its own stake and seniority.
+    /// The refiner's bond entries, each with its own stake and timestamp.
     /// Entries are sorted by `bonded_at_timestamp` (FIFO order).
     pub entries: Vec<BondEntry>,
     /// Current lifecycle status: Bonding → Active → (Slashed | Unbonded).
@@ -195,10 +189,7 @@ impl RefinerInfo {
         self.entries.iter().map(|e| e.stake).sum()
     }
 
-    /// Compute the refiner's total weight as the sum of per-entry weights.
-    ///
-    /// Each entry's weight is `stake × (1 + ln(1 + age_years))`, giving
-    /// a logarithmic seniority bonus that diminishes over time.
+    /// Compute the refiner's total weight as the sum of per-entry stake.
     pub fn weight(&self, current_timestamp: u64) -> FlakeAmount {
         self.entries
             .iter()
@@ -209,7 +200,7 @@ impl RefinerInfo {
     /// Add a new bond entry (top-up) to this refiner.
     ///
     /// Each new entry must meet the dynamic minimum bond.
-    /// The entry gets its own seniority clock starting from zero.
+    /// The entry gets its own timestamp for FIFO/provenance.
     /// If an entry with the same `bonded_at_timestamp` already exists,
     /// stakes are merged (auto-merge) to reduce entry count.
     fn add_entry(&mut self, stake: FlakeAmount, height: u64, timestamp: u64) -> Result<(), String> {
@@ -341,7 +332,7 @@ impl RefinerSet {
     /// Bond stake as a refiner entry. If the refiner doesn't exist, creates
     /// a new refiner with this as their first entry (status: Bonding). If the
     /// refiner already exists, adds to the existing entry (auto-merge) if same
-    /// timestamp, or creates a new entry (top-up) with its own seniority clock.
+    /// timestamp, or creates a new entry (top-up) with its own timestamp.
     ///
     /// Each **new** entry must meet `minimum_bond_stake(total_issued_flakes)`.
     /// Merged entries have no minimum since they may be residuals from FIFO
@@ -550,8 +541,7 @@ impl RefinerSet {
     ) -> (Vec<ObjectId>, Vec<ObjectId>) {
         let active_limit = Self::active_refiner_limit(total_issued_flakes);
 
-        // Sort all eligible refiners by stake descending. Seniority affects
-        // rewards and finality weight, not active-set admission.
+        // Sort all eligible refiners by stake descending.
         let mut eligible: Vec<(ObjectId, u64)> = self
             .cached_refiners
             .iter()
@@ -864,9 +854,8 @@ impl RefinerSet {
 
     /// Select the next block producer via total-stake-weighted sampling.
     ///
-    /// Seniority affects reward distribution, not producer selection. This
-    /// keeps production split-neutral: splitting one stake across many accounts
-    /// does not create more aggregate producer weight.
+    /// This keeps production split-neutral: splitting one stake across many
+    /// accounts does not create more aggregate producer weight.
     /// The `seed` parameter provides on-chain entropy to make the selection
     /// deterministic and verifiable. Returns `None` if there are no active
     /// refiners.
@@ -1069,7 +1058,7 @@ mod tests {
         // Entry 1 is gone, entry 2 has 1.5 OPL remaining with original timestamp
         assert_eq!(v.entries.len(), 1);
         assert_eq!(v.entries[0].stake, MIN_BOND_STAKE * 2 - MIN_BOND_STAKE / 2);
-        // Split entry keeps original timestamp for seniority
+        // Split entry keeps original timestamp for FIFO/provenance.
         assert_eq!(v.entries[0].bonded_at_timestamp, 1000);
 
         // The unbonded amount should be in the unbonding queue
@@ -1235,7 +1224,7 @@ mod tests {
     }
 
     #[test]
-    fn rerank_refiners_uses_stake_not_seniority_weight() {
+    fn rerank_refiners_uses_stake_weight() {
         let mut vs = RefinerSet::new();
         let active_limit = RefinerSet::active_refiner_limit(0);
         let old_small = test_id(b"old-small-refiner");
@@ -1417,28 +1406,26 @@ mod tests {
 
         assert!(
             high_count > low_count * 20,
-            "100x stake should dominate producer selection without seniority; low={low_count}, high={high_count}"
+            "100x stake should dominate producer selection; low={low_count}, high={high_count}"
         );
     }
 
     #[test]
-    fn per_entry_seniority_increases_weight() {
+    fn per_entry_age_does_not_increase_weight() {
         let mut vs = RefinerSet::new();
         let id = test_id(b"refiner1");
         vs.bond(id.clone(), MIN_BOND_STAKE, 0, 100, 0).unwrap();
         vs.activate(&id, 1).unwrap();
 
-        // At timestamp 100, age = 0, weight = stake × 1.0
         let weight_at_bond = vs.total_weight(100);
-        // At timestamp 100 + 1 year, age = 1.0, weight = stake × (1 + ln(2))
         let one_year_secs = (365.25 * 24.0 * 3600.0) as u64;
         let weight_after_year = vs.total_weight(100 + one_year_secs);
 
-        assert!(weight_after_year > weight_at_bond);
+        assert_eq!(weight_after_year, weight_at_bond);
     }
 
     #[test]
-    fn top_up_entry_has_zero_seniority() {
+    fn top_up_entry_age_is_metadata_only() {
         let mut vs = RefinerSet::new();
         let id = test_id(b"refiner1");
         vs.bond(id.clone(), MIN_BOND_STAKE, 0, 0, 0).unwrap();
@@ -1450,19 +1437,17 @@ mod tests {
             .unwrap();
 
         let v = vs.get_refiner(&id).unwrap();
-        // Check age at ~1 year (31,557,600 seconds) — enough for measurable milli-years
+        // Check age at ~1 year (31,557,600 seconds) — retained for provenance/FIFO.
         let check_time: u64 = 31_557_600;
         let age_0_milli = v.entries[0].age_years_milli(check_time);
         let age_1_milli = v.entries[1].age_years_milli(check_time);
-        // Entry bonded at genesis should have ~31.7 milli-years at check_time
         assert!(
             age_0_milli > 0,
             "Entry bonded at genesis should have age after 1 year"
         );
-        // Top-up entry should have ~30.5 milli-years (1 year - 11.5 days)
         assert!(age_1_milli > 0, "Top-up entry should have age after 1 year");
-        // At the exact top-up time, the new entry has zero seniority
         assert_eq!(v.entries[1].age_years_milli(top_up_time), 0);
+        assert_eq!(v.weight(check_time), v.total_stake());
     }
 
     #[test]
@@ -1543,8 +1528,7 @@ mod tests {
 
         // Phase 4: Block producer selection — deterministic via seed
         let producer = vs.select_block_producer(42).unwrap();
-        // Producer selection is stake-weighted among active refiners; seniority
-        // affects rewards, not operational production tickets.
+        // Producer selection is stake-weighted among active refiners.
         assert!(
             producer.object_id == alice
                 || producer.object_id == bob

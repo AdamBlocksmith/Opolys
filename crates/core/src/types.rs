@@ -146,12 +146,12 @@ impl ObjectId {
 /// - **RefinerBond**: lock `amount` OPL as stake (new entry or top-up)
 /// - **RefinerUnbond**: unbond `amount` OPL using FIFO order (oldest first)
 ///
-/// Refiners can hold multiple bond entries, each with its own stake, seniority
-/// clock, and bond_id. Top-up bonding creates a new entry; unbonding follows FIFO
+/// Refiners can hold multiple bond entries, each with its own stake,
+/// timestamp, and bond_id. Top-up bonding creates a new entry; unbonding follows FIFO
 /// order — the oldest entries are consumed first. If the unbond amount exceeds
 /// an oldest entry's stake, that entry is fully consumed and the remainder comes
 /// from the next oldest. Split entries keep their original `bonded_at_timestamp`
-/// for weight calculation. There are no pool primitives in the protocol — pools
+/// for FIFO/provenance. There are no pool primitives in the protocol — pools
 /// are a market innovation built on top of per-entry bonds.
 ///
 /// Invalid bond amounts (below MIN_FEE floor) result in no fee burn and no
@@ -166,8 +166,8 @@ pub enum TransactionAction {
     },
 
     /// Bond `amount` Flakes as refiner stake. If the sender is already a
-    /// refiner, this creates a new bond entry (top-up) with its own seniority
-    /// clock. If not, this creates the refiner with their first bond entry.
+    /// refiner, this creates a new bond entry (top-up) with its own timestamp.
+    /// If not, this creates the refiner with their first bond entry.
     /// Each entry requires `>= MIN_BOND_STAKE` (1 OPL) for new entries only.
     RefinerBond { amount: FlakeAmount },
 

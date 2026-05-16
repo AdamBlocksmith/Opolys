@@ -66,7 +66,7 @@ impl TransactionSigner {
     ///
     /// Locks `amount` OPL (in flakes) as refiner stake. If the sender is
     /// already a refiner, this creates a new bond entry (top-up) with its
-    /// own seniority clock starting from zero. Each new entry must be at least
+    /// own timestamp. Each new entry must be at least
     /// `MIN_BOND_STAKE` (1 OPL).
     ///
     /// `chain_id` must match the target network to prevent cross-chain replay attacks.

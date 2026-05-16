@@ -10,10 +10,8 @@
 //! - **Base reward** = `BASE_REWARD / effective_difficulty`. As difficulty
 //!   rises, the per-block reward naturally declines — mimicking the
 //!   diminishing returns of real-world gold extraction.
-//! - **Refiner weight** = `Σ entry.stake × (1 + ln(1 + entry.age_years))`,
-//!   computed per bond entry. Each entry has its own seniority clock, so
-//!   older entries earn proportionally more, but the marginal gain diminishes
-//!   logarithmically over time, preventing permanent dominance by early stakers.
+//! - **Refiner weight** = bonded stake. Bond age is tracked for provenance and
+//!   FIFO unbonding, but it does not increase reward or finality weight.
 //! - **Stake coverage** — the ratio of bonded stake to total issued supply —
 //!   determines how much of each block reward flows to miners vs. refiners.
 //!   At 0% coverage, all rewards go to miners; at 100%, all go to refiners.
@@ -220,44 +218,30 @@ pub fn ln_milli(x: u64) -> u64 {
     ln_ratio_milli(x, 1000)
 }
 
-/// Compute a refiner's share of the block reward based on their total weight
-/// relative to all active refiners. Weight is the sum of per-entry weights.
+/// Compute a refiner's share of the block reward based on bonded stake.
 ///
-/// Each entry's weight = `stake × (1 + ln(1 + age_years))`, giving a logarithmic
-/// seniority bonus. Rewards are distributed proportionally to total weight.
+/// Bond age is intentionally ignored: refiners are paid for security stake,
+/// not for the passage of time.
 pub fn compute_refiner_reward(
     block_reward: FlakeAmount,
     refiner_stake: FlakeAmount,
-    refiner_age_years: u64,
+    _refiner_age_years: u64,
     total_weight: FlakeAmount,
 ) -> FlakeAmount {
     if total_weight == 0 {
         return 0;
     }
-    // Compute refiner weight using integer-only seniority
-    let weight = compute_refiner_weight(refiner_stake, refiner_age_years);
+    let weight = compute_refiner_weight(refiner_stake, 0);
     saturating_u128_to_flakes((block_reward as u128 * weight as u128) / total_weight as u128)
 }
 
-/// Compute a single entry's weighting factor using integer-only arithmetic.
+/// Compute a single entry's weighting factor.
 ///
-/// `weight = stake × (1 + ln_milli(1 + age_years_milli) / 1000)`
-///
-/// age_years is passed as milli-years (× 1000) from the caller to avoid
-/// floating point. For example, 1 year = 1000, 6 months = 500.
-///
-/// The logarithmic seniority bonus means older entries earn proportionally
-/// more per-coin, but the marginal gain diminishes over time, preventing
-/// permanent dominance by early stakers.
-pub fn compute_refiner_weight(stake: FlakeAmount, age_years_milli: u64) -> FlakeAmount {
-    // 1 + age in milli
-    let one_plus_age_milli = 1000u64.saturating_add(age_years_milli);
-    // ln(1 + age) in milli
-    let ln_bonus = ln_milli(one_plus_age_milli);
-    // total multiplier in milli: 1000 + ln_bonus
-    let multiplier_milli = 1000u64.saturating_add(ln_bonus);
-    // weight = stake × multiplier / 1000
-    saturating_u128_to_flakes((stake as u128 * multiplier_milli as u128) / 1000)
+/// Opolys intentionally gives no age-based yield. A bonded entry's weight
+/// is exactly its stake, so rewards and finality come from posted collateral,
+/// not time-based accrual.
+pub fn compute_refiner_weight(stake: FlakeAmount, _age_years_milli: u64) -> FlakeAmount {
+    stake
 }
 
 /// Compute stake coverage — the ratio of total bonded $OPL to total issued
@@ -465,12 +449,13 @@ mod tests {
     }
 
     #[test]
-    fn refiner_weight_increases_with_age() {
+    fn refiner_weight_ignores_age() {
         let w1 = compute_refiner_weight(100_000, 500);
         let w2 = compute_refiner_weight(100_000, 2000);
         let w5 = compute_refiner_weight(100_000, 5000);
-        assert!(w1 < w2);
-        assert!(w2 < w5);
+        assert_eq!(w1, 100_000);
+        assert_eq!(w2, 100_000);
+        assert_eq!(w5, 100_000);
     }
 
     #[test]

@@ -16,7 +16,7 @@
 //! # Per-entry refiner bonds with FIFO unbonding
 //!
 //! Refiners can hold multiple bond entries, each with its own stake amount
-//! and seniority clock. `RefinerBond` creates a new entry (or the first
+//! and timestamp. `RefinerBond` creates a new entry (or the first
 //! one if the refiner doesn't exist yet). `RefinerUnbond { amount }`
 //! unbonds the specified amount using FIFO order — oldest entries consumed
 //! first. If the amount exceeds an entry's stake, that entry is fully
@@ -280,7 +280,7 @@ impl TransactionDispatcher {
     /// Bond OPL as refiner stake.
     ///
     /// If the sender is already a refiner, this creates a new bond entry
-    /// (top-up) with its own seniority clock starting from zero, or merges
+    /// (top-up) with its own timestamp, or merges
     /// with an existing entry at the same timestamp. Each new entry must be
     /// at least the dynamic minimum from issued supply.
     ///

@@ -337,13 +337,13 @@ If there is no surplus bonded stake, decay is zero. All decayed stake is permane
 
 ### Per-Entry Weight
 
-Each `BondEntry` has its own seniority clock:
+Each `BondEntry` has its own timestamp for FIFO unbonding and provenance:
 
 ```
-entry_weight = entry.stake × (1 + ln(1 + entry.age_years))
+entry_weight = entry.stake
 ```
 
-Logarithmic seniority means older entries earn more per-coin, but the marginal gain diminishes — preventing permanent dominance by early stakers.
+Bond age does not increase reward weight, finality weight, or producer selection odds. Refiner economics are based on posted collateral, not time-based accrual.
 
 ### Refiner vs Miner Block Reward
 
@@ -364,7 +364,7 @@ Stake-weighted sampling from active refiners. The seed is derived from the first
 chance_to_produce = refiner_total_stake / total_active_stake
 ```
 
-Seniority does not affect producer selection; it only affects refiner reward distribution. This gives larger bonded refiners some production advantage without making older refiners permanently dominate block production. Linear stake weighting is split-neutral: one 10,000 OPL refiner and ten 1,000 OPL refiners have the same aggregate producer weight.
+The same stake-only model is used for producer selection, refiner reward distribution, and finality confidence. Linear stake weighting is split-neutral: one 10,000 OPL refiner and ten 1,000 OPL refiners have the same aggregate producer weight.
 
 ### Minimum Bond
 
@@ -400,12 +400,12 @@ Newly bonded refiners start in `Bonding` status. They activate to `Active` once 
 Refiners sign refiner-produced block hashes using ed25519. Miner-produced blocks stand on EVO-OMAP PoW and are not attestation targets. Refiner-block attestations are collected by later block producers and included on-chain. Reliability is tracked as `consecutive_correct_attestations` per refiner for liveness, not as a refiner reward multiplier.
 
 ```
-confidence_weight = stake × seniority
+confidence_weight = stake
 refiner block final when attesting_weight ≥ active_refiner_weight × FINALITY_CONFIDENCE_MILLI / 1000
 FINALITY_CONFIDENCE_MILLI = 667
 ```
 
-Refiner rewards remain distributed by bonded stake and seniority only. Miners keep the vein-yield luck upside. Attestations feed refiner-block confidence and refiner-block finality. `consecutive_correct_attestations` records liveness/reliability but is not currently a reward or finality multiplier.
+Refiner rewards remain distributed by bonded stake only. Miners keep the vein-yield ore-discovery upside. Attestations feed refiner-block confidence and refiner-block finality. `consecutive_correct_attestations` records liveness/reliability but is not currently a reward or finality multiplier.
 
 ---
 
@@ -420,7 +420,7 @@ Withdraws `amount` OPL using **FIFO order** — oldest entries consumed first:
    - If `entry.stake <= remaining_amount`: consume entire entry
    - If `entry.stake > remaining_amount`: **split** the entry
      - Return `remaining_amount` to sender
-     - Keep residual with **original timestamp** (preserves seniority)
+     - Keep residual with **original timestamp** for FIFO/provenance
 3. Residuals keep their original `bonded_at_timestamp`
 4. Auto-merge entries with the same `bonded_at_timestamp`
 
@@ -917,7 +917,7 @@ Misbehaving peers are banned with escalating durations:
 
 ### Refiner Weight
 ```
-entry_weight = entry.stake × (1 + ln(1 + entry.age_years))
+entry_weight = entry.stake
 ```
 
 ### Stake Coverage
@@ -1571,7 +1571,7 @@ A comprehensive audit of all consensus-critical formulas and constants in the co
 **Location:** `consensus/emission.rs`
 **Status:** **FIXED**
 
-**What it is:** Vein yield and refiner seniority used `f64::ln()` / `sqrt()` in consensus reward math. Transcendental floating-point functions are not guaranteed to produce identical results across libc/platform implementations. Reward and weight products also used truncating `u128 as u64` casts, which could wrap in overflow edge cases.
+**What it is:** Vein yield previously used `f64::ln()` / `sqrt()` in consensus reward math, and refiner weighting previously included age-based math. Transcendental floating-point functions are not guaranteed to produce identical results across libc/platform implementations. Reward and weight products also used truncating `u128 as u64` casts, which could wrap in overflow edge cases.
 
 **How fixed:** Emission math now uses deterministic fixed-point integer natural log and integer square root helpers. Block reward, refiner reward, and refiner weight conversions saturate at `u64::MAX` instead of truncating. Regression tests cover known log values, yield behavior, and overflow saturation.
 

@@ -19,8 +19,8 @@ Opolys encodes these properties directly into consensus:
 | **Gold ore varies in richness** | Vein yield: `1 + ln(target / hash_int)` | A lucky gold strike yields more than a poor one. Vein yield models this: most blocks earn ~2x base reward, exceptional ones earn more. The math is natural, not scheduled. |
 | **Gold production rate is known** | BASE_REWARD derived from world gold production via genesis ceremony | 3,630 tonnes of gold are mined annually (~116.7 million troy ounces). Divided by 350,640 blocks per year = 332 OPL per block at minimum difficulty. BASE_REWARD is set from live LBMA/USGS/WGC data at the genesis ceremony. |
 | **Gold must be refined before use** | Difficulty must be overcome to earn reward | You can't just claim gold exists — you have to prove you did the work. EVO-OMAP requires a valid proof-of-work with at least D leading zero bits. |
-| **Gold held in vaults earns trust** | Refiner staking with seniority | Bonded OPL gives refiners block production rights when the chain stalls. Senior refiners earn slightly more reward weight logarithmically, just as trusted vaults command higher fees. But the marginal bonus shrinks over time — no permanent aristocracy. |
-| **Gold can be unvaulted** | FIFO unbonding with 1-epoch delay | Unbonding OPL is like withdrawing gold from a vault. It takes time (960 blocks = exactly 24 hours). During the delay, you still earn rewards. The oldest deposits are withdrawn first. |
+| **Gold held in vaults secures settlement** | Refiner staking by bonded collateral | Bonded OPL gives refiners block production rights when the chain stalls. Refiner weight is stake-only: no time-based yield, no age rent, and no reward just for waiting. |
+| **Gold can be unvaulted** | FIFO unbonding with 1-epoch delay | Unbonding OPL is like withdrawing gold from a vault. It takes time (960 blocks = exactly 24 hours). During the delay, stake remains slashable but no longer earns reward weight. The oldest deposits are withdrawn first. |
 | **Gold bars are uniform** | Every OPL is identical. One sub-unit (Flake). No tokens, no assets, no governance tokens | There's no "pennyweight" gold or "grain" gold in Opolys. 1 OPL = 1,000,000 Flakes. Period. The chain tracks one asset. |
 | **Gold supply is self-regulating** | Natural equilibrium — no governance needed | When fees are burned faster than rewards are issued, supply shrinks. When mining is too easy, difficulty rises and issuance drops. The protocol never needs a vote. |
 
@@ -198,7 +198,7 @@ Opolys/
 │   │   ├── difficulty.rs     # Adaptive retarget, consensus floor, PoW check
 │   │   ├── emission.rs       # Vein yield, difficulty_to_target(), suggested_fee, stake_coverage
 │   │   ├── mempool.rs        # Fee-priority mempool
-│   │   ├── refiner.rs        # RefinerSet, FIFO unbonding, seniority weights
+│   │   ├── refiner.rs        # RefinerSet, FIFO unbonding, stake weights
 │   │   ├── pow.rs            # EVO-OMAP PowContext, mine_parallel, verify_light
 │   │   └── genesis.rs        # GenesisConfig, build_genesis_block()
 │   ├── execution/     — Transaction dispatcher (Transfer, Bond, Unbond)
@@ -419,7 +419,7 @@ Floored at `MIN_FEE` (1 Flake). Empty blocks use `MIN_FEE` as the current signal
 
 ### Bond Lifecycle
 
-Like depositing gold in a vault — you lock it up, it earns seniority, and you can withdraw it after a delay.
+Like depositing gold in a vault — you lock it up as settlement collateral, and you can withdraw it after a delay.
 
 1. **Bond**: `RefinerBond { amount }` — Lock OPL as refiner stake. Creates a new bond entry if the refiner already exists (top-up)
 2. **Unbond**: `RefinerUnbond { amount }` — Withdraw OPL using FIFO order (oldest first)
@@ -431,15 +431,15 @@ Like depositing gold in a vault — you lock it up, it earns seniority, and you 
 minimum_bond = max(1 OPL, sqrt(total_issued_opl))
 ```
 
-The minimum applies only to new bond entries. At launch, the floor is 1 OPL. At 1,000,000 issued OPL, the minimum is 1,000 OPL. At 25,000,000 issued OPL, the minimum is 5,000 OPL. Residual entries created by FIFO unbond splitting keep their stake and seniority.
+The minimum applies only to new bond entries. At launch, the floor is 1 OPL. At 1,000,000 issued OPL, the minimum is 1,000 OPL. At 25,000,000 issued OPL, the minimum is 5,000 OPL. Residual entries created by FIFO unbond splitting keep their stake.
 
-### Per-Entry Weight (Seniority)
+### Per-Entry Weight
 
 ```
-entry_weight = stake × (1 + ln(1 + age_years))
+entry_weight = stake
 ```
 
-Each bond entry has its own seniority clock. Logarithmic seniority means older entries earn more per-coin, but the marginal bonus shrinks over time — no permanent aristocracy, just like real gold where established vaults command more trust but new entrants are never locked out.
+Bond timestamps are kept for FIFO unbonding and provenance, but they do not increase reward weight, finality weight, or producer selection odds. Refiner economics are based on posted collateral, not time-based accrual.
 
 ### FIFO Unbonding
 
@@ -447,7 +447,7 @@ Each bond entry has its own seniority clock. Logarithmic seniority means older e
 RefinerUnbond { amount: FlakeAmount }
 ```
 
-Oldest entries are consumed first. If the unbond amount exceeds an entry's stake, that entry is fully consumed and the remainder comes from the next entry. Residuals keep their original `bonded_at_timestamp` (preserving seniority). Entries with the same `bonded_at_timestamp` are auto-merged.
+Oldest entries are consumed first. If the unbond amount exceeds an entry's stake, that entry is fully consumed and the remainder comes from the next entry. Residuals keep their original `bonded_at_timestamp` for FIFO/provenance. Entries with the same `bonded_at_timestamp` are auto-merged.
 
 After unbonding, stake enters the **unbonding queue** for `UNBONDING_DELAY_BLOCKS` (960 blocks = exactly 24 hours). During the delay, the unbonding stake no longer counts for active-set ranking, producer selection, refiner rewards, or finality weight, but it remains slashable until it matures. Once matured, it's automatically credited back to the sender.
 
@@ -459,7 +459,7 @@ Newly bonded refiners start in `Bonding` status. They activate to `Active` after
 - **Active limit**: `EPOCH + sqrt(total_issued_opl)`, derived from chain state
 - **Launch limit**: 960 active refiners when issued supply is zero
 - **Growth example**: 5,960 active refiners at 25,000,000 issued OPL
-- **Admission ranking**: highest total-stake refiners are Active; seniority does not affect active-set admission
+- **Admission ranking**: highest total-stake refiners are Active
 - Valid bonds queue fairly even when the active set is full; bonds below the dynamic minimum are rejected
 
 ### Block Producer Selection
@@ -470,7 +470,7 @@ A deterministic seed derived from the previous block hash selects the refiner bl
 chance_to_produce = refiner_total_stake / total_active_stake
 ```
 
-Seniority does not affect producer selection; it only affects refiner reward distribution. This gives larger bonded refiners some production advantage while staying split-neutral: splitting one stake across many accounts does not create more aggregate producer weight.
+The same stake-only model is used for producer selection, refiner reward distribution, and finality confidence. Splitting one stake across many accounts does not create more aggregate producer weight.
 
 ---
 
@@ -799,7 +799,7 @@ suggested_fee =
 
 ### Refiner Weight
 ```
-entry_weight = stake × (1 + ln(1 + age_years))
+entry_weight = stake
 ```
 
 ### Stake Coverage & Reward Split
@@ -870,7 +870,7 @@ Opolys implements layered P2P defenses to protect honest nodes from adversarial 
 | **No hardcoded fees** | Fees are market-driven and burned entirely |
 | **Only double-signing slashed** | No reversal windows, no confiscation for any other reason |
 | **Gold-derived emission** | BASE_REWARD from genesis ceremony, derived from annual gold production (~3,630 tonnes) |
-| **Integer-only consensus** | No floating-point arithmetic in consensus-critical code; vein yield and refiner seniority use deterministic integer math |
+| **Integer-only consensus** | No floating-point arithmetic in consensus-critical code; vein yield uses deterministic integer math and refiner weight is stake-only |
 | **Holder safety** | Ordinary dormant holder balances do not decay. Attrition comes from fees, assay burns, surplus-based refiner stake decay, slashing, and naturally lost keys. |
 | **Single key** | One ed25519 key for both transactions and validation, derived from BIP-39 mnemonic |
 | **Core only** | The node is the protocol layer (like Bitcoin Core). Community builds explorers, wallets, and mining pools |
