@@ -80,6 +80,10 @@ enum Command {
         #[arg(long)]
         fee: Option<String>,
 
+        /// Optional refiner finality/service fee in OPL.
+        #[arg(long, default_value = "0")]
+        finality_fee: String,
+
         /// Nonce for this account (query from RPC if not provided)
         #[arg(long)]
         nonce: Option<u64>,
@@ -101,6 +105,10 @@ enum Command {
         #[arg(long)]
         fee: Option<String>,
 
+        /// Optional refiner service fee in OPL.
+        #[arg(long, default_value = "0")]
+        finality_fee: String,
+
         /// Nonce for this account
         #[arg(long)]
         nonce: Option<u64>,
@@ -121,6 +129,10 @@ enum Command {
         /// Fee in OPL. If omitted, uses the chain's current suggested fee.
         #[arg(long)]
         fee: Option<String>,
+
+        /// Optional refiner service fee in OPL.
+        #[arg(long, default_value = "0")]
+        finality_fee: String,
 
         /// Nonce for this account
         #[arg(long)]
@@ -250,6 +262,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             recipient,
             amount,
             fee,
+            finality_fee,
             nonce,
             account,
         } => {
@@ -261,6 +274,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|e| format!("Invalid recipient address: {}", e))?;
             let amount_flakes = parse_opl_amount(&amount)?;
             let fee_flakes = resolve_fee(&cli.rpc_url, fee).await?;
+            let finality_fee_flakes = parse_opl_amount(&finality_fee)?;
 
             let nonce_val = match nonce {
                 Some(n) => n,
@@ -272,6 +286,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 recipient_id,
                 amount_flakes,
                 fee_flakes,
+                finality_fee_flakes,
                 nonce_val,
                 chain_id,
             )?;
@@ -284,6 +299,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             mnemonic,
             amount,
             fee,
+            finality_fee,
             nonce,
             account,
         } => {
@@ -293,6 +309,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
             let amount_flakes = parse_opl_amount(&amount)?;
             let fee_flakes = resolve_fee(&cli.rpc_url, fee).await?;
+            let finality_fee_flakes = parse_opl_amount(&finality_fee)?;
 
             let nonce_val = match nonce {
                 Some(n) => n,
@@ -303,6 +320,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 &keypair,
                 amount_flakes,
                 fee_flakes,
+                finality_fee_flakes,
                 nonce_val,
                 chain_id,
             )?;
@@ -315,6 +333,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             mnemonic,
             amount,
             fee,
+            finality_fee,
             nonce,
             account,
         } => {
@@ -324,6 +343,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
             let amount_flakes = parse_opl_amount(&amount)?;
             let fee_flakes = resolve_fee(&cli.rpc_url, fee).await?;
+            let finality_fee_flakes = parse_opl_amount(&finality_fee)?;
 
             let nonce_val = match nonce {
                 Some(n) => n,
@@ -334,6 +354,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 &keypair,
                 amount_flakes,
                 fee_flakes,
+                finality_fee_flakes,
                 nonce_val,
                 chain_id,
             )?;

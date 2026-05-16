@@ -512,6 +512,8 @@ async fn handle_get_transaction(
                 action: format_action(&tx.action),
                 fee_flakes: tx.fee,
                 fee_opl: format_flake(tx.fee),
+                finality_fee_flakes: tx.finality_fee,
+                finality_fee_opl: format_flake(tx.finality_fee),
                 nonce: tx.nonce,
                 status: "pending".to_string(),
                 block_height: None,
@@ -528,6 +530,8 @@ async fn handle_get_transaction(
             action: format_action(&tx.action),
             fee_flakes: tx.fee,
             fee_opl: format_flake(tx.fee),
+            finality_fee_flakes: tx.finality_fee,
+            finality_fee_opl: format_flake(tx.finality_fee),
             nonce: tx.nonce,
             status: "confirmed".to_string(),
             block_height: Some(block_height),
@@ -703,11 +707,13 @@ async fn handle_send_transaction(
 
     let tx_id = tx.tx_id.clone();
     let fee = tx.fee;
+    let finality_fee = tx.finality_fee;
+    let priority_fee = tx.fee.saturating_add(tx.finality_fee);
     let action = format_action(&tx.action);
 
     // Insert into mempool with integer fee-density priority, scaled by 1e6.
     let priority =
-        ((fee as u128 * 1_000_000) / tx_size.max(1) as u128).min(u64::MAX as u128) as u64;
+        ((priority_fee as u128 * 1_000_000) / tx_size.max(1) as u128).min(u64::MAX as u128) as u64;
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -741,6 +747,8 @@ async fn handle_send_transaction(
         tx_id: tx_id.to_hex(),
         fee_flakes: fee,
         fee_opl: format_flake(fee),
+        finality_fee_flakes: finality_fee,
+        finality_fee_opl: format_flake(finality_fee),
         action,
         status: "pending".to_string(),
     })
@@ -1192,6 +1200,8 @@ pub struct TransactionResponse {
     pub action: String,
     pub fee_flakes: u64,
     pub fee_opl: String,
+    pub finality_fee_flakes: u64,
+    pub finality_fee_opl: String,
     pub nonce: u64,
     pub status: String,
     pub block_height: Option<u64>,
@@ -1265,6 +1275,8 @@ pub struct SendTransactionResponse {
     pub tx_id: String,
     pub fee_flakes: u64,
     pub fee_opl: String,
+    pub finality_fee_flakes: u64,
+    pub finality_fee_opl: String,
     pub action: String,
     pub status: String,
 }
@@ -1564,6 +1576,7 @@ mod tests {
                 amount: 1,
             },
             fee: opolys_core::MIN_FEE,
+            finality_fee: 0,
             signature: vec![0; 64],
             signature_type: opolys_core::SIGNATURE_TYPE_ED25519,
             nonce: 0,

@@ -85,7 +85,7 @@ From `crates/core/src/constants.rs`:
 | `UNBONDING_DELAY_BLOCKS` | `960` | One epoch delay for unbonding |
 | `MIN_FEE` | `1` Flake | Floor for market-driven fees |
 | `MIN_BOND_STAKE` | `1,000,000` Flakes (1 OPL) | Floor for dynamic minimum bond |
-| `BLOCK_VERSION` | `2` | Current block header version |
+| `BLOCK_VERSION` | `3` | Current block header version |
 | `SIGNATURE_TYPE_ED25519` | `0` | ed25519 signature type constant |
 | `EXTENSION_TYPE_NONE` | `0` | No extension data |
 | `EXTENSION_TYPE_ROLLUP` | `1` | Rollup data (reserved) |
@@ -405,7 +405,7 @@ refiner block final when attesting_weight ≥ active_refiner_weight × FINALITY_
 FINALITY_CONFIDENCE_MILLI = 667
 ```
 
-Refiner rewards remain distributed by bonded stake only. Miners keep the vein-yield ore-discovery upside. Attestations feed refiner-block confidence and refiner-block finality. `consecutive_correct_attestations` records liveness/reliability but is not currently a reward or finality multiplier.
+Refiners do not receive automatic protocol yield. Miners keep the vein-yield ore-discovery upside. Explicit finality/assay service fees are paid only to valid included attesters; unserved service fees are burned. Attestations feed refiner-block confidence and refiner-block finality. `consecutive_correct_attestations` records liveness/reliability but is not currently a reward multiplier.
 
 ---
 
@@ -432,7 +432,7 @@ Unbonding stake stops counting for active-set ranking, producer selection, refin
 
 ## 10. Fees & Burning
 
-All transaction fees are **permanently burned** — not collected by refiners or miners.
+Base transaction fees are **permanently burned** — not collected by refiners or miners. Explicit refiner service fees are separate: they are paid only to valid included attesters when service is delivered, otherwise burned.
 
 - **Suggested fee**: `suggested_fee` field in `BlockHeader`, computed via EMA of the previous block's average explicit fee from successful transactions. Starts at `MIN_FEE` (1 Flake).
 - **No minimum fee beyond 1 Flake**: Market determines inclusion
@@ -519,13 +519,14 @@ The `sqrt(ln)` formula produces a natural distribution with rare bonanzas:
 
 Implementation uses deterministic fixed-point integer natural log and integer square-root helpers. No floating-point math is used on the consensus reward path.
 
-### Vein Bonus Isolation (Coverage Split)
+### Vein Bonus Isolation (No Passive Refiner Yield)
 
-The coverage-based reward split applies to **base_reward only**. The vein bonus goes 100% to the miner:
+Automatic refiner yield is disabled. The full mined reward after the mine assay goes to the miner; refiners earn only explicit user-paid service fees when they deliver included attestation/finality service:
 
 ```
-miner_share = base_share + vein_bonus
-refiner_share = coverage_milli × base_reward / 1000
+miner_share = gross_block_reward - mine_assay
+refiner_share = 0
+refiner_service_fee = explicit finality/assay fee paid only to valid included attesters; burned if unserved
 ```
 
 Where `base_reward = BASE_REWARD / difficulty`. Miner blocks may add `vein_bonus`; refiner blocks have no vein bonus. Attestation reliability is not a reward multiplier.
@@ -538,7 +539,7 @@ Gold analogy: refineries charge per ounce processed, not per ore grade. The mine
 
 ```rust
 BlockHeader {
-    version: u32,                          // Protocol version (currently 2)
+    version: u32,                          // Protocol version (currently 3)
     height: u64,                           // 0 for genesis
     previous_hash: Hash,                   // Blake3-256 of prior block
     state_root: Hash,                      // Blake3-256 of post-execution state
@@ -786,7 +787,7 @@ Run with `cargo test --workspace`.
 
 Every block applied to the chain must pass these checks:
 
-1. **Version**: Must match `BLOCK_VERSION` (currently 2)
+1. **Version**: Must match `BLOCK_VERSION` (currently 3)
 2. **Height**: Must equal `parent_height + 1`
 3. **Previous hash**: Must match parent's hash (or `Hash::zero()` for genesis)
 4. **Timestamp**: Must be strictly greater than parent timestamp, and within `MAX_FUTURE_BLOCK_TIME_SECS` (5 min) of wall clock
@@ -827,7 +828,7 @@ vein_yield = yield_milli / 1000.0
 gross_block_reward = (BASE_REWARD / difficulty) × vein_yield
 mine_assay = gross_block_reward × sqrt(effective_difficulty) / EPOCH  // burned at source
 net_block_reward = gross_block_reward - mine_assay
-miner_share = net_base_share + net_vein_bonus             // vein bonus goes 100% to miner
+miner_share = gross_block_reward - mine_assay             // all mining reward goes to producer
 ```
 
 ### Effective Difficulty
@@ -924,8 +925,9 @@ entry_weight = entry.stake
 ```
 coverage_milli = (bonded_stake × 1000) / total_issued   // integer, no float
 net_base_reward = (BASE_REWARD / difficulty) after proportional assay
-miner_share_amount = net_base_reward × (1000 - coverage_milli) / 1000 + net_vein_bonus
-refiner_share_amount = net_base_reward × coverage_milli / 1000
+miner_share_amount = gross_block_reward - mine_assay
+refiner_share_amount = 0
+refiner_service_fee = explicit finality/assay fee paid only to valid included attesters; burned if unserved
 ```
 Miner share goes to the block producer. Refiner share is distributed among active refiners proportional to weight.
 
@@ -1533,7 +1535,7 @@ A comprehensive audit of all consensus-critical formulas and constants in the co
 
 **What it is:** `slash_evidence`, `attestations`, and `genesis_ceremony` lived outside the block header commitment even though they can affect state. A relay could mutate those fields without changing the block hash or PoW input.
 
-**How fixed:** `BlockHeader` now carries `evidence_root`, `attestation_root`, and `genesis_ceremony_hash`. These roots are included in `compute_block_hash()` and `serialize_header_for_pow()`, validated before block application, and filled before mining/refiner signing. `BLOCK_VERSION` was bumped to 2.
+**How fixed:** `BlockHeader` now carries `evidence_root`, `attestation_root`, and `genesis_ceremony_hash`. These roots are included in `compute_block_hash()` and `serialize_header_for_pow()`, validated before block application, and filled before mining/refiner signing. `BLOCK_VERSION` was bumped to 2 for body commitments, then to 3 when signed finality fees changed the transaction format.
 
 ---
 

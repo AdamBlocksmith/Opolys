@@ -8,8 +8,9 @@
 //!
 //! # Fee model
 //!
-//! All transaction fees are **burned** (permanently removed from supply).
-//! Refiners do not collect fees — they earn from block rewards only.
+//! Base transaction fees are **burned** (permanently removed from supply).
+//! Explicit refiner service fees are separated from the burn path and can be
+//! paid only to refiners who provide attestation/finality service.
 //! This aligns with Opolys' model as decentralized digital gold: supply
 //! expands via emission and contracts via fee burning, with no hard cap.
 //!
@@ -36,8 +37,9 @@ use subtle::ConstantTimeEq;
 /// Result of applying a transaction to the chain state.
 ///
 /// On success, `fee_burned` tracks how much OPL was permanently removed
-/// from circulation. On failure, `error` describes why the transaction
-/// was rejected (e.g. invalid nonce, insufficient balance).
+/// from circulation and `refiner_service_fee` tracks explicit service fees
+/// debited for refiner attestation/finality work. On failure, `error`
+/// describes why the transaction was rejected.
 #[derive(Debug)]
 pub struct ApplyResult {
     /// Whether the transaction was successfully applied.
@@ -45,15 +47,19 @@ pub struct ApplyResult {
     /// Amount of OPL (in flakes) burned as the transaction fee.
     /// Always 0 on failure.
     pub fee_burned: FlakeAmount,
+    /// Amount of OPL (in flakes) reserved for refiner service payment.
+    /// Always 0 on failure.
+    pub refiner_service_fee: FlakeAmount,
     /// Human-readable error message if the transaction failed.
     pub error: Option<String>,
 }
 
 impl ApplyResult {
-    pub fn ok(fee_burned: FlakeAmount) -> Self {
+    pub fn ok(fee_burned: FlakeAmount, refiner_service_fee: FlakeAmount) -> Self {
         ApplyResult {
             success: true,
             fee_burned,
+            refiner_service_fee,
             error: None,
         }
     }
@@ -62,6 +68,7 @@ impl ApplyResult {
         ApplyResult {
             success: false,
             fee_burned: 0,
+            refiner_service_fee: 0,
             error: Some(msg.to_string()),
         }
     }
@@ -77,9 +84,9 @@ struct ExecutionContext {
 /// Stateless transaction dispatcher that applies transactions to chain state.
 ///
 /// All methods are associated functions (no instance state) because transaction
-/// execution is purely deterministic given its inputs. Every transaction fee is
-/// burned (permanently removed from supply) — refiners earn from block rewards,
-/// not from fees.
+/// execution is purely deterministic given its inputs. Base transaction fees
+/// are burned; explicit refiner service fees are reported separately so the
+/// node can pay valid attesters or burn the fee if no service is delivered.
 pub struct TransactionDispatcher;
 
 impl TransactionDispatcher {
@@ -271,8 +278,12 @@ impl TransactionDispatcher {
         amount: FlakeAmount,
         accounts: &mut AccountStore,
     ) -> ApplyResult {
-        match accounts.transfer(sender, recipient, amount, tx.fee) {
-            Ok(TransferResult { fee_burned, .. }) => ApplyResult::ok(fee_burned),
+        let total_fee = match Self::checked_add_amounts("Transfer fees", tx.fee, tx.finality_fee) {
+            Ok(total) => total,
+            Err(e) => return ApplyResult::err(&e),
+        };
+        match accounts.transfer(sender, recipient, amount, total_fee) {
+            Ok(TransferResult { .. }) => ApplyResult::ok(tx.fee, tx.finality_fee),
             Err(e) => ApplyResult::err(&e.to_string()),
         }
     }
@@ -311,7 +322,12 @@ impl TransactionDispatcher {
         // Bond assay rises when the vault is crowded and falls when bonded
         // security is thin, mirroring the cost to assay and store incoming bars.
         let bond_assay = Self::bond_assay(stake, refiners, context.total_issued_flakes);
-        let total_needed = match Self::checked_total_cost("Bond cost", stake, tx.fee, bond_assay) {
+        let service_fee =
+            match Self::checked_add_amounts("Bond service fee", bond_assay, tx.finality_fee) {
+                Ok(total) => total,
+                Err(e) => return ApplyResult::err(&e),
+            };
+        let total_needed = match Self::checked_total_cost("Bond cost", stake, tx.fee, service_fee) {
             Ok(total) => total,
             Err(e) => return ApplyResult::err(&e),
         };
@@ -352,12 +368,7 @@ impl TransactionDispatcher {
             account.nonce += 1;
         }
 
-        // Fee + bond assay are both burned (debited from sender, not credited to anyone)
-        // Bond assay mirrors gold: assay fee to enter the vault
-        match Self::checked_add_amounts("Bond burned amount", tx.fee, bond_assay) {
-            Ok(burned) => ApplyResult::ok(burned),
-            Err(e) => ApplyResult::err(&e),
-        }
+        ApplyResult::ok(tx.fee, service_fee)
     }
 
     /// Unbond `amount` Flakes from the refiner using FIFO order.
@@ -391,7 +402,12 @@ impl TransactionDispatcher {
         // dynamic unbond assay must be payable. The assay rises when bonded
         // security is thin and falls when the vault is well-stocked.
         let max_assay = Self::unbond_assay(amount, refiners, context.total_issued_flakes);
-        let total_fee = match Self::checked_add_amounts("Unbond fee", tx.fee, max_assay) {
+        let service_fee =
+            match Self::checked_add_amounts("Unbond service fee", max_assay, tx.finality_fee) {
+                Ok(total) => total,
+                Err(e) => return ApplyResult::err(&e),
+            };
+        let total_fee = match Self::checked_add_amounts("Unbond fee", tx.fee, service_fee) {
             Ok(total) => total,
             Err(e) => return ApplyResult::err(&e),
         };
@@ -421,7 +437,12 @@ impl TransactionDispatcher {
         // The current unbond path rejects requests above total stake, so the
         // prechecked dynamic assay is exactly the assay owed for this withdrawal.
         let unbond_assay = max_assay;
-        let total_fee = match Self::checked_add_amounts("Unbond fee", tx.fee, unbond_assay) {
+        let service_fee =
+            match Self::checked_add_amounts("Unbond service fee", unbond_assay, tx.finality_fee) {
+                Ok(total) => total,
+                Err(e) => return ApplyResult::err(&e),
+            };
+        let total_fee = match Self::checked_add_amounts("Unbond fee", tx.fee, service_fee) {
             Ok(total) => total,
             Err(e) => return ApplyResult::err(&e),
         };
@@ -436,8 +457,7 @@ impl TransactionDispatcher {
             account.nonce += 1;
         }
 
-        // Both tx fee and unbond assay are burned
-        ApplyResult::ok(total_fee)
+        ApplyResult::ok(tx.fee, service_fee)
     }
 }
 
@@ -479,10 +499,16 @@ pub fn validate_transaction_basic(
 
     let total_cost = match &tx.action {
         TransactionAction::Transfer { amount, .. } => {
-            checked_add("Transfer cost", *amount, tx.fee)?
+            let fees = checked_add("Transfer fees", tx.fee, tx.finality_fee)?;
+            checked_add("Transfer cost", *amount, fees)?
         }
-        TransactionAction::RefinerBond { amount } => checked_add("Bond cost", *amount, tx.fee)?,
-        TransactionAction::RefinerUnbond { .. } => tx.fee,
+        TransactionAction::RefinerBond { amount } => {
+            let fees = checked_add("Bond fees", tx.fee, tx.finality_fee)?;
+            checked_add("Bond cost", *amount, fees)?
+        }
+        TransactionAction::RefinerUnbond { .. } => {
+            checked_add("Unbond fees", tx.fee, tx.finality_fee)?
+        }
     };
 
     if sender_balance < total_cost {
@@ -501,14 +527,14 @@ pub fn validate_transaction_basic(
 /// enters a block. It checks:
 ///
 /// 1. **chain_id**: Must equal `expected_chain_id`. Prevents cross-chain replay attacks.
-/// 2. **tx_id integrity**: Recomputes the transaction ID from (sender, action, fee, nonce, chain_id)
+/// 2. **tx_id integrity**: Recomputes the transaction ID from (sender, action, fee, finality_fee, nonce, chain_id)
 ///    and verifies it matches the declared `tx.tx_id`.
 /// 3. **signature_type**: Must be ed25519 (type 0), the only supported type.
 /// 4. **public_key length**: Must be exactly 32 bytes. Empty keys are rejected.
 /// 5. **SenderId binding**: `Blake3(public_key)` must equal `sender` ObjectId.
 ///    This proves the public key belongs to the claimed sender.
 /// 6. **ed25519 signature**: The signature must be valid over the Borsh-serialized
-///    (sender, action, fee, nonce, chain_id) tuple using the provided public key.
+///    (sender, action, fee, finality_fee, nonce, chain_id) tuple using the provided public key.
 ///
 /// Note: This function does NOT check nonce, balance, or fee minimums. Those are
 /// checked by `validate_transaction_basic` and `apply_transaction`.
@@ -522,7 +548,14 @@ pub fn verify_transaction(tx: &Transaction, expected_chain_id: u64) -> Result<()
     }
 
     // 2. Verify tx_id integrity
-    let expected_tx_id = compute_tx_id(&tx.sender, &tx.action, tx.fee, tx.nonce, tx.chain_id)?;
+    let expected_tx_id = compute_tx_id(
+        &tx.sender,
+        &tx.action,
+        tx.fee,
+        tx.finality_fee,
+        tx.nonce,
+        tx.chain_id,
+    )?;
     if tx.tx_id != expected_tx_id {
         return Err(OpolysError::InvalidTransaction(format!(
             "Transaction ID mismatch: expected {}, got {}",
@@ -566,8 +599,14 @@ pub fn verify_transaction(tx: &Transaction, expected_chain_id: u64) -> Result<()
     }
 
     // 6. Verify ed25519 signature over domain-separated transaction payload
-    let unsigned_data =
-        transaction_signing_payload(&tx.sender, &tx.action, tx.fee, tx.nonce, tx.chain_id)?;
+    let unsigned_data = transaction_signing_payload(
+        &tx.sender,
+        &tx.action,
+        tx.fee,
+        tx.finality_fee,
+        tx.nonce,
+        tx.chain_id,
+    )?;
 
     if !opolys_crypto::verify_ed25519(&tx.public_key, &unsigned_data, &tx.signature) {
         return Err(OpolysError::InvalidSignature);
@@ -579,17 +618,19 @@ pub fn verify_transaction(tx: &Transaction, expected_chain_id: u64) -> Result<()
 /// Compute the expected transaction ID from the transaction fields.
 ///
 /// Matches the wallet's `TransactionSigner::compute_tx_id` function exactly:
-/// Blake3-256(domain || borsh(sender, action, fee, nonce, chain_id)).
+/// Blake3-256(domain || borsh(sender, action, fee, finality_fee, nonce, chain_id)).
 fn compute_tx_id(
     sender: &ObjectId,
     action: &TransactionAction,
     fee: FlakeAmount,
+    finality_fee: FlakeAmount,
     nonce: u64,
     chain_id: u64,
 ) -> Result<ObjectId, OpolysError> {
-    let data = borsh::to_vec(&(sender.clone(), action, fee, nonce, chain_id)).map_err(|e| {
-        OpolysError::SerializationError(format!("Transaction ID serialization failed: {}", e))
-    })?;
+    let data = borsh::to_vec(&(sender.clone(), action, fee, finality_fee, nonce, chain_id))
+        .map_err(|e| {
+            OpolysError::SerializationError(format!("Transaction ID serialization failed: {}", e))
+        })?;
     Ok(hash_to_object_id_with_domain(DOMAIN_TX_ID, &data))
 }
 
@@ -622,14 +663,64 @@ mod tests {
             recipient: to.clone(),
             amount,
         };
-        let tx_id = compute_tx_id(sender, &action, fee, nonce, MAINNET_CHAIN_ID).unwrap();
-        let msg =
-            transaction_signing_payload(sender, &action, fee, nonce, MAINNET_CHAIN_ID).unwrap();
+        let finality_fee = 0;
+        let tx_id =
+            compute_tx_id(sender, &action, fee, finality_fee, nonce, MAINNET_CHAIN_ID).unwrap();
+        let msg = transaction_signing_payload(
+            sender,
+            &action,
+            fee,
+            finality_fee,
+            nonce,
+            MAINNET_CHAIN_ID,
+        )
+        .unwrap();
         Transaction {
             tx_id,
             sender: sender.clone(),
             action,
             fee,
+            finality_fee,
+            signature: sk.sign(&msg).to_bytes().to_vec(),
+            signature_type: SIGNATURE_TYPE_ED25519,
+            nonce,
+            chain_id: MAINNET_CHAIN_ID,
+            data: vec![],
+            public_key: pk,
+        }
+    }
+
+    fn signed_transfer_with_finality_fee(
+        sk: &SigningKey,
+        sender: &ObjectId,
+        pk: Vec<u8>,
+        to: &ObjectId,
+        amount: FlakeAmount,
+        fees: (FlakeAmount, FlakeAmount),
+        nonce: u64,
+    ) -> Transaction {
+        let (fee, finality_fee) = fees;
+        let action = TransactionAction::Transfer {
+            recipient: to.clone(),
+            amount,
+        };
+        let tx_id =
+            compute_tx_id(sender, &action, fee, finality_fee, nonce, MAINNET_CHAIN_ID).unwrap();
+        let msg = transaction_signing_payload(
+            sender,
+            &action,
+            fee,
+            finality_fee,
+            nonce,
+            MAINNET_CHAIN_ID,
+        )
+        .unwrap();
+        Transaction {
+            tx_id,
+            sender: sender.clone(),
+            action,
+            fee,
+            finality_fee,
             signature: sk.sign(&msg).to_bytes().to_vec(),
             signature_type: SIGNATURE_TYPE_ED25519,
             nonce,
@@ -648,14 +739,24 @@ mod tests {
         nonce: u64,
     ) -> Transaction {
         let action = TransactionAction::RefinerBond { amount };
-        let tx_id = compute_tx_id(sender, &action, fee, nonce, MAINNET_CHAIN_ID).unwrap();
-        let msg =
-            transaction_signing_payload(sender, &action, fee, nonce, MAINNET_CHAIN_ID).unwrap();
+        let finality_fee = 0;
+        let tx_id =
+            compute_tx_id(sender, &action, fee, finality_fee, nonce, MAINNET_CHAIN_ID).unwrap();
+        let msg = transaction_signing_payload(
+            sender,
+            &action,
+            fee,
+            finality_fee,
+            nonce,
+            MAINNET_CHAIN_ID,
+        )
+        .unwrap();
         Transaction {
             tx_id,
             sender: sender.clone(),
             action,
             fee,
+            finality_fee,
             signature: sk.sign(&msg).to_bytes().to_vec(),
             signature_type: SIGNATURE_TYPE_ED25519,
             nonce,
@@ -674,14 +775,24 @@ mod tests {
         nonce: u64,
     ) -> Transaction {
         let action = TransactionAction::RefinerUnbond { amount };
-        let tx_id = compute_tx_id(sender, &action, fee, nonce, MAINNET_CHAIN_ID).unwrap();
-        let msg =
-            transaction_signing_payload(sender, &action, fee, nonce, MAINNET_CHAIN_ID).unwrap();
+        let finality_fee = 0;
+        let tx_id =
+            compute_tx_id(sender, &action, fee, finality_fee, nonce, MAINNET_CHAIN_ID).unwrap();
+        let msg = transaction_signing_payload(
+            sender,
+            &action,
+            fee,
+            finality_fee,
+            nonce,
+            MAINNET_CHAIN_ID,
+        )
+        .unwrap();
         Transaction {
             tx_id,
             sender: sender.clone(),
             action,
             fee,
+            finality_fee,
             signature: sk.sign(&msg).to_bytes().to_vec(),
             signature_type: SIGNATURE_TYPE_ED25519,
             nonce,
@@ -703,12 +814,15 @@ mod tests {
             recipient: recipient.clone(),
             amount,
         };
-        let tx_id = compute_tx_id(sender, &action, fee, nonce, MAINNET_CHAIN_ID).unwrap();
+        let finality_fee = 0;
+        let tx_id =
+            compute_tx_id(sender, &action, fee, finality_fee, nonce, MAINNET_CHAIN_ID).unwrap();
         Transaction {
             tx_id,
             sender: sender.clone(),
             action,
             fee,
+            finality_fee,
             signature: vec![],
             signature_type: SIGNATURE_TYPE_ED25519,
             nonce,
@@ -726,12 +840,15 @@ mod tests {
         nonce: u64,
     ) -> Transaction {
         let action = TransactionAction::RefinerBond { amount };
-        let tx_id = compute_tx_id(sender, &action, fee, nonce, MAINNET_CHAIN_ID).unwrap();
+        let finality_fee = 0;
+        let tx_id =
+            compute_tx_id(sender, &action, fee, finality_fee, nonce, MAINNET_CHAIN_ID).unwrap();
         Transaction {
             tx_id,
             sender: sender.clone(),
             action,
             fee,
+            finality_fee,
             signature: vec![],
             signature_type: SIGNATURE_TYPE_ED25519,
             nonce,
@@ -774,6 +891,52 @@ mod tests {
         assert_eq!(
             accounts.get_account(&bob).unwrap().balance,
             opl_to_flake(10)
+        );
+    }
+
+    #[test]
+    fn transfer_finality_fee_is_service_fee_not_base_burn() {
+        let mut accounts = AccountStore::new();
+        let mut refiners = RefinerSet::new();
+        let (sk, alice, pk) = test_keypair(1);
+        let (_, bob, _) = test_keypair(2);
+
+        accounts.create_account(alice.clone()).unwrap();
+        accounts.credit(&alice, opl_to_flake(100)).unwrap();
+
+        let tx = signed_transfer_with_finality_fee(
+            &sk,
+            &alice,
+            pk,
+            &bob,
+            opl_to_flake(10),
+            (100, 25),
+            0,
+        );
+        let result = TransactionDispatcher::apply_transaction(
+            &tx,
+            &mut accounts,
+            &mut refiners,
+            1,
+            100,
+            0,
+            MAINNET_CHAIN_ID,
+        );
+
+        assert!(
+            result.success,
+            "Transfer should succeed: {:?}",
+            result.error
+        );
+        assert_eq!(result.fee_burned, 100);
+        assert_eq!(result.refiner_service_fee, 25);
+        assert_eq!(
+            accounts.get_account(&bob).unwrap().balance,
+            opl_to_flake(10)
+        );
+        assert_eq!(
+            accounts.get_account(&alice).unwrap().balance,
+            opl_to_flake(90) - 125
         );
     }
 

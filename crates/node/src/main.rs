@@ -1186,7 +1186,7 @@ async fn handle_network_event(
                     }
 
                     let tx_data_for_rebroadcast = data.clone();
-                    let tx_fee = tx.fee;
+                    let tx_fee = tx.fee.saturating_add(tx.finality_fee);
                     let priority = tx_fee;
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)

@@ -14,7 +14,7 @@ Opolys encodes these properties directly into consensus:
 |---|---|---|
 | **Gold mining gets harder over time** | Difficulty rises as more OPL is mined | Miners must find hashes with more leading zero bits as the network grows. More hash power → faster blocks → difficulty increases → each block yields less OPL, just like real veins depleting. |
 | **Gold supply has no cap** | No maximum supply | There is no "21 million" moment. OPL issuance naturally declines as difficulty rises, but it never reaches zero. Like gold — there's always a little more to be found, it just costs more. |
-| **Gold is lost over time** | All transaction fees are burned | Every fee permanently destroys OPL from circulation. Shipwrecks, lost jewelry, melted coins — Opolys models this as fee burning. The circulating supply can *shrink*. |
+| **Gold is lost over time** | Base transaction fees are burned | Every base fee permanently destroys OPL from circulation. Shipwrecks, lost jewelry, melted coins — Opolys models this as fee burning. The circulating supply can *shrink*. |
 | **Gold mining is a physical process** | EVO-OMAP memory-hard proof-of-work | Mining requires 256 MiB of memory and data-dependent computation. No shortcut, no ASIC cheat. Like digging a shaft — you have to move the rock. |
 | **Gold ore varies in richness** | Vein yield: `1 + ln(target / hash_int)` | A lucky gold strike yields more than a poor one. Vein yield models this: most blocks earn ~2x base reward, exceptional ones earn more. The math is natural, not scheduled. |
 | **Gold production rate is known** | BASE_REWARD derived from world gold production via genesis ceremony | 3,630 tonnes of gold are mined annually (~116.7 million troy ounces). Divided by 350,640 blocks per year = 332 OPL per block at minimum difficulty. BASE_REWARD is set from live LBMA/USGS/WGC data at the genesis ceremony. |
@@ -393,8 +393,9 @@ At minimum difficulty (1), the base reward starts from the ceremony value, then 
 ```
 coverage_milli = (bonded_stake × 1000) / total_issued    // integer, no float
 net_base_reward = (BASE_REWARD / effective_difficulty) after proportional assay
-miner_share_amount = net_base_reward × (1000 - coverage_milli) / 1000 + net_vein_bonus
-refiner_share_amount = net_base_reward × coverage_milli / 1000
+miner_share_amount = gross_block_reward - mine_assay
+refiner_share_amount = 0
+refiner_service_fee = explicit finality/assay fee paid only to valid included attesters; burned if unserved
 ```
 
 - Miner share goes to the block producer
@@ -478,7 +479,7 @@ The same stake-only model is used for producer selection, refiner reward distrib
 
 ```rust
 BlockHeader {
-    version: u32,                       // Protocol version (currently 2)
+    version: u32,                       // Protocol version (currently 3)
     height: u64,                        // 0 for genesis
     previous_hash: Hash,                 // Blake3-256 of prior block
     state_root: Hash,                    // Blake3-256 of post-execution state
@@ -704,7 +705,7 @@ corrupt state as fatal once any block progress exists.
 
 Every block applied to the chain must pass these checks:
 
-1. **Version** must match `BLOCK_VERSION` (currently 2)
+1. **Version** must match `BLOCK_VERSION` (currently 3)
 2. **Height** must equal `parent_height + 1`
 3. **Previous hash** must match parent's hash (`Hash::zero()` for genesis)
 4. **Timestamp** must be strictly greater than parent, within 5 minutes of wall clock
@@ -736,7 +737,7 @@ Every block applied to the chain must pass these checks:
 | `UNBONDING_DELAY_BLOCKS` | 960 | One epoch delay for unbonding |
 | `MIN_FEE` | 1 Flake | Floor for market-driven fees |
 | `MIN_BOND_STAKE` | 1,000,000 Flakes (1 OPL) | Floor for dynamic minimum bond |
-| `BLOCK_VERSION` | 2 | Current protocol version |
+| `BLOCK_VERSION` | 3 | Current protocol version |
 | `SIGNATURE_TYPE_ED25519` | 0 | ed25519 signature type |
 | `EXTENSION_TYPE_NONE` | 0 | No extension data |
 | `EXTENSION_TYPE_ROLLUP` | 1 | Rollup data (reserved) |
@@ -806,8 +807,9 @@ entry_weight = stake
 ```
 coverage_milli = (bonded_stake × 1000) / total_issued        // integer, no float
 net_base_reward = (BASE_REWARD / effective_difficulty) after proportional assay
-miner_share_amount = net_base_reward × (1000 - coverage_milli) / 1000 + net_vein_bonus
-refiner_share_amount = net_base_reward × coverage_milli / 1000
+miner_share_amount = gross_block_reward - mine_assay
+refiner_share_amount = 0
+refiner_service_fee = explicit finality/assay fee paid only to valid included attesters; burned if unserved
 ```
 
 ---
@@ -864,7 +866,7 @@ Opolys implements layered P2P defenses to protect honest nodes from adversarial 
 
 | Principle | Detail |
 |---|---|
-| **No hard cap** | Supply grows via block rewards; fees are burned, modeling real gold attrition |
+| **No hard cap** | Supply grows via mining rewards; base fees and unserved service fees are burned, modeling real gold attrition |
 | **No governance** | No on-chain governance, no voting, no committees |
 | **No schedules** | Difficulty and rewards emerge from chain state, not from a calendar |
 | **No hardcoded fees** | Fees are market-driven and burned entirely |

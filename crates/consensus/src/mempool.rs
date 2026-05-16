@@ -185,14 +185,20 @@ impl Mempool {
             .entries
             .values()
             .find(|e| e.transaction.sender == tx.sender && e.transaction.nonce == tx.nonce)
-            .map(|e| (e.transaction.tx_id.clone(), e.transaction.fee));
+            .map(|e| {
+                (
+                    e.transaction.tx_id.clone(),
+                    e.transaction.fee.saturating_add(e.transaction.finality_fee),
+                )
+            });
 
         if let Some((old_id, old_fee)) = replacement {
+            let tx_total_fee = tx.fee.saturating_add(tx.finality_fee);
             let min_replacement_fee = old_fee.saturating_mul(11).div_ceil(10);
-            if tx.fee < min_replacement_fee {
+            if tx_total_fee < min_replacement_fee {
                 return Err(OpolysError::InvalidTransaction(format!(
                     "Replacement fee {} must be at least 10% higher than existing fee {}",
-                    tx.fee, old_fee
+                    tx_total_fee, old_fee
                 )));
             }
             self.remove_transaction(&old_id);
@@ -315,8 +321,14 @@ pub fn verify_transaction_for_mempool(
         )));
     }
 
-    let expected_tx_id =
-        compute_mempool_tx_id(&tx.sender, &tx.action, tx.fee, tx.nonce, tx.chain_id)?;
+    let expected_tx_id = compute_mempool_tx_id(
+        &tx.sender,
+        &tx.action,
+        tx.fee,
+        tx.finality_fee,
+        tx.nonce,
+        tx.chain_id,
+    )?;
     if tx.tx_id != expected_tx_id {
         return Err(OpolysError::InvalidTransaction(format!(
             "Transaction ID mismatch: expected {}, got {}",
@@ -350,8 +362,14 @@ pub fn verify_transaction_for_mempool(
         ));
     }
 
-    let signing_payload =
-        transaction_signing_payload(&tx.sender, &tx.action, tx.fee, tx.nonce, tx.chain_id)?;
+    let signing_payload = transaction_signing_payload(
+        &tx.sender,
+        &tx.action,
+        tx.fee,
+        tx.finality_fee,
+        tx.nonce,
+        tx.chain_id,
+    )?;
     if !opolys_crypto::verify_ed25519(&tx.public_key, &signing_payload, &tx.signature) {
         return Err(OpolysError::InvalidSignature);
     }
@@ -363,15 +381,17 @@ fn compute_mempool_tx_id(
     sender: &ObjectId,
     action: &TransactionAction,
     fee: FlakeAmount,
+    finality_fee: FlakeAmount,
     nonce: u64,
     chain_id: u64,
 ) -> Result<ObjectId, OpolysError> {
-    let data = borsh::to_vec(&(sender.clone(), action, fee, nonce, chain_id)).map_err(|e| {
-        OpolysError::SerializationError(format!(
-            "Mempool transaction ID serialization failed: {}",
-            e
-        ))
-    })?;
+    let data = borsh::to_vec(&(sender.clone(), action, fee, finality_fee, nonce, chain_id))
+        .map_err(|e| {
+            OpolysError::SerializationError(format!(
+                "Mempool transaction ID serialization failed: {}",
+                e
+            ))
+        })?;
     Ok(hash_to_object_id_with_domain(DOMAIN_TX_ID, &data))
 }
 
@@ -400,13 +420,21 @@ mod tests {
             recipient: opolys_crypto::hash_to_object_id(b"recipient"),
             amount: 100,
         };
-        let tx_id =
-            compute_mempool_tx_id(&sender, &action, fee, nonce, opolys_core::MAINNET_CHAIN_ID)
-                .unwrap();
+        let finality_fee = 0;
+        let tx_id = compute_mempool_tx_id(
+            &sender,
+            &action,
+            fee,
+            finality_fee,
+            nonce,
+            opolys_core::MAINNET_CHAIN_ID,
+        )
+        .unwrap();
         let message = transaction_signing_payload(
             &sender,
             &action,
             fee,
+            finality_fee,
             nonce,
             opolys_core::MAINNET_CHAIN_ID,
         );
@@ -416,6 +444,7 @@ mod tests {
             sender,
             action,
             fee,
+            finality_fee,
             signature: signing_key.sign(&message).to_bytes().to_vec(),
             nonce,
             chain_id: opolys_core::MAINNET_CHAIN_ID,

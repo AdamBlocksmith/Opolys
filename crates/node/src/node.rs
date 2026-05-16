@@ -865,9 +865,9 @@ fn compute_mine_assay(gross_reward: FlakeAmount, effective_difficulty: u64) -> F
 
 fn compute_reward_distribution(
     gross_reward: FlakeAmount,
-    base_reward_amount: FlakeAmount,
+    _base_reward_amount: FlakeAmount,
     effective_difficulty: u64,
-    coverage_milli: u64,
+    _coverage_milli: u64,
 ) -> RewardDistribution {
     if gross_reward == 0 {
         return RewardDistribution {
@@ -882,22 +882,12 @@ fn compute_reward_distribution(
     let mine_assay = compute_mine_assay(gross_reward, effective_difficulty);
     let net_reward = gross_reward.saturating_sub(mine_assay);
 
-    let net_base_reward =
-        ((base_reward_amount as u128 * net_reward as u128) / gross_reward as u128) as FlakeAmount;
-    let net_vein_bonus = net_reward.saturating_sub(net_base_reward);
-    let coverage_milli = coverage_milli.min(1000);
-
-    let miner_base_share =
-        ((net_base_reward as u128 * (1000 - coverage_milli) as u128) / 1000) as FlakeAmount;
-    let refiner_share = net_base_reward.saturating_sub(miner_base_share);
-    let miner_share = miner_base_share.saturating_add(net_vein_bonus);
-
     RewardDistribution {
         gross_reward,
         mine_assay,
         net_reward,
-        miner_share,
-        refiner_share,
+        miner_share: net_reward,
+        refiner_share: 0,
     }
 }
 
@@ -1762,6 +1752,7 @@ impl OpolysNode {
 
         let mut processed_attestation_keys: std::collections::HashSet<(u64, String)> =
             std::collections::HashSet::new();
+        let mut included_attesters: HashSet<ObjectId> = HashSet::new();
         let finality_threshold =
             Self::active_refiner_weight_milli_threshold(&refiners, block.header.timestamp);
         let mut touched_finality_keys: HashSet<(u64, Hash)> = HashSet::new();
@@ -1805,6 +1796,7 @@ impl OpolysNode {
                 .or_default()
                 .insert(attestation.refiner.clone());
             touched_finality_keys.insert(finality_key);
+            included_attesters.insert(attestation.refiner.clone());
             refiners.record_correct_attestation(&attestation.refiner)?;
         }
 
@@ -1994,27 +1986,23 @@ impl OpolysNode {
             )
         };
 
-        // Split the block reward into base and vein bonus components.
-        // The coverage split (producer vs refiner pool) applies to base_reward ONLY.
-        // The vein bonus (luck component) goes 100% to the block producer.
-        // This mirrors gold: refineries charge per ounce, not per grade.
-        // A rich vein doesn't increase the refinery's cut.
+        // Block rewards go to the block producer only. Refiners do not receive
+        // automatic protocol yield; they earn explicit service fees when valid
+        // attestations are included.
         let base_reward_amount = if block.header.height == 0 {
             0
         } else {
             chain.base_reward / block.header.difficulty.max(MIN_DIFFICULTY)
         };
         // Mine assay burns part of the gross ore before rewards are credited.
-        // Split the net reward between the producer and refiners based on stake coverage.
-        // The split is on the net base reward only. The net vein bonus goes to the producer.
+        // Refiner coverage remains tracked for observability/economic reporting,
+        // but it no longer routes automatic block reward to refiners.
         // coverage_milli = (bonded_stake × 1000) / total_issued, avoiding floating point.
         let coverage_milli: u64 = if chain.total_issued > 0 {
             ((bonded_stake as u128 * 1000) / chain.total_issued as u128).min(1000) as u64
         } else {
             0
         };
-        // producer_share = net_base_reward * (1000 - coverage_milli) / 1000 + net_vein_bonus
-        // refiner_share = net_base_reward * coverage_milli / 1000
         let reward_distribution = compute_reward_distribution(
             block_reward,
             base_reward_amount,
@@ -2032,8 +2020,9 @@ impl OpolysNode {
             add_planned_credit(&mut planned_reward_credits, producer, miner_share_amount)?;
         }
 
-        // Distribute the refiner share among active refiners proportional to weight.
-        // Each refiner's share = refiner_share_amount × (their_weight / total_weight).
+        // Automatic refiner block reward share is intentionally disabled.
+        // This branch remains unreachable unless a future protocol version
+        // reintroduces a nonzero automatic refiner share.
         if refiner_share_amount > 0 {
             let current_timestamp = chain.block_timestamps.last().copied().unwrap_or(0);
             let total_weight = refiners.total_weight(current_timestamp);
@@ -2060,6 +2049,7 @@ impl OpolysNode {
         // Execute all transactions in order
         let expected_chain_id = MAINNET_CHAIN_ID;
         let mut total_transaction_burned: FlakeAmount = 0;
+        let mut total_refiner_service_fee: FlakeAmount = 0;
         let mut total_fee_signal: FlakeAmount = 0;
         let mut successful_transaction_count: u64 = 0;
         for tx in &block.transactions {
@@ -2076,6 +2066,9 @@ impl OpolysNode {
                 total_transaction_burned = total_transaction_burned
                     .checked_add(result.fee_burned)
                     .ok_or_else(|| "Total transaction burns overflow".to_string())?;
+                total_refiner_service_fee = total_refiner_service_fee
+                    .checked_add(result.refiner_service_fee)
+                    .ok_or_else(|| "Total refiner service fees overflow".to_string())?;
                 total_fee_signal = total_fee_signal
                     .checked_add(tx.fee)
                     .ok_or_else(|| "Total transaction fee signal overflow".to_string())?;
@@ -2108,6 +2101,49 @@ impl OpolysNode {
             .total_burned
             .checked_add(total_transaction_burned)
             .ok_or_else(|| "Total burned overflow after transaction burns".to_string())?;
+
+        let mut paid_refiner_service_fee: FlakeAmount = 0;
+        if total_refiner_service_fee > 0 && !included_attesters.is_empty() {
+            let current_timestamp = chain.block_timestamps.last().copied().unwrap_or(0);
+            let total_attesting_weight = Self::indexed_attestation_weight_for_refiners(
+                &included_attesters,
+                &refiners,
+                current_timestamp,
+            );
+            if total_attesting_weight > 0 {
+                let mut planned_service_credits: HashMap<ObjectId, FlakeAmount> = HashMap::new();
+                let mut attesters: Vec<ObjectId> = included_attesters.into_iter().collect();
+                attesters.sort_by_key(|id| id.0.0);
+                for attester in &attesters {
+                    let Some(refiner) = refiners.get_refiner(attester) else {
+                        continue;
+                    };
+                    if refiner.status != RefinerStatus::Active {
+                        continue;
+                    }
+                    let share = (total_refiner_service_fee as u128)
+                        .saturating_mul(refiner.weight(current_timestamp) as u128)
+                        .checked_div(total_attesting_weight)
+                        .unwrap_or(0) as FlakeAmount;
+                    if share > 0 {
+                        paid_refiner_service_fee = paid_refiner_service_fee.saturating_add(share);
+                        add_planned_credit(&mut planned_service_credits, attester, share)?;
+                    }
+                }
+                ensure_planned_credits_creditable(&accounts, &planned_service_credits)?;
+                for (account, amount) in planned_service_credits {
+                    credit_or_create_account(&mut accounts, &account, amount)?;
+                }
+            }
+        }
+        let unserved_refiner_service_fee =
+            total_refiner_service_fee.saturating_sub(paid_refiner_service_fee);
+        chain.total_burned = chain
+            .total_burned
+            .checked_add(unserved_refiner_service_fee)
+            .ok_or_else(|| {
+                "Total burned overflow after unserved refiner service fees".to_string()
+            })?;
 
         // Compute suggested fee for the next block via EMA of the average explicit
         // fee per successful transaction. Bond/unbond assays are burned, but they
@@ -2506,8 +2542,8 @@ mod tests {
 
         assert_eq!(distribution.mine_assay, 4_166);
         assert_eq!(distribution.net_reward, 1_995_834);
-        assert_eq!(distribution.miner_share, 997_917);
-        assert_eq!(distribution.refiner_share, 997_917);
+        assert_eq!(distribution.miner_share, 1_995_834);
+        assert_eq!(distribution.refiner_share, 0);
         assert_eq!(
             distribution.miner_share + distribution.refiner_share,
             1_995_834
@@ -2523,8 +2559,8 @@ mod tests {
 
         assert_eq!(distribution.mine_assay, 2_000);
         assert_eq!(distribution.net_reward, 958_000);
-        assert_eq!(distribution.miner_share, 479_000);
-        assert_eq!(distribution.refiner_share, 479_000);
+        assert_eq!(distribution.miner_share, 958_000);
+        assert_eq!(distribution.refiner_share, 0);
         assert_eq!(
             distribution.miner_share + distribution.refiner_share,
             distribution.net_reward
