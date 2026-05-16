@@ -584,8 +584,9 @@ impl RefinerSet {
     /// `minimum_bond_stake(total_issued) * active_refiner_limit(total_issued)`.
     /// If bonded stake is at or below that baseline, no stake decays. If bonded
     /// stake exceeds the baseline, only the surplus pressure creates a small
-    /// epoch burn:
-    /// `entry_decay = entry_stake * surplus_stake / total_bonded_stake / BLOCKS_PER_YEAR`.
+    /// epoch burn. The annualized surplus pressure is damped by the square root
+    /// of the active refiner capacity, then prorated across one epoch:
+    /// `entry_decay = entry_stake * surplus_stake * EPOCH / (total_bonded_stake * BLOCKS_PER_YEAR * sqrt(active_refiner_limit))`.
     ///
     /// Returns the total amount of stake burned across all refiners.
     pub fn decay_stake(&mut self, total_issued_flakes: FlakeAmount) -> FlakeAmount {
@@ -594,12 +595,14 @@ impl RefinerSet {
             return 0;
         }
 
-        let baseline_security_stake = Self::minimum_bond_stake(total_issued_flakes) as u128
-            * Self::active_refiner_limit(total_issued_flakes) as u128;
+        let active_refiner_limit = Self::active_refiner_limit(total_issued_flakes);
+        let baseline_security_stake =
+            Self::minimum_bond_stake(total_issued_flakes) as u128 * active_refiner_limit as u128;
         let surplus_stake = (total_bonded as u128).saturating_sub(baseline_security_stake);
         if surplus_stake == 0 {
             return 0;
         }
+        let active_limit_sqrt = integer_sqrt_floor(active_refiner_limit as u128).max(1);
 
         let mut total_burned: FlakeAmount = 0;
         let mut dirty = Vec::new();
@@ -614,9 +617,12 @@ impl RefinerSet {
                 }
                 let burned = (entry.stake as u128)
                     .saturating_mul(surplus_stake)
+                    .saturating_mul(EPOCH as u128)
                     .checked_div(total_bonded as u128)
                     .unwrap_or(0)
                     .checked_div(BLOCKS_PER_YEAR as u128)
+                    .unwrap_or(0)
+                    .checked_div(active_limit_sqrt)
                     .unwrap_or(0)
                     .min(entry.stake as u128) as FlakeAmount;
                 if burned == 0 {
@@ -969,8 +975,10 @@ mod tests {
             RefinerSet::minimum_bond_stake(0) as u128 * RefinerSet::active_refiner_limit(0) as u128;
         let total_bonded = MIN_BOND_STAKE * 1000;
         let surplus = total_bonded as u128 - baseline;
-        let expected = ((total_bonded as u128 * surplus / total_bonded as u128)
-            / BLOCKS_PER_YEAR as u128) as FlakeAmount;
+        let active_limit_sqrt = integer_sqrt_floor(RefinerSet::active_refiner_limit(0) as u128);
+        let expected = ((total_bonded as u128 * surplus / total_bonded as u128) * EPOCH as u128
+            / BLOCKS_PER_YEAR as u128
+            / active_limit_sqrt) as FlakeAmount;
 
         let burned = vs.decay_stake(0);
         assert_eq!(burned, expected);

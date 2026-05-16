@@ -2229,7 +2229,8 @@ impl OpolysNode {
         }
 
         // No explicit consensus phase — refiners produce blocks when miners don't.
-        // The coverage_milli calculation in reward distribution handles the split.
+        // coverage_milli remains an observability and difficulty-floor signal,
+        // not a passive refiner reward split.
 
         // This state root goes into the NEXT block's header (block N+1).
         // It reflects all state changes from this block:

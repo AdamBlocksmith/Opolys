@@ -330,10 +330,12 @@ minimum_bond = sqrt(total_issued_opl)
 active_refiner_limit = EPOCH + sqrt(total_issued_opl)
 baseline_security_stake = minimum_bond × active_refiner_limit
 surplus_stake = max(0, total_bonded_stake - baseline_security_stake)
-entry_decay = entry_stake × surplus_stake / total_bonded_stake / BLOCKS_PER_YEAR
+entry_decay_per_epoch =
+  entry_stake × surplus_stake × EPOCH
+  / (total_bonded_stake × BLOCKS_PER_YEAR × sqrt(active_refiner_limit))
 ```
 
-If there is no surplus bonded stake, decay is zero. All decayed stake is permanently burned. This mirrors vault drag only when custody is overstocked, without weakening thin-security periods.
+If there is no surplus bonded stake, decay is zero. All decayed stake is permanently burned. This mirrors vault drag only when custody is overstocked, without weakening thin-security periods. The `sqrt(active_refiner_limit)` term dilutes drag as the vault network grows, using the same system-derived capacity signal as bond/unbond assays.
 
 ### Per-Entry Weight
 
@@ -452,7 +454,7 @@ Opolys mirrors physical gold attrition through assay burns and system-derived cu
 | Channel | Rate | Formula | Gold Analogy |
 |---|---|---|---|
 | **Mine assay** | System-derived difficulty pressure | `gross_block_reward × sqrt(effective_difficulty) / EPOCH` | Harder ore creates more refining loss |
-| **Stake decay** | System-derived surplus drag | `entry_stake × surplus_stake / total_bonded_stake / BLOCKS_PER_YEAR` | Overstocked vault drag |
+| **Stake decay** | System-derived surplus drag | `entry_stake × surplus_stake × EPOCH / (total_bonded_stake × BLOCKS_PER_YEAR × sqrt(active_refiner_limit))` | Overstocked vault drag |
 | **Bond assay** | System-derived crowding assay | `amount × sqrt(total_bonded_after / baseline_security_stake) / (DECIMAL_PLACES × sqrt(active_refiner_limit))` | Assay fee to enter a crowded vault |
 | **Unbond assay** | System-derived thinness assay | `amount × sqrt(baseline_security_stake / total_bonded_stake) / (DECIMAL_PLACES × sqrt(active_refiner_limit))` | Assay fee to exit a thin vault |
 
@@ -889,7 +891,7 @@ Four channels permanently burn OPL, mirroring physical gold attrition and custod
 | Channel | Rate | Formula |
 |---|---|---|
 | Mine assay | System-derived difficulty pressure | `gross_block_reward × sqrt(effective_difficulty) / EPOCH` |
-| Stake decay | System-derived surplus drag | `entry_stake × surplus_stake / total_bonded_stake / BLOCKS_PER_YEAR` |
+| Stake decay | System-derived surplus drag | `entry_stake × surplus_stake × EPOCH / (total_bonded_stake × BLOCKS_PER_YEAR × sqrt(active_refiner_limit))` |
 | Bond assay | System-derived crowding assay | `amount × sqrt(total_bonded_after / baseline_security_stake) / (DECIMAL_PLACES × sqrt(active_refiner_limit))` |
 | Unbond assay | System-derived thinness assay | `amount × sqrt(baseline_security_stake / total_bonded_stake) / (DECIMAL_PLACES × sqrt(active_refiner_limit))` |
 
