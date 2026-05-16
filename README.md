@@ -296,7 +296,7 @@ Opolys uses **hybrid miner/refiner consensus** with mining first and refiner pro
 1. **Miners compete** to find EVO-OMAP proof-of-work solutions (like physical gold miners)
 2. **Refiners bond stake** and earn the right to produce stalled-chain blocks proportional to active bonded stake (like trusted vaults stepping in when mine output pauses)
 3. **Stake coverage** (`bonded_stake / total_issued`) raises the organic difficulty floor, so weak bonded security cannot cheaply pull mining difficulty down
-4. **Refiner income is service-based**: refiners earn explicit user-paid finality/assay service fees only when valid attestation/finality service is delivered
+4. **Refiner income is activity-based**: mined blocks burn ordinary fees; refiner-produced blocks pay ordinary fees to the selected refiner producer
 
 ### Difficulty
 
@@ -394,13 +394,14 @@ At minimum difficulty (1), the base reward starts from the ceremony value, then 
 coverage_milli = (bonded_stake × 1000) / total_issued    // integer, no float
 miner_share_amount = gross_block_reward - mine_assay
 refiner_share_amount = 0
-refiner_service_fee = explicit finality/assay fee paid only to valid included attesters; burned if unserved
+refiner_block_fee_income = sum(tx.fee) in refiner-produced blocks
 ```
 
 - Miner share goes to the block producer
 - There is no automatic refiner share from protocol issuance
-- Refiner service fees are distributed among valid included attesters by stake weight
-- If no valid service is delivered, the service fee is burned
+- Mined-block transaction fees are burned
+- Refiner-produced block transaction fees go to the selected refiner producer
+- Bond/unbond assays are burned
 - This keeps refiner income tied to explicit work, not passive bonded time
 
 ### Suggested Fee (EMA)
@@ -415,7 +416,7 @@ Floored at `MIN_FEE` (1 Flake). Empty blocks use `MIN_FEE` as the current signal
 
 ---
 
-## Refiner Staking
+## Refiner Collateral
 
 ### Bond Lifecycle
 
@@ -478,7 +479,7 @@ The same stake-only model is used for producer selection, refiner reward distrib
 
 ```rust
 BlockHeader {
-    version: u32,                       // Protocol version (currently 3)
+    version: u32,                       // Protocol version (currently 4)
     height: u64,                        // 0 for genesis
     previous_hash: Hash,                 // Blake3-256 of prior block
     state_root: Hash,                    // Blake3-256 of post-execution state
@@ -704,7 +705,7 @@ corrupt state as fatal once any block progress exists.
 
 Every block applied to the chain must pass these checks:
 
-1. **Version** must match `BLOCK_VERSION` (currently 3)
+1. **Version** must match `BLOCK_VERSION` (currently 4)
 2. **Height** must equal `parent_height + 1`
 3. **Previous hash** must match parent's hash (`Hash::zero()` for genesis)
 4. **Timestamp** must be strictly greater than parent, within 5 minutes of wall clock
@@ -736,7 +737,7 @@ Every block applied to the chain must pass these checks:
 | `UNBONDING_DELAY_BLOCKS` | 960 | One epoch delay for unbonding |
 | `MIN_FEE` | 1 Flake | Floor for market-driven fees |
 | `MIN_BOND_STAKE` | 1,000,000 Flakes (1 OPL) | Floor for dynamic minimum bond |
-| `BLOCK_VERSION` | 3 | Current protocol version |
+| `BLOCK_VERSION` | 4 | Current protocol version |
 | `SIGNATURE_TYPE_ED25519` | 0 | ed25519 signature type |
 | `EXTENSION_TYPE_NONE` | 0 | No extension data |
 | `EXTENSION_TYPE_ROLLUP` | 1 | Rollup data (reserved) |
@@ -808,7 +809,7 @@ coverage_milli = (bonded_stake × 1000) / total_issued        // integer, no flo
 net_base_reward = (BASE_REWARD / effective_difficulty) after proportional assay
 miner_share_amount = gross_block_reward - mine_assay
 refiner_share_amount = 0
-refiner_service_fee = explicit finality/assay fee paid only to valid included attesters; burned if unserved
+refiner_block_fee_income = sum(tx.fee) in refiner-produced blocks
 ```
 
 ---
@@ -865,14 +866,14 @@ Opolys implements layered P2P defenses to protect honest nodes from adversarial 
 
 | Principle | Detail |
 |---|---|
-| **No hard cap** | Supply grows via mining rewards; base fees and unserved service fees are burned, modeling real gold attrition |
+| **No hard cap** | Supply grows via mining rewards; mined-block fees and assays are burned, modeling real gold attrition |
 | **No governance** | No on-chain governance, no voting, no committees |
 | **No schedules** | Difficulty and rewards emerge from chain state, not from a calendar |
-| **No hardcoded fees** | Fees are market-driven and burned entirely |
+| **No hardcoded fees** | Fees are market-driven; mined-block fees burn and refiner-block fees pay the refiner producer |
 | **Only double-signing slashed** | No reversal windows, no confiscation for any other reason |
 | **Gold-derived emission** | BASE_REWARD from genesis ceremony, derived from annual gold production (~3,630 tonnes) |
 | **Integer-only consensus** | No floating-point arithmetic in consensus-critical code; vein yield uses deterministic integer math and refiner weight is stake-only |
-| **Holder safety** | Ordinary dormant holder balances do not decay. Attrition comes from fees, assay burns, surplus-based refiner stake decay, slashing, and naturally lost keys. |
+| **Holder safety** | Ordinary dormant holder balances do not decay. Attrition comes from fees, assay burns, slashing, and naturally lost keys. |
 | **Single key** | One ed25519 key for both transactions and validation, derived from BIP-39 mnemonic |
 | **Core only** | The node is the protocol layer (like Bitcoin Core). Community builds explorers, wallets, and mining pools |
 
@@ -886,7 +887,7 @@ Opolys implements layered P2P defenses to protect honest nodes from adversarial 
 | Crypto | **DONE** | Blake3, SHA3-256, ed25519, key derivation |
 | Consensus engine | **DONE** | EVO-OMAP PoW, vein yield, difficulty, FIFO unbonding, refiner selection |
 | Storage | **DONE** | RocksDB with all column families, atomic state saves |
-| Execution | **DONE** | Transaction dispatcher (Transfer, Bond, Unbond) with fee burning |
+| Execution | **DONE** | Transaction dispatcher (Transfer, Bond, Unbond) with fee routing and assay burns |
 | Wallet | **DONE** | BIP-39, SLIP-0010, ed25519 signing, CLI (`opl`) |
 | RPC | **DONE** | JSON-RPC 2.0 with mining endpoints, chain queries, API key auth |
 | Node | **DONE** | Full node with mining loop, block application, P2P event loop |

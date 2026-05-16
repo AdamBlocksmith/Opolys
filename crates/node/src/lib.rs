@@ -4,15 +4,14 @@
 //! single running node. It manages:
 //!
 //! - **Chain state** — height, difficulty, issuance/burn tracking, block linkage
-//! - **Mining** — Autolykos PoW mining loop for block production
-//! - **Block application** — state transitions including transaction execution,
-//!   fee burning, reward emission, and difficulty adjustment
+//! - **Mining** -- EVO-OMAP PoW mining loop for block production
+//! - **Block application** -- transaction execution, fee routing, reward emission,
+//!   and difficulty adjustment
 //! - **Persistence** — saving and loading state via RocksDB
 //! - **RPC** — serving chain queries via JSON-RPC
 //!
-//! The node transitions from pure PoW to blended PoW/refiner as refiner stake
-//! coverage grows (no governance or schedules — difficulty and rewards emerge
-//! from chain state).
+//! Refiners produce blocks only when miners stall. Mined-block fees burn;
+//! refiner-block fees pay the selected refiner producer.
 
 pub mod node;
 

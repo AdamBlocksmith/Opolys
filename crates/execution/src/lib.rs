@@ -5,10 +5,9 @@
 //! *which* transactions to include) and the account/refiner stores (which hold
 //! *what* the state looks like).
 //!
-//! Base transaction fees are **burned** (permanently removed from supply);
-//! explicit refiner service fees are separated from the burn path and can be
-//! paid only for delivered attestation/finality service. This keeps Opolys
-//! ($OPL) as digital gold with no hard cap while avoiding passive refiner yield.
+//! Transaction execution reports ordinary fees separately from assay burns.
+//! Mined blocks burn ordinary fees. Refiner-produced blocks pay ordinary fees
+//! to the selected refiner producer. Bond/unbond assays are always burned.
 //!
 //! Supported transaction types:
 //! - **Transfer** — move OPL between accounts

@@ -2,8 +2,7 @@
 //!
 //! This crate implements the consensus logic for the Opolys ($OPL) blockchain —
 //! a fully decentralized digital gold with no hard cap. Difficulty and rewards
-//! emerge organically from chain state. Fees are market-driven and burned.
-//! Refiners earn from block rewards only. Only double-signing gets slashed.
+//! emerge organically from chain state. Mined-block fees are burned; refiner-block fees pay the selected refiner producer. Only double-signing gets slashed.
 //! No governance, no schedules, no fixed percentages.
 //!
 //! ## Modules

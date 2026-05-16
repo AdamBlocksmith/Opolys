@@ -1,7 +1,8 @@
-//! # Proof-of-stake refiner management for Opolys.
+//! # Refiner collateral and producer management for Opolys.
 //!
-//! Opolys refiners bond stake as collateral and earn block rewards
-//! proportional to their bonded stake:
+//! Opolys refiners bond stake as slashable collateral. Bonded stake affects
+//! active-set ranking and refiner-block producer selection, but it does not
+//! earn passive yield:
 //!
 //! `weight = Σ entry.stake`
 //!
@@ -24,9 +25,7 @@
 //! refiners, where the seed is derived from on-chain entropy.
 
 use borsh::{BorshDeserialize, BorshSerialize};
-use opolys_core::{
-    BLOCKS_PER_YEAR, EPOCH, FLAKES_PER_OPL, FlakeAmount, ObjectId, OpolysError, RefinerStatus,
-};
+use opolys_core::{EPOCH, FLAKES_PER_OPL, FlakeAmount, ObjectId, OpolysError, RefinerStatus};
 use opolys_crypto::{Blake3Hasher, DOMAIN_STATE_ROOT};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -578,70 +577,6 @@ impl RefinerSet {
         (newly_activated, newly_demoted)
     }
 
-    /// Apply surplus-based stake decay to bonded refiners.
-    ///
-    /// The baseline security stake is derived from the current issued supply:
-    /// `minimum_bond_stake(total_issued) * active_refiner_limit(total_issued)`.
-    /// If bonded stake is at or below that baseline, no stake decays. If bonded
-    /// stake exceeds the baseline, only the surplus pressure creates a small
-    /// epoch burn. The annualized surplus pressure is damped by the square root
-    /// of the active refiner capacity, then prorated across one epoch:
-    /// `entry_decay = entry_stake * surplus_stake * EPOCH / (total_bonded_stake * BLOCKS_PER_YEAR * sqrt(active_refiner_limit))`.
-    ///
-    /// Returns the total amount of stake burned across all refiners.
-    pub fn decay_stake(&mut self, total_issued_flakes: FlakeAmount) -> FlakeAmount {
-        let total_bonded = self.total_bonded_stake();
-        if total_bonded == 0 {
-            return 0;
-        }
-
-        let active_refiner_limit = Self::active_refiner_limit(total_issued_flakes);
-        let baseline_security_stake =
-            Self::minimum_bond_stake(total_issued_flakes) as u128 * active_refiner_limit as u128;
-        let surplus_stake = (total_bonded as u128).saturating_sub(baseline_security_stake);
-        if surplus_stake == 0 {
-            return 0;
-        }
-        let active_limit_sqrt = integer_sqrt_floor(active_refiner_limit as u128).max(1);
-
-        let mut total_burned: FlakeAmount = 0;
-        let mut dirty = Vec::new();
-        for (id, refiner) in &mut self.cached_refiners {
-            if refiner.status == RefinerStatus::Slashed {
-                continue;
-            }
-            let mut refiner_burned = 0u64;
-            for entry in &mut refiner.entries {
-                if entry.stake == 0 {
-                    continue;
-                }
-                let burned = (entry.stake as u128)
-                    .saturating_mul(surplus_stake)
-                    .saturating_mul(EPOCH as u128)
-                    .checked_div(total_bonded as u128)
-                    .unwrap_or(0)
-                    .checked_div(BLOCKS_PER_YEAR as u128)
-                    .unwrap_or(0)
-                    .checked_div(active_limit_sqrt)
-                    .unwrap_or(0)
-                    .min(entry.stake as u128) as FlakeAmount;
-                if burned == 0 {
-                    continue;
-                }
-                total_burned = total_burned.saturating_add(burned);
-                refiner_burned = refiner_burned.saturating_add(burned);
-                entry.stake = entry.stake.saturating_sub(burned);
-            }
-            if refiner_burned > 0 {
-                dirty.push(id.clone());
-            }
-        }
-        for id in dirty {
-            self.dirty_refiners.insert(id);
-        }
-        total_burned
-    }
-
     /// Count of refiners currently in `Active` status.
     pub fn total_active_refiners(&self) -> usize {
         self.active_set.len()
@@ -947,47 +882,6 @@ mod tests {
             RefinerSet::minimum_bond_stake(25_000_000 * FLAKES_PER_OPL),
             5_000 * FLAKES_PER_OPL
         );
-    }
-
-    #[test]
-    fn surplus_decay_is_zero_below_security_baseline() {
-        let mut vs = RefinerSet::new();
-        let id = test_id(b"refiner1");
-        vs.bond(id.clone(), MIN_BOND_STAKE * 10, 0, 0, 0).unwrap();
-        vs.activate(&id, 1).unwrap();
-
-        let burned = vs.decay_stake(0);
-        assert_eq!(burned, 0);
-        assert_eq!(
-            vs.get_refiner(&id).unwrap().total_stake(),
-            MIN_BOND_STAKE * 10
-        );
-    }
-
-    #[test]
-    fn surplus_decay_burns_only_when_bonded_stake_exceeds_baseline() {
-        let mut vs = RefinerSet::new();
-        let id = test_id(b"refiner1");
-        vs.bond(id.clone(), MIN_BOND_STAKE * 1000, 0, 0, 0).unwrap();
-        vs.activate(&id, 1).unwrap();
-
-        let baseline =
-            RefinerSet::minimum_bond_stake(0) as u128 * RefinerSet::active_refiner_limit(0) as u128;
-        let total_bonded = MIN_BOND_STAKE * 1000;
-        let surplus = total_bonded as u128 - baseline;
-        let active_limit_sqrt = integer_sqrt_floor(RefinerSet::active_refiner_limit(0) as u128);
-        let expected = ((total_bonded as u128 * surplus / total_bonded as u128) * EPOCH as u128
-            / BLOCKS_PER_YEAR as u128
-            / active_limit_sqrt) as FlakeAmount;
-
-        let burned = vs.decay_stake(0);
-        assert_eq!(burned, expected);
-        assert!(burned > 0);
-        assert_eq!(
-            vs.get_refiner(&id).unwrap().total_stake(),
-            total_bonded - expected
-        );
-        assert!(vs.dirty_refiners.contains(&id));
     }
 
     #[test]

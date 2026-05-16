@@ -259,18 +259,16 @@ pub struct BlockHeader {
 
 /// A signed transaction that transitions the ledger state.
 ///
-/// Every transaction carries a base fee (in Flakes) that is **burned**, not
-/// collected. Transactions may also carry an explicit `finality_fee` for refiner
-/// attestation/finality service. That service fee is signed and committed; it
-/// is paid only to valid attesters when service is actually present, otherwise
-/// it is burned.
+/// Every transaction carries one fee (in Flakes). Mined blocks burn that fee.
+/// Refiner-produced blocks pay that fee to the selected refiner producer,
+/// tying refiner income to actual block-production service and user activity.
 ///
 /// Signature verification flow:
 /// 1. Check `Blake3(public_key) == sender` (binds the key to the identity)
-/// 2. Check `tx_id == compute_tx_id(sender, action, fee, finality_fee, nonce, chain_id)` (integrity)
+/// 2. Check `tx_id == compute_tx_id(sender, action, fee, nonce, chain_id)` (integrity)
 /// 3. Check `ed25519_verify(signed_data, signature, public_key)` (authenticity)
 ///
-/// The `signed_data` is `borsh::to_vec((sender, action, fee, finality_fee, nonce, chain_id))`.
+/// The `signed_data` is `borsh::to_vec((sender, action, fee, nonce, chain_id))`.
 /// Including `chain_id` in both the tx_id and signed data prevents cross-chain
 /// replay attacks — a valid mainnet transaction cannot be replayed on another chain.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize, Serialize, Deserialize)]
@@ -282,11 +280,9 @@ pub struct Transaction {
     pub sender: ObjectId,
     /// The action this transaction performs (transfer, bond, or unbond).
     pub action: TransactionAction,
-    /// Base fee in Flakes — burned permanently.
+    /// Fee in Flakes. Burned in mined blocks; paid to the selected refiner
+    /// producer in refiner-produced blocks.
     pub fee: FlakeAmount,
-    /// Optional refiner service fee in Flakes. Paid to valid included attesters
-    /// when present; burned if no attestation service is delivered.
-    pub finality_fee: FlakeAmount,
     /// Cryptographic signature over the transaction body by the sender.
     pub signature: Vec<u8>,
     /// Signature type: 0 = ed25519 (currently the only supported type).

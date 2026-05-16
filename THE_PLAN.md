@@ -14,7 +14,7 @@ This document is the single source of truth for the entire project.
 5. [Consensus Model](#5-consensus-model)
 6. [Gold-Derived Emission](#6-gold-derived-emission)
 7. [Difficulty & Retargeting](#7-difficulty--retargeting)
-8. [Refiner Staking (PoS)](#8-refiner-staking-pos)
+8. [Refiner Collateral](#8-refiner-collateral)
 9. [FIFO Unbonding](#9-fifo-unbonding)
 10. [Fees & Burning](#10-fees--burning)
 11. [EVO-OMAP Proof-of-Work](#11-evo-omap-proof-of-work)
@@ -85,7 +85,7 @@ From `crates/core/src/constants.rs`:
 | `UNBONDING_DELAY_BLOCKS` | `960` | One epoch delay for unbonding |
 | `MIN_FEE` | `1` Flake | Floor for market-driven fees |
 | `MIN_BOND_STAKE` | `1,000,000` Flakes (1 OPL) | Floor for dynamic minimum bond |
-| `BLOCK_VERSION` | `3` | Current block header version |
+| `BLOCK_VERSION` | `4` | Current block header version |
 | `SIGNATURE_TYPE_ED25519` | `0` | ed25519 signature type constant |
 | `EXTENSION_TYPE_NONE` | `0` | No extension data |
 | `EXTENSION_TYPE_ROLLUP` | `1` | Rollup data (reserved) |
@@ -184,7 +184,7 @@ Opolys uses **hybrid miner/refiner consensus** with mining first and refiner pro
 - **Miners** produce blocks by solving EVO-OMAP PoW puzzles
 - **Refiners** produce blocks when no miner has produced one within the target interval (90 seconds)
 - Stake coverage is still measured as `coverage_milli = (bonded_stake × 1000) / total_issued`, but it is observability plus difficulty-floor pressure, not passive refiner yield
-- Refiner income comes from explicit user-paid finality/assay service fees when valid service is delivered
+- Refiner income comes from ordinary transaction fees only when the refiner produces a valid refiner block during a mining stall
 - There is no passive staking yield, no automatic refiner reward share, and no governance vote
 
 ### Refiner Block Production
@@ -218,7 +218,7 @@ Key behavior:
 A block must have **exactly one** of: PoW proof or refiner signature.
 
 - Miner block: has `pow_proof`, no `refiner_signature`. Producer earns the mined reward after the mine assay.
-- Refiner block: has `refiner_signature`, no `pow_proof`. Producer is the selected refiner for a stalled interval; refiner income is explicit service fees, not passive issuance.
+- Refiner block: has `refiner_signature`, no `pow_proof`. Producer is the selected refiner for a stalled interval; refiner income is the ordinary transaction fees in that refiner-produced block, not passive issuance.
 - A block with both or neither is **rejected**.
 
 ---
@@ -313,7 +313,7 @@ effective_difficulty = max(retarget, consensus_floor, MIN_DIFFICULTY)
 
 ---
 
-## 8. Refiner Staking (PoS)
+## 8. Refiner Collateral
 
 ### Bond Lifecycle
 
@@ -321,21 +321,6 @@ effective_difficulty = max(retarget, consensus_floor, MIN_DIFFICULTY)
 2. `RefinerUnbond { amount }` — Withdraw `amount` OPL using **FIFO order** (see Section 9), plus a dynamic unbond assay (permanently burned). The sender must have sufficient balance to pay both the transaction fee and the unbond assay.
 3. **Slashing** — Only for double-signing. **100% of stake burned** on any double-sign offense. No graduated penalties, no offense counter, no reset window. Slashed stake is removed from circulation, not confiscated to any treasury.
 
-### Stake Decay
-
-Bonded stake decay is system-derived. It appears only when total bonded stake exceeds the chain's natural security baseline:
-
-```
-minimum_bond = sqrt(total_issued_opl)
-active_refiner_limit = EPOCH + sqrt(total_issued_opl)
-baseline_security_stake = minimum_bond × active_refiner_limit
-surplus_stake = max(0, total_bonded_stake - baseline_security_stake)
-entry_decay_per_epoch =
-  entry_stake × surplus_stake × EPOCH
-  / (total_bonded_stake × BLOCKS_PER_YEAR × sqrt(active_refiner_limit))
-```
-
-If there is no surplus bonded stake, decay is zero. All decayed stake is permanently burned. This mirrors vault drag only when custody is overstocked, without weakening thin-security periods. The `sqrt(active_refiner_limit)` term dilutes drag as the vault network grows, using the same system-derived capacity signal as bond/unbond assays.
 
 ### Per-Entry Weight
 
@@ -353,7 +338,7 @@ Bond age does not increase reward weight, finality weight, or producer selection
 miner_block_reward = BASE_REWARD / difficulty × vein_yield
 miner_payout       = miner_block_reward - mine_assay
 refiner_yield      = 0
-refiner_service_fee = explicit user-paid fee, paid only when valid service is delivered
+refiner_block_fee_income = sum(tx.fee) in refiner-produced blocks
 ```
 
 Miners earn variable income based on ore quality/luck. Refiners do not earn passive protocol yield; like gold vaults and assayers, they earn only when a user pays for a delivered service. Refiner blocks pass `hash_int = 0` to `compute_vein_yield()`, which returns the 1.0x floor by design.
@@ -409,7 +394,7 @@ refiner block final when attesting_weight ≥ active_refiner_weight × FINALITY_
 FINALITY_CONFIDENCE_MILLI = 667
 ```
 
-Refiners do not receive automatic protocol yield. Miners keep the vein-yield ore-discovery upside. Explicit finality/assay service fees are paid only to valid included attesters; unserved service fees are burned. Attestations feed refiner-block confidence and refiner-block finality. `consecutive_correct_attestations` records liveness/reliability but is not currently a reward multiplier.
+Refiners do not receive automatic protocol yield. Miners keep the vein-yield ore-discovery upside. Refiner-produced blocks earn the ordinary transaction fees they include; mined-block fees and assays are burned. Attestations feed refiner-block confidence and refiner-block finality. `consecutive_correct_attestations` records liveness/reliability but is not currently a reward multiplier.
 
 ---
 
@@ -436,32 +421,30 @@ Unbonding stake stops counting for active-set ranking, producer selection, refin
 
 ## 10. Fees & Burning
 
-Base transaction fees are **permanently burned** — not collected by refiners or miners. Explicit refiner service fees are separate: they are paid only to valid included attesters when service is delivered, otherwise burned.
+Ordinary transaction fees are routed by block type: mined blocks burn them, and refiner-produced blocks pay them to the selected refiner producer. Bond/unbond assays are always burned.
 
 - **Suggested fee**: `suggested_fee` field in `BlockHeader`, computed via EMA of the previous block's average explicit fee from successful transactions. Starts at `MIN_FEE` (1 Flake).
 - **No minimum fee beyond 1 Flake**: Market determines inclusion
 - **System-derived wallet default**: Wallets use live chain `suggested_fee` when `--fee` is omitted
-- **Refiner income**: Block rewards only, not fees
-- **Deflationary**: Fee burning reduces circulating supply
+- **Refiner income**: Ordinary transaction fees in refiner-produced blocks only
+- **Deflationary**: Mined-block fee burning and assay burns reduce circulating supply
 - **Suggested fee uses successful explicit fees, not declared fees or assays**: Computed from explicit `tx.fee` values after transaction execution. Failed transactions and bond/unbond assay burns do not inflate the ordinary fee market signal.
 
 Invalid transactions (wrong nonce, insufficient balance, invalid unbond amount): no fee burn, no nonce advance.
 
 ### Supply Attrition
 
-Opolys mirrors physical gold attrition through assay burns and system-derived custody drag. Four channels burn OPL from circulation:
+Opolys mirrors physical gold attrition through assay burns and mined-block fee burns. Three channels burn OPL from circulation:
 
 | Channel | Rate | Formula | Gold Analogy |
 |---|---|---|---|
 | **Mine assay** | System-derived difficulty pressure | `gross_block_reward × sqrt(effective_difficulty) / EPOCH` | Harder ore creates more refining loss |
-| **Stake decay** | System-derived surplus drag | `entry_stake × surplus_stake × EPOCH / (total_bonded_stake × BLOCKS_PER_YEAR × sqrt(active_refiner_limit))` | Overstocked vault drag |
 | **Bond assay** | System-derived crowding assay | `amount × sqrt(total_bonded_after / baseline_security_stake) / (DECIMAL_PLACES × sqrt(active_refiner_limit))` | Assay fee to enter a crowded vault |
 | **Unbond assay** | System-derived thinness assay | `amount × sqrt(baseline_security_stake / total_bonded_stake) / (DECIMAL_PLACES × sqrt(active_refiner_limit))` | Assay fee to exit a thin vault |
 
 - At baseline, bond/unbond assays land near the old 0.375% behavior, but they now come from system state
 - When the vault is thin, bonding is cheaper and unbonding is more expensive
 - When the vault is crowded, bonding is more expensive and unbonding is cheaper
-- Stake decay is applied once per epoch (960 blocks) only when bonded stake exceeds the derived baseline
 - All attrition is permanently burned — no recipient, no treasury
 
 ---
@@ -525,17 +508,17 @@ Implementation uses deterministic fixed-point integer natural log and integer sq
 
 ### Vein Bonus Isolation (No Passive Refiner Yield)
 
-Automatic refiner yield is disabled. The full mined reward after the mine assay goes to the miner; refiners earn only explicit user-paid service fees when they deliver included attestation/finality service:
+Automatic refiner yield is disabled. The full mined reward after the mine assay goes to the miner; refiners earn ordinary transaction fees only when they produce a valid refiner block during a mining stall:
 
 ```
 miner_share = gross_block_reward - mine_assay
 refiner_share = 0
-refiner_service_fee = explicit finality/assay fee paid only to valid included attesters; burned if unserved
+refiner_block_fee_income = sum(tx.fee) in refiner-produced blocks
 ```
 
-Where `base_reward = BASE_REWARD / difficulty`. Miner blocks may add `vein_bonus`; refiner blocks have no vein bonus. Attestation reliability is not a reward multiplier.
+Where `base_reward = BASE_REWARD / difficulty`. Miner blocks may add `vein_bonus`; refiner blocks receive no issuance reward and no vein bonus. Attestation reliability is not a reward multiplier.
 
-Gold analogy: refineries charge per ounce processed, not per ore grade. The miner keeps the ore premium.
+Gold analogy: miners keep newly extracted ore; refiners earn handling fees only when they actually move the ledger during a mining stall.
 
 ---
 
@@ -543,7 +526,7 @@ Gold analogy: refineries charge per ounce processed, not per ore grade. The mine
 
 ```rust
 BlockHeader {
-    version: u32,                          // Protocol version (currently 3)
+    version: u32,                          // Protocol version (currently 4)
     height: u64,                           // 0 for genesis
     previous_hash: Hash,                   // Blake3-256 of prior block
     state_root: Hash,                      // Blake3-256 of post-execution state
@@ -791,7 +774,7 @@ Run with `cargo test --workspace`.
 
 Every block applied to the chain must pass these checks:
 
-1. **Version**: Must match `BLOCK_VERSION` (currently 3)
+1. **Version**: Must match `BLOCK_VERSION` (currently 4)
 2. **Height**: Must equal `parent_height + 1`
 3. **Previous hash**: Must match parent's hash (or `Hash::zero()` for genesis)
 4. **Timestamp**: Must be strictly greater than parent timestamp, and within `MAX_FUTURE_BLOCK_TIME_SECS` (5 min) of wall clock
@@ -886,12 +869,11 @@ Where `CAPACITY_RATIO = MEMPOOL_MAX_SIZE_BYTES / MAX_BLOCK_SIZE_BYTES ≈ 10` an
 
 ### Supply Attrition
 
-Four channels permanently burn OPL, mirroring physical gold attrition and custody drag:
+Three channels permanently burn OPL, mirroring physical gold attrition and custody drag:
 
 | Channel | Rate | Formula |
 |---|---|---|
 | Mine assay | System-derived difficulty pressure | `gross_block_reward × sqrt(effective_difficulty) / EPOCH` |
-| Stake decay | System-derived surplus drag | `entry_stake × surplus_stake × EPOCH / (total_bonded_stake × BLOCKS_PER_YEAR × sqrt(active_refiner_limit))` |
 | Bond assay | System-derived crowding assay | `amount × sqrt(total_bonded_after / baseline_security_stake) / (DECIMAL_PLACES × sqrt(active_refiner_limit))` |
 | Unbond assay | System-derived thinness assay | `amount × sqrt(baseline_security_stake / total_bonded_stake) / (DECIMAL_PLACES × sqrt(active_refiner_limit))` |
 
@@ -930,9 +912,9 @@ entry_weight = entry.stake
 coverage_milli = (bonded_stake × 1000) / total_issued   // integer, no float
 miner_share_amount = gross_block_reward - mine_assay
 refiner_share_amount = 0
-refiner_service_fee = explicit finality/assay fee paid only to valid included attesters; burned if unserved
+refiner_block_fee_income = sum(tx.fee) in refiner-produced blocks
 ```
-Miner share goes to the block producer. Refiner service fees are distributed only to valid included attesters; there is no automatic refiner share.
+Miner share goes to mined-block producers. Refiner-produced blocks receive no issuance reward; their producer receives the ordinary transaction fees included in that block.
 
 ### EVO-OMAP PoW Verification
 ```

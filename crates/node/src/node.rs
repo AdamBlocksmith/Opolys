@@ -5,14 +5,14 @@
 //!
 //! - **Chain state** — height, difficulty, issuance/burn tracking, block linkage
 //! - **Mining** — EVO-OMAP PoW mining loop for block production (parallel by default)
-//! - **Block application** — state transitions: transaction execution, fee burning,
-//!   reward emission (vein yield), difficulty adjustment, and consensus phase transitions
+//! - **Block application** -- state transitions: transaction execution, fee routing,
+//!   reward emission (vein yield), difficulty adjustment, and refiner liveness
 //! - **Persistence** — saving and loading state via RocksDB
 //! - **RPC** — serving chain queries via JSON-RPC
 //!
 //! Opolys ($OPL) is a blockchain built as decentralized digital gold with no hard cap.
-//! Difficulty and rewards emerge from chain state. Fees are market-driven and burned.
-//! Refiners earn from block rewards only. Only double-signing gets slashed. There
+//! Difficulty and rewards emerge from chain state. Mined-block fees are burned;
+//! refiner-block fees pay the selected refiner producer. Only double-signing gets slashed. There
 //! is no governance, no schedules, and no fixed percentages.
 //!
 //! Hashing: Blake3-256 (32 bytes) everywhere. Signatures: ed25519.
@@ -1969,26 +1969,23 @@ impl OpolysNode {
         let block_reward = if block.header.height == 0 {
             0
         } else {
-            let pow_hash_value = if block.header.pow_proof.is_some() {
+            if block.header.pow_proof.is_none() {
+                0
+            } else {
                 // Miner block: use actual hash value for vein yield calculation
                 // Lucky hashes (small hash_int) earn higher yield
-                pow::compute_pow_hash_value(&block.header).unwrap_or(0u64)
-            } else {
-                // Refiner block: refiners earn flat base reward with no luck component
-                // Deliberate design: vaults earn steady fees, miners earn variable ore
-                // hash_int = 0 triggers the 1.0x floor in compute_vein_yield()
-                0u64
-            };
-            emission::compute_block_reward(
-                chain.base_reward,
-                block.header.difficulty,
-                pow_hash_value,
-            )
+                let pow_hash_value = pow::compute_pow_hash_value(&block.header).unwrap_or(0u64);
+                emission::compute_block_reward(
+                    chain.base_reward,
+                    block.header.difficulty,
+                    pow_hash_value,
+                )
+            }
         };
 
-        // Block rewards go to the block producer only. Refiners do not receive
-        // automatic protocol yield; they earn explicit service fees when valid
-        // attestations are included.
+        // Mined block rewards go to the miner. Refiner-produced blocks receive
+        // no issuance reward; refiners earn ordinary transaction fees only when
+        // they actually move a stalled chain with user activity.
         let base_reward_amount = if block.header.height == 0 {
             0
         } else {
@@ -2048,8 +2045,8 @@ impl OpolysNode {
 
         // Execute all transactions in order
         let expected_chain_id = MAINNET_CHAIN_ID;
-        let mut total_transaction_burned: FlakeAmount = 0;
-        let mut total_refiner_service_fee: FlakeAmount = 0;
+        let mut total_transaction_fees: FlakeAmount = 0;
+        let mut total_assay_burned: FlakeAmount = 0;
         let mut total_fee_signal: FlakeAmount = 0;
         let mut successful_transaction_count: u64 = 0;
         for tx in &block.transactions {
@@ -2063,12 +2060,12 @@ impl OpolysNode {
                 expected_chain_id,
             );
             if result.success {
-                total_transaction_burned = total_transaction_burned
-                    .checked_add(result.fee_burned)
-                    .ok_or_else(|| "Total transaction burns overflow".to_string())?;
-                total_refiner_service_fee = total_refiner_service_fee
-                    .checked_add(result.refiner_service_fee)
-                    .ok_or_else(|| "Total refiner service fees overflow".to_string())?;
+                total_transaction_fees = total_transaction_fees
+                    .checked_add(result.fee_charged)
+                    .ok_or_else(|| "Total transaction fees overflow".to_string())?;
+                total_assay_burned = total_assay_burned
+                    .checked_add(result.assay_burned)
+                    .ok_or_else(|| "Total assay burns overflow".to_string())?;
                 total_fee_signal = total_fee_signal
                     .checked_add(tx.fee)
                     .ok_or_else(|| "Total transaction fee signal overflow".to_string())?;
@@ -2097,53 +2094,26 @@ impl OpolysNode {
             }
         }
 
-        chain.total_burned = chain
-            .total_burned
-            .checked_add(total_transaction_burned)
-            .ok_or_else(|| "Total burned overflow after transaction burns".to_string())?;
-
-        let mut paid_refiner_service_fee: FlakeAmount = 0;
-        if total_refiner_service_fee > 0 && !included_attesters.is_empty() {
-            let current_timestamp = chain.block_timestamps.last().copied().unwrap_or(0);
-            let total_attesting_weight = Self::indexed_attestation_weight_for_refiners(
-                &included_attesters,
-                &refiners,
-                current_timestamp,
-            );
-            if total_attesting_weight > 0 {
-                let mut planned_service_credits: HashMap<ObjectId, FlakeAmount> = HashMap::new();
-                let mut attesters: Vec<ObjectId> = included_attesters.into_iter().collect();
-                attesters.sort_by_key(|id| id.0.0);
-                for attester in &attesters {
-                    let Some(refiner) = refiners.get_refiner(attester) else {
-                        continue;
-                    };
-                    if refiner.status != RefinerStatus::Active {
-                        continue;
-                    }
-                    let share = (total_refiner_service_fee as u128)
-                        .saturating_mul(refiner.weight(current_timestamp) as u128)
-                        .checked_div(total_attesting_weight)
-                        .unwrap_or(0) as FlakeAmount;
-                    if share > 0 {
-                        paid_refiner_service_fee = paid_refiner_service_fee.saturating_add(share);
-                        add_planned_credit(&mut planned_service_credits, attester, share)?;
-                    }
-                }
-                ensure_planned_credits_creditable(&accounts, &planned_service_credits)?;
-                for (account, amount) in planned_service_credits {
+        if block.header.refiner_signature.is_some() {
+            if !producer.0.is_zero() && total_transaction_fees > 0 {
+                let mut planned_fee_credit: HashMap<ObjectId, FlakeAmount> = HashMap::new();
+                add_planned_credit(&mut planned_fee_credit, producer, total_transaction_fees)?;
+                ensure_planned_credits_creditable(&accounts, &planned_fee_credit)?;
+                for (account, amount) in planned_fee_credit {
                     credit_or_create_account(&mut accounts, &account, amount)?;
                 }
             }
+        } else {
+            chain.total_burned = chain
+                .total_burned
+                .checked_add(total_transaction_fees)
+                .ok_or_else(|| "Total burned overflow after transaction fees".to_string())?;
         }
-        let unserved_refiner_service_fee =
-            total_refiner_service_fee.saturating_sub(paid_refiner_service_fee);
+
         chain.total_burned = chain
             .total_burned
-            .checked_add(unserved_refiner_service_fee)
-            .ok_or_else(|| {
-                "Total burned overflow after unserved refiner service fees".to_string()
-            })?;
+            .checked_add(total_assay_burned)
+            .ok_or_else(|| "Total burned overflow after assay burns".to_string())?;
 
         // Compute suggested fee for the next block via EMA of the average explicit
         // fee per successful transaction. Bond/unbond assays are burned, but they
@@ -2198,8 +2168,7 @@ impl OpolysNode {
             );
         }
 
-        // At epoch boundaries: rerank refiners (Waiting→Active / Active→Waiting)
-        // and apply surplus-based stake decay.
+        // At epoch boundaries: rerank refiners (Waiting->Active / Active->Waiting).
         if chain.current_height > 0 && chain.current_height % EPOCH == 0 {
             let current_ts = chain.block_timestamps.last().copied().unwrap_or(0);
             let active_refiner_limit = RefinerSet::active_refiner_limit(chain.total_issued);
@@ -2212,18 +2181,6 @@ impl OpolysNode {
                     active_refiner_limit,
                     height = chain.current_height,
                     "Refiner set reranked at epoch boundary"
-                );
-            }
-            // Stake decay appears only when bonded stake exceeds the system's
-            // derived baseline security stake. Mirrors vault drag only when
-            // custody is overstocked, without weakening thin security periods.
-            let decayed = refiners.decay_stake(chain.total_issued);
-            if decayed > 0 {
-                chain.total_burned = chain.total_burned.saturating_add(decayed);
-                tracing::info!(
-                    decayed,
-                    height = chain.current_height,
-                    "Stake decay burned at epoch boundary"
                 );
             }
         }

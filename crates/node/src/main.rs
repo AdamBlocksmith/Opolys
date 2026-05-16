@@ -15,10 +15,10 @@
 //! snapshot that is refreshed after each block is applied.
 //!
 //! Opolys ($OPL) is a blockchain built as decentralized digital gold with no hard cap.
-//! Difficulty and rewards emerge from chain state. Fees are market-driven and burned.
+//! Difficulty and rewards emerge from chain state. Mined-block fees are burned;
+//! refiner-block fees pay the selected refiner producer.
 
 #![allow(clippy::items_after_test_module)]
-//! Refiners earn from block rewards only.
 
 use clap::Parser;
 use opolys_networking::{
@@ -1186,7 +1186,7 @@ async fn handle_network_event(
                     }
 
                     let tx_data_for_rebroadcast = data.clone();
-                    let tx_fee = tx.fee.saturating_add(tx.finality_fee);
+                    let tx_fee = tx.fee;
                     let priority = tx_fee;
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)

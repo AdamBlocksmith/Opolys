@@ -38,16 +38,14 @@ impl TransactionSigner {
         recipient: ObjectId,
         amount: FlakeAmount,
         fee: FlakeAmount,
-        finality_fee: FlakeAmount,
         nonce: u64,
         chain_id: u64,
     ) -> Result<Transaction, OpolysError> {
         let action = TransactionAction::Transfer { recipient, amount };
         let sender_id = sender.object_id().clone();
 
-        let tx_id = Self::compute_tx_id(&sender_id, &action, fee, finality_fee, nonce, chain_id)?;
-        let unsigned_data =
-            transaction_signing_payload(&sender_id, &action, fee, finality_fee, nonce, chain_id)?;
+        let tx_id = Self::compute_tx_id(&sender_id, &action, fee, nonce, chain_id)?;
+        let unsigned_data = transaction_signing_payload(&sender_id, &action, fee, nonce, chain_id)?;
         let signature = sender.sign(&unsigned_data);
 
         Ok(Transaction {
@@ -55,7 +53,6 @@ impl TransactionSigner {
             sender: sender_id,
             action,
             fee,
-            finality_fee,
             signature,
             signature_type: SIGNATURE_TYPE_ED25519,
             nonce,
@@ -77,16 +74,14 @@ impl TransactionSigner {
         sender: &KeyPair,
         amount: FlakeAmount,
         fee: FlakeAmount,
-        finality_fee: FlakeAmount,
         nonce: u64,
         chain_id: u64,
     ) -> Result<Transaction, OpolysError> {
         let action = TransactionAction::RefinerBond { amount };
         let sender_id = sender.object_id().clone();
 
-        let tx_id = Self::compute_tx_id(&sender_id, &action, fee, finality_fee, nonce, chain_id)?;
-        let unsigned_data =
-            transaction_signing_payload(&sender_id, &action, fee, finality_fee, nonce, chain_id)?;
+        let tx_id = Self::compute_tx_id(&sender_id, &action, fee, nonce, chain_id)?;
+        let unsigned_data = transaction_signing_payload(&sender_id, &action, fee, nonce, chain_id)?;
         let signature = sender.sign(&unsigned_data);
 
         Ok(Transaction {
@@ -94,7 +89,6 @@ impl TransactionSigner {
             sender: sender_id,
             action,
             fee,
-            finality_fee,
             signature,
             signature_type: SIGNATURE_TYPE_ED25519,
             nonce,
@@ -117,16 +111,14 @@ impl TransactionSigner {
         sender: &KeyPair,
         amount: FlakeAmount,
         fee: FlakeAmount,
-        finality_fee: FlakeAmount,
         nonce: u64,
         chain_id: u64,
     ) -> Result<Transaction, OpolysError> {
         let action = TransactionAction::RefinerUnbond { amount };
         let sender_id = sender.object_id().clone();
 
-        let tx_id = Self::compute_tx_id(&sender_id, &action, fee, finality_fee, nonce, chain_id)?;
-        let unsigned_data =
-            transaction_signing_payload(&sender_id, &action, fee, finality_fee, nonce, chain_id)?;
+        let tx_id = Self::compute_tx_id(&sender_id, &action, fee, nonce, chain_id)?;
+        let unsigned_data = transaction_signing_payload(&sender_id, &action, fee, nonce, chain_id)?;
         let signature = sender.sign(&unsigned_data);
 
         Ok(Transaction {
@@ -134,7 +126,6 @@ impl TransactionSigner {
             sender: sender_id,
             action,
             fee,
-            finality_fee,
             signature,
             signature_type: SIGNATURE_TYPE_ED25519,
             nonce,
@@ -145,23 +136,18 @@ impl TransactionSigner {
     }
 
     /// Deterministic transaction ID derived from a canonical Borsh tuple:
-    /// `(sender, action, fee, finality_fee, nonce, chain_id)`. Including chain_id prevents
+    /// `(sender, action, fee, nonce, chain_id)`. Including chain_id prevents
     /// cross-chain replay attacks.
     fn compute_tx_id(
         sender: &ObjectId,
         action: &TransactionAction,
         fee: FlakeAmount,
-        finality_fee: FlakeAmount,
         nonce: u64,
         chain_id: u64,
     ) -> Result<ObjectId, OpolysError> {
-        let data = borsh::to_vec(&(sender.clone(), action, fee, finality_fee, nonce, chain_id))
-            .map_err(|e| {
-                OpolysError::SerializationError(format!(
-                    "Transaction ID serialization failed: {}",
-                    e
-                ))
-            })?;
+        let data = borsh::to_vec(&(sender.clone(), action, fee, nonce, chain_id)).map_err(|e| {
+            OpolysError::SerializationError(format!("Transaction ID serialization failed: {}", e))
+        })?;
         Ok(hash_to_object_id_with_domain(DOMAIN_TX_ID, &data))
     }
 }
@@ -182,13 +168,11 @@ mod tests {
             FLAKES_PER_OPL,
             FLAKES_PER_OPL / 10,
             0,
-            0,
             MAINNET_CHAIN_ID,
         )
         .unwrap();
         assert_eq!(tx.nonce, 0);
         assert_eq!(tx.fee, FLAKES_PER_OPL / 10);
-        assert_eq!(tx.finality_fee, 0);
         assert_eq!(tx.chain_id, MAINNET_CHAIN_ID);
         assert_eq!(tx.signature_type, SIGNATURE_TYPE_ED25519);
         assert!(matches!(tx.action, TransactionAction::Transfer { .. }));
@@ -202,7 +186,6 @@ mod tests {
             &keypair,
             bond_amount,
             FLAKES_PER_OPL,
-            0,
             0,
             MAINNET_CHAIN_ID,
         )
@@ -221,7 +204,6 @@ mod tests {
             &keypair,
             FLAKES_PER_OPL,
             FLAKES_PER_OPL / 100,
-            0,
             1,
             MAINNET_CHAIN_ID,
         )
@@ -244,13 +226,11 @@ mod tests {
             1000,
             100,
             0,
-            0,
             MAINNET_CHAIN_ID,
         )
         .unwrap();
-        let bond =
-            TransactionSigner::create_refiner_bond(&keypair, 1000, 100, 0, 0, MAINNET_CHAIN_ID)
-                .unwrap();
+        let bond = TransactionSigner::create_refiner_bond(&keypair, 1000, 100, 0, MAINNET_CHAIN_ID)
+            .unwrap();
         // Same sender, same fee, same nonce, different action → different tx_id
         assert_ne!(transfer.tx_id, bond.tx_id);
     }
@@ -266,7 +246,6 @@ mod tests {
             1000,
             100,
             0,
-            0,
             MAINNET_CHAIN_ID,
         )
         .unwrap();
@@ -275,7 +254,6 @@ mod tests {
             recipient.clone(),
             1000,
             100,
-            0,
             0,
             other_chain_id,
         )
@@ -287,7 +265,7 @@ mod tests {
     }
 
     #[test]
-    fn tx_id_includes_finality_fee() {
+    fn tx_id_includes_fee() {
         let keypair = KeyPair::generate();
         let recipient = hash_to_object_id(b"recipient");
         let normal = TransactionSigner::create_transfer(
@@ -296,21 +274,13 @@ mod tests {
             1000,
             100,
             0,
-            0,
             MAINNET_CHAIN_ID,
         )
         .unwrap();
-        let finality = TransactionSigner::create_transfer(
-            &keypair,
-            recipient,
-            1000,
-            100,
-            25,
-            0,
-            MAINNET_CHAIN_ID,
-        )
-        .unwrap();
-        assert_ne!(normal.tx_id, finality.tx_id);
-        assert_eq!(finality.finality_fee, 25);
+        let higher_fee =
+            TransactionSigner::create_transfer(&keypair, recipient, 1000, 125, 0, MAINNET_CHAIN_ID)
+                .unwrap();
+        assert_ne!(normal.tx_id, higher_fee.tx_id);
+        assert_eq!(higher_fee.fee, 125);
     }
 }

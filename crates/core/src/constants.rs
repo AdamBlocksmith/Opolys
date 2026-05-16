@@ -94,8 +94,7 @@ pub const BLOCKS_PER_YEAR: u64 = (365 * 86400 + 86400 / 4) / 90; // 350_640
 
 /// Legacy physical-gold attrition reference in permille (1.5% = 15 permille).
 /// Retained as a documented benchmark, not used as a fixed refiner or mining
-/// tax. Mine assay, refiner stake decay, and bond/unbond assays are now derived
-/// from live chain state.
+/// tax. Mine assay and bond/unbond assays are now derived from live chain state.
 pub const ANNUAL_ATTRITION_PERMILLE: u64 = 15;
 
 /// Number of blocks a refiner must wait before unbonded stake is returned.
@@ -142,9 +141,9 @@ pub const MIN_BOND_STAKE: u64 = FLAKES_PER_OPL;
 // ever rejected; all refiners are queued fairly.
 
 /// Block header version number. Incremented for protocol upgrades.
-/// Version 2 commits slash evidence, attestations, and genesis ceremony data
-/// into the block header.
-pub const BLOCK_VERSION: u32 = 3;
+/// Version 4 removes finality-fee transactions and routes ordinary fees by
+/// block producer type.
+pub const BLOCK_VERSION: u32 = 4;
 
 /// Signature type constant for ed25519 signatures.
 /// Currently the only supported type. Post-quantum signatures (Dilithium)
@@ -312,8 +311,8 @@ mod tests {
     }
 
     #[test]
-    fn block_version_is_two() {
-        assert_eq!(BLOCK_VERSION, 3);
+    fn block_version_is_four() {
+        assert_eq!(BLOCK_VERSION, 4);
     }
 
     #[test]

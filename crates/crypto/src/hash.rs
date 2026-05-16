@@ -134,18 +134,16 @@ pub fn transaction_signing_payload(
     sender: &ObjectId,
     action: &TransactionAction,
     fee: FlakeAmount,
-    finality_fee: FlakeAmount,
     nonce: u64,
     chain_id: u64,
 ) -> Result<Vec<u8>, OpolysError> {
     let mut payload = DOMAIN_TX_SIGNATURE.to_vec();
-    let tx_bytes = borsh::to_vec(&(sender.clone(), action, fee, finality_fee, nonce, chain_id))
-        .map_err(|e| {
-            OpolysError::SerializationError(format!(
-                "Transaction signing payload serialization failed: {}",
-                e
-            ))
-        })?;
+    let tx_bytes = borsh::to_vec(&(sender.clone(), action, fee, nonce, chain_id)).map_err(|e| {
+        OpolysError::SerializationError(format!(
+            "Transaction signing payload serialization failed: {}",
+            e
+        ))
+    })?;
     payload.extend_from_slice(&tx_bytes);
     Ok(payload)
 }
