@@ -289,14 +289,14 @@ Account addresses are **Blake3-256 hashes of ed25519 public keys** — not the p
 
 ## Consensus
 
-Opolys uses **hybrid miner/refiner consensus** with a smooth, continuous reward split — no thresholds, no governance votes, no hard switches.
+Opolys uses **hybrid miner/refiner consensus** with mining first and refiner production only when the chain stalls — no governance votes, no hard phase switch.
 
 ### How It Works
 
 1. **Miners compete** to find EVO-OMAP proof-of-work solutions (like physical gold miners)
-2. **Refiners bond stake** and earn the right to produce stalled-chain blocks proportional to active bonded stake (like gold vaults earning trust)
-3. **Stake coverage** (`bonded_stake / total_issued`) continuously shifts the base reward from miners to refiners
-4. At 0% coverage, the base reward goes to miners. At 100% coverage, the base reward goes to refiners. Miner vein bonuses always stay with miners. The split is smooth and mathematical — no vote needed
+2. **Refiners bond stake** and earn the right to produce stalled-chain blocks proportional to active bonded stake (like trusted vaults stepping in when mine output pauses)
+3. **Stake coverage** (`bonded_stake / total_issued`) raises the organic difficulty floor, so weak bonded security cannot cheaply pull mining difficulty down
+4. **Refiner income is service-based**: refiners earn explicit user-paid finality/assay service fees only when valid attestation/finality service is delivered
 
 ### Difficulty
 
@@ -388,21 +388,20 @@ net_block_reward = gross_block_reward - mine_assay
 
 At minimum difficulty (1), the base reward starts from the ceremony value, then mined blocks may add a vein bonus. As difficulty rises, the base reward naturally declines — exactly like real gold mining where the easy veins are found first.
 
-### Reward Distribution (Miner/Refiner Split)
+### Reward Distribution
 
 ```
 coverage_milli = (bonded_stake × 1000) / total_issued    // integer, no float
-net_base_reward = (BASE_REWARD / effective_difficulty) after proportional assay
 miner_share_amount = gross_block_reward - mine_assay
 refiner_share_amount = 0
 refiner_service_fee = explicit finality/assay fee paid only to valid included attesters; burned if unserved
 ```
 
 - Miner share goes to the block producer
-- Refiner share is distributed among active refiners proportional to their weight
-- At 0% coverage: base reward goes to miners, plus any miner vein bonus
-- At 100% coverage: base reward goes to refiners, while miner vein bonuses still stay with miners
-- This is the same continuum as gold: as more gold moves from mines to vaults, the vaults command more influence
+- There is no automatic refiner share from protocol issuance
+- Refiner service fees are distributed among valid included attesters by stake weight
+- If no valid service is delivered, the service fee is burned
+- This keeps refiner income tied to explicit work, not passive bonded time
 
 ### Suggested Fee (EMA)
 

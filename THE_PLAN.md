@@ -179,13 +179,13 @@ Account addresses are **Blake3-256 hashes of ed25519 public keys** — not the p
 
 ## 5. Consensus Model
 
-Opolys uses **hybrid PoW/PoS** with an **implicit transition** — no ConsensusPhase enum.
+Opolys uses **hybrid miner/refiner consensus** with mining first and refiner production only when the chain stalls.
 
 - **Miners** produce blocks by solving EVO-OMAP PoW puzzles
 - **Refiners** produce blocks when no miner has produced one within the target interval (90 seconds)
-- The reward split is **continuous** — `coverage_milli = (bonded_stake × 1000) / total_issued`
-- When stake coverage is 0%, all rewards go to miners. At 100%, all go to refiners
-- There is no phase switch, no threshold, no governance vote
+- Stake coverage is still measured as `coverage_milli = (bonded_stake × 1000) / total_issued`, but it is observability plus difficulty-floor pressure, not passive refiner yield
+- Refiner income comes from explicit user-paid finality/assay service fees when valid service is delivered
+- There is no passive staking yield, no automatic refiner reward share, and no governance vote
 
 ### Refiner Block Production
 
@@ -217,8 +217,8 @@ Key behavior:
 
 A block must have **exactly one** of: PoW proof or refiner signature.
 
-- Miner block: has `pow_proof`, no `refiner_signature`. Producer earns the miner share: base coverage share plus any vein bonus.
-- Refiner block: has `refiner_signature`, no `pow_proof`. Producer is the selected refiner and earns the miner-share floor for producing the stalled block; the refiner share is distributed among active refiners by weight.
+- Miner block: has `pow_proof`, no `refiner_signature`. Producer earns the mined reward after the mine assay.
+- Refiner block: has `refiner_signature`, no `pow_proof`. Producer is the selected refiner for a stalled interval; refiner income is explicit service fees, not passive issuance.
 - A block with both or neither is **rejected**.
 
 ---
@@ -348,11 +348,13 @@ Bond age does not increase reward weight, finality weight, or producer selection
 ### Refiner vs Miner Block Reward
 
 ```
-refiner_block_reward = BASE_REWARD / difficulty × 1.0 (flat, no vein yield)
-miner_block_reward    = BASE_REWARD / difficulty × vein_yield (1.0x to ~10x)
+miner_block_reward = BASE_REWARD / difficulty × vein_yield
+miner_payout       = miner_block_reward - mine_assay
+refiner_yield      = 0
+refiner_service_fee = explicit user-paid fee, paid only when valid service is delivered
 ```
 
-Refiners earn steady predictable income (like gold vaults), miners earn variable income based on luck (like gold miners). Refiner blocks pass `hash_int = 0` to `compute_vein_yield()`, which returns the 1.0x floor by design.
+Miners earn variable income based on ore quality/luck. Refiners do not earn passive protocol yield; like gold vaults and assayers, they earn only when a user pays for a delivered service. Refiner blocks pass `hash_int = 0` to `compute_vein_yield()`, which returns the 1.0x floor by design.
 
 Genesis block (height 0) has zero reward: `block_reward = 0`.
 
@@ -924,12 +926,11 @@ entry_weight = entry.stake
 ### Stake Coverage
 ```
 coverage_milli = (bonded_stake × 1000) / total_issued   // integer, no float
-net_base_reward = (BASE_REWARD / difficulty) after proportional assay
 miner_share_amount = gross_block_reward - mine_assay
 refiner_share_amount = 0
 refiner_service_fee = explicit finality/assay fee paid only to valid included attesters; burned if unserved
 ```
-Miner share goes to the block producer. Refiner share is distributed among active refiners proportional to weight.
+Miner share goes to the block producer. Refiner service fees are distributed only to valid included attesters; there is no automatic refiner share.
 
 ### EVO-OMAP PoW Verification
 ```
@@ -1312,7 +1313,7 @@ Difficulty 1 means "1 leading zero bit", so ~50% of random hashes pass. Correct 
 
 #### ~~M19: Dead code: compute_pow_share/compute_pos_share use f64~~ — **FIXED** (2cf09c2)
 **Location:** ~~`emission.rs:174-193`~~
-Deleted. The actual reward split uses integer `coverage_milli` in `node.rs`. The dead f64 functions and their two tests (`pow_pos_transition_continuous`, `reward_split_follows_stake_coverage`) were removed.
+Deleted. `coverage_milli` remains integer-only observability/difficulty-floor pressure, not a passive refiner reward split. The dead f64 functions and their two tests (`pow_pos_transition_continuous`, `reward_split_follows_stake_coverage`) were removed.
 
 #### ~~M20: chain.base_reward always BASE_REWARD~~ — **BY DESIGN**
 
@@ -1481,7 +1482,7 @@ All comments updated from "1,024 blocks/epoch" to "960 blocks/epoch". Test param
 
 **What changed:**
 
-1. **ConsensusPhase deleted** — There is no explicit PoW/PoS phase switch. Refiners produce blocks only after `BLOCK_TARGET_TIME_MS` (90 seconds) passes with no miner block. The reward split is continuous via `coverage_milli`; no threshold, no governance. Removed from: `types.rs`, `ChainState`, `PersistedChainState`, `ChainInfo` (RPC), `ChainInfoResponse` (RPC), genesis state hash, and all references.
+1. **ConsensusPhase deleted** — There is no explicit PoW/PoS phase switch. Refiners produce blocks only after `BLOCK_TARGET_TIME_MS` (90 seconds) passes with no miner block. `coverage_milli` remains an integer stake-coverage signal, not a passive reward split; no threshold, no governance. Removed from: `types.rs`, `ChainState`, `PersistedChainState`, `ChainInfo` (RPC), `ChainInfoResponse` (RPC), genesis state hash, and all references.
 
 2. **100% slashing** — Any double-sign burns 100% of stake immediately. No graduated penalties (10%/33%/100%), no offense counter (`slash_offense_count`), no reset window (`last_slash_height`). The old `graduated_slash()` function replaced by `slash_refiner()`. Deleted `scale_entries()` dead code.
 
@@ -1501,7 +1502,7 @@ All comments updated from "1,024 blocks/epoch" to "960 blocks/epoch". Test param
 
 1. **`produce_pos_block` → `produce_refiner_block`** — The last remaining `pos` function name in `node.rs` and `main.rs` has been renamed.
 
-2. **Dead code removed (M19)** — `compute_pow_share()` and `compute_pos_share()` (f64 functions in `emission.rs`) were never called from production code. The actual reward split uses integer `coverage_milli` arithmetic in `node.rs`. Both functions and their tests (`pow_pos_transition_continuous`, `reward_split_follows_stake_coverage`) deleted.
+2. **Dead code removed (M19)** — `compute_pow_share()` and `compute_pos_share()` (f64 functions in `emission.rs`) were never called from production code. `coverage_milli` is now integer-only observability/difficulty-floor pressure, not a passive refiner reward split. Both functions and their tests (`pow_pos_transition_continuous`, `reward_split_follows_stake_coverage`) deleted.
 
 3. **`finalized_height` annotated as placeholder** — Added comments on the `finalized_height` field in `ChainState`, `PersistedChainState`, and `ChainInfoResponse` noting it is always 0 until finality via attestations is implemented (Pass 2).
 

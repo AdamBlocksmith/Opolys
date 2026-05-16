@@ -743,8 +743,8 @@ impl RefinerSet {
         Ok(refiner.consecutive_correct_attestations)
     }
 
-    /// Total stake across all Bonding, Waiting, and Active refiners. Used to
-    /// compute stake coverage, which determines the PoW/refiner reward split.
+    /// Total stake across all Bonding, Waiting, and Active refiners. Used for
+    /// stake coverage, difficulty-floor pressure, and security observability.
     pub fn total_bonded_stake(&self) -> FlakeAmount {
         // Use active_set for Active refiners (O(active_set.len()))
         let active_stake: FlakeAmount = self
