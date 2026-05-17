@@ -275,6 +275,26 @@ mod tests {
     }
 
     #[test]
+    fn slow_epoch_lowers_retarget_so_miners_can_return() {
+        let timestamps: Vec<u64> = (0..=EPOCH).map(|i| i * 180).collect();
+        let result = compute_next_difficulty(1_000, EPOCH, &timestamps, 0, 0);
+
+        assert_eq!(result.retarget, 500);
+        assert_eq!(result.consensus_floor, 0);
+        assert_eq!(result.effective_difficulty(), 500);
+    }
+
+    #[test]
+    fn consensus_floor_is_the_only_lower_bound_after_slow_epoch() {
+        let timestamps: Vec<u64> = (0..=EPOCH).map(|i| i * 360).collect();
+        let result = compute_next_difficulty(1_000, EPOCH, &timestamps, 4_000_000_000, 10_000_000);
+
+        assert_eq!(result.retarget, 250);
+        assert_eq!(result.consensus_floor, 400);
+        assert_eq!(result.effective_difficulty(), 400);
+    }
+
+    #[test]
     fn min_difficulty_is_mathematical_floor() {
         // MIN_DIFFICULTY = 1 is the only floor — difficulty can freely adjust above it
         assert_eq!(MIN_DIFFICULTY, 1);

@@ -86,10 +86,33 @@ If blocks arrive too fast, retarget difficulty rises. If blocks arrive too
 slowly, it falls. The consensus floor prevents difficulty from falling below
 the ratio of issued supply to bonded security.
 
+Mined and refined blocks both carry timestamps and both enter the same rolling
+retarget window. That means Proof of Refinement can keep the chain moving while
+miners are absent; if those blocks arrive slower than the 90-second target, the
+next epoch lowers the retarget difficulty and mining can become viable again.
+
+Example:
+
+```text
+current_difficulty = 1,000
+
+If the next epoch takes 48 hours instead of 24:
+retarget_difficulty = 1,000 * 24 / 48 = 500
+
+If the consensus_floor is 400:
+effective_difficulty = max(500, 400, 1) = 500
+
+If the next epoch takes 96 hours instead of 24:
+retarget_difficulty = 1,000 * 24 / 96 = 250
+effective_difficulty = max(250, 400, 1) = 400
+```
+
 Gold analogy:
 
 When lots of miners arrive, easy ore disappears faster and extraction gets
-harder. Bonded refiner security also becomes part of the economic floor.
+harder. When mining slows, refineries can still move existing gold, and the
+next assay period can make extraction easier again. Bonded refiner security
+also becomes part of the economic floor.
 
 ## Mined Block Reward
 
