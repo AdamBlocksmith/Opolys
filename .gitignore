@@ -4,4 +4,5 @@
 *.swp
 *.swo
 /data
+/launch-rehearsal-local
 AGENTS.md

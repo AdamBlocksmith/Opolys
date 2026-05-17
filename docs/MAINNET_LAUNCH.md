@@ -65,6 +65,17 @@ For the full launch rehearsal, use a fresh temporary data directory and complete
 `--allow-solo-mining` bypasses the normal 3-outbound-peer mining quorum only
 for an isolated rehearsal. Do not use it for production mainnet mining.
 
+The repository also includes a repeatable local rehearsal script:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\launch_rehearsal.ps1
+```
+
+The script creates a dry-run ceremony, verifies it, starts an isolated mining
+node, mines blocks, submits a wallet transfer over authenticated loopback RPC,
+restarts the node, and confirms the height and recipient balance persist. Its
+artifacts are written under `launch-rehearsal-local/`, which is ignored by git.
+
 ## 3. Production Ceremony
 
 Use a dedicated operator key file and keep it offline/backed up. The key file contains the ed25519 seed that signs the genesis attestation.
