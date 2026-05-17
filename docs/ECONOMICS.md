@@ -212,6 +212,15 @@ window = CAPACITY_RATIO
 suggested_fee = max(MIN_FEE, (current_average_fee + 9 * previous_suggested_fee) / 10)
 ```
 
+For mempool admission, the effective minimum scales with the actual pending
+queue depth:
+
+```text
+pending_blocks = ceil(mempool_bytes / MAX_BLOCK_SIZE_BYTES)
+fee_multiplier = clamp(pending_blocks, 1, CAPACITY_RATIO)
+effective_min_fee = suggested_fee * fee_multiplier
+```
+
 If the previous block was empty:
 
 ```text

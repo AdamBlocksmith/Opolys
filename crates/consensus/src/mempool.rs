@@ -6,19 +6,18 @@
 //! refiner producer. No governance sets fee minimums; the market
 //! decides.
 //!
-//! The mempool uses a two-state congestion model:
-//! - **Spot**: when the pool is under the congestion threshold (< 1 block worth),
-//!   the minimum fee is `max(MIN_FEE, suggested_fee)`.
-//! - **Rush**: when congested (≥ 1 block worth pending), the minimum fee scales
-//!   to `max(MIN_FEE, suggested_fee × CAPACITY_RATIO)`, reflecting that your
-//!   transaction must outcompete multiple blocks worth of pending data.
+//! The mempool uses a queue-depth congestion model. The minimum admission fee
+//! is `suggested_fee * pending_block_depth`, where `pending_block_depth` is the
+//! number of block-sized chunks currently waiting in the mempool, clamped to
+//! `[1, CAPACITY_RATIO]`. Fees rise gradually with real queue depth instead of
+//! jumping straight to the maximum multiplier.
 //!
 //! The mempool enforces per-account transaction limits and a global size cap.
 //! When the pool is full, the lowest-priority transactions are evicted to make
 //! room for higher-fee arrivals.
 
 use opolys_core::{
-    CAPACITY_RATIO, CONGESTION_THRESHOLD_PERMILLE, FlakeAmount, MEMPOOL_MAX_SIZE_BYTES,
+    CAPACITY_RATIO, FlakeAmount, MAX_BLOCK_SIZE_BYTES, MEMPOOL_MAX_SIZE_BYTES,
     MEMPOOL_MAX_TXS_PER_ACCOUNT, MEMPOOL_TX_EXPIRY_SECS, MIN_FEE, ObjectId, OpolysError,
     SIGNATURE_TYPE_ED25519, TX_MAX_SIZE_BYTES, Transaction, TransactionAction,
 };
@@ -77,21 +76,18 @@ impl Mempool {
 
     /// Compute the effective minimum fee based on current pool congestion.
     ///
-    /// Two-state model derived from capacity ratio:
-    /// - **Spot** (not congested): `max(MIN_FEE, suggested_fee)` — market sets the floor.
-    /// - **Rush** (congested): `max(MIN_FEE, suggested_fee × CAPACITY_RATIO)` — fees scale
-    ///   with the number of blocks worth of pending data, reflecting that transactions
-    ///   must outcompete ~10 blocks worth to be included next.
-    ///
-    /// Congestion is determined by `CONGESTION_THRESHOLD_PERMILLE` (100 permille = 10%):
-    /// when the mempool exceeds one block's worth of data, we're congested.
+    /// The multiplier is the current pending queue depth measured in block-sized
+    /// chunks, clamped to the mempool's total block capacity. This keeps the
+    /// minimum smooth:
+    /// - 0 to 1 block pending: 1x
+    /// - 1.1 to 2 blocks pending: 2x
+    /// - near-full mempool: CAPACITY_RATIO x
     pub fn effective_min_fee(&self, suggested_fee: u64) -> u64 {
-        let usage_permille = self.total_size * 1000 / MEMPOOL_MAX_SIZE_BYTES;
-        if usage_permille > CONGESTION_THRESHOLD_PERMILLE as usize {
-            suggested_fee.saturating_mul(CAPACITY_RATIO).max(MIN_FEE)
-        } else {
-            suggested_fee.max(MIN_FEE)
-        }
+        let pending_blocks = self
+            .total_size
+            .div_ceil(MAX_BLOCK_SIZE_BYTES)
+            .clamp(1, CAPACITY_RATIO as usize) as u64;
+        suggested_fee.saturating_mul(pending_blocks).max(MIN_FEE)
     }
 
     /// Evict all transactions older than `MEMPOOL_TX_EXPIRY_SECS`.
@@ -540,6 +536,27 @@ mod tests {
                 .add_transaction(tx, 0, 0, 0, 1, opolys_core::MAINNET_CHAIN_ID)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn effective_min_fee_scales_with_pending_block_depth() {
+        let mut mempool = Mempool::new();
+        let suggested_fee = 1_000;
+
+        mempool.total_size = 0;
+        assert_eq!(mempool.effective_min_fee(suggested_fee), 1_000);
+
+        mempool.total_size = MAX_BLOCK_SIZE_BYTES;
+        assert_eq!(mempool.effective_min_fee(suggested_fee), 1_000);
+
+        mempool.total_size = MAX_BLOCK_SIZE_BYTES + 1;
+        assert_eq!(mempool.effective_min_fee(suggested_fee), 2_000);
+
+        mempool.total_size = MAX_BLOCK_SIZE_BYTES * 5;
+        assert_eq!(mempool.effective_min_fee(suggested_fee), 5_000);
+
+        mempool.total_size = MEMPOOL_MAX_SIZE_BYTES;
+        assert_eq!(mempool.effective_min_fee(suggested_fee), 10_000);
     }
 
     #[test]

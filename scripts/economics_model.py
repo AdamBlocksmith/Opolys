@@ -85,6 +85,11 @@ def suggested_fee_sequence(
     return fees
 
 
+def queue_depth_multiplier(pending_bytes: int) -> int:
+    pending_blocks = math.ceil(pending_bytes / MAX_BLOCK_SIZE_BYTES) if pending_bytes else 1
+    return max(1, min(CAPACITY_RATIO, pending_blocks))
+
+
 def print_table(headers: list[str], rows: list[list[str]]) -> None:
     widths = [len(h) for h in headers]
     for row in rows:
@@ -205,7 +210,7 @@ def main() -> None:
                 f"{fees[4]:,}",
                 f"{fees[9]:,}",
                 f"{fees[19]:,}",
-                f"{fees[19] * CAPACITY_RATIO:,}",
+                f"{fees[19] * queue_depth_multiplier(MEMPOOL_MAX_SIZE_BYTES):,}",
             ]
         )
     print_table(
@@ -215,7 +220,30 @@ def main() -> None:
             "After 5 blocks",
             "After 10 blocks",
             "After 20 blocks",
-            "Rush min after 20",
+            "Full queue min after 20",
+        ],
+        rows,
+    )
+
+    print("\nQueue-depth fee multiplier")
+    rows = []
+    for pending_blocks in [0, 0.5, 1.0, 1.1, 2.4, 5.0, 9.5, 12.0]:
+        pending_bytes = int(pending_blocks * MAX_BLOCK_SIZE_BYTES)
+        multiplier = queue_depth_multiplier(pending_bytes)
+        rows.append(
+            [
+                f"{pending_blocks:g}",
+                f"{pending_bytes:,}",
+                f"{multiplier}x",
+                f"{1_000 * multiplier:,} flakes",
+            ]
+        )
+    print_table(
+        [
+            "Pending blocks",
+            "Pending bytes",
+            "Multiplier",
+            "Min fee if suggested=1,000",
         ],
         rows,
     )

@@ -149,17 +149,18 @@ The suggested fee is an exponential moving average:
 suggested_fee = max(MIN_FEE, (observed_average_fee + 9 * previous_suggested_fee) / 10)
 ```
 
-When the mempool holds more than one block's worth of pending data, admission
-enters rush mode:
+Admission fees scale with the actual pending queue depth:
 
 ```text
-effective_min_fee = suggested_fee * CAPACITY_RATIO
+pending_blocks = ceil(mempool_bytes / MAX_BLOCK_SIZE_BYTES)
+fee_multiplier = clamp(pending_blocks, 1, CAPACITY_RATIO)
+effective_min_fee = suggested_fee * fee_multiplier
 CAPACITY_RATIO = ceil(MEMPOOL_MAX_SIZE_BYTES / MAX_BLOCK_SIZE_BYTES)
 ```
 
 Example response over 20 blocks:
 
-| Observed Average Fee | After 1 Block | After 5 Blocks | After 10 Blocks | After 20 Blocks | Rush Minimum After 20 |
+| Observed Average Fee | After 1 Block | After 5 Blocks | After 10 Blocks | After 20 Blocks | Full-Queue Minimum After 20 |
 |---|---:|---:|---:|---:|---:|
 | 1 -> 10,000 flakes | 1,000 | 4,095 | 6,511 | 8,781 | 87,810 |
 | 1,000 -> 10,000 flakes | 1,900 | 4,685 | 6,859 | 8,902 | 89,020 |
@@ -171,5 +172,17 @@ Reading:
   distort the market quote.
 - When demand stays high, suggested fee converges toward the observed average.
 - When demand collapses, suggested fee decays back toward `MIN_FEE`.
-- Rush mode is the fast protection layer: once the mempool is congested, new
-  admissions must pay about 10 times the current suggested fee.
+- The admission floor rises gradually with actual queue depth instead of
+  jumping straight to the maximum multiplier.
+
+Example with `suggested_fee = 1,000 flakes`:
+
+| Pending Blocks | Multiplier | Effective Minimum |
+|---:|---:|---:|
+| 0 | 1x | 1,000 flakes |
+| 0.5 | 1x | 1,000 flakes |
+| 1.0 | 1x | 1,000 flakes |
+| 1.1 | 2x | 2,000 flakes |
+| 2.4 | 3x | 3,000 flakes |
+| 5.0 | 5x | 5,000 flakes |
+| 9.5 | 10x | 10,000 flakes |
