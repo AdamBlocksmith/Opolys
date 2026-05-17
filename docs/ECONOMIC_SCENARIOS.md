@@ -140,3 +140,36 @@ weakest at launch and strongest when one or more of these are true:
 The current model is therefore activity-sensitive rather than holder-punitive:
 it does not burn dormant accounts or charge passive vault rent, but it can move
 toward net deflation as the network matures.
+
+## Fee Response
+
+The suggested fee is an exponential moving average:
+
+```text
+suggested_fee = max(MIN_FEE, (observed_average_fee + 9 * previous_suggested_fee) / 10)
+```
+
+When the mempool holds more than one block's worth of pending data, admission
+enters rush mode:
+
+```text
+effective_min_fee = suggested_fee * CAPACITY_RATIO
+CAPACITY_RATIO = 10
+```
+
+Example response over 20 blocks:
+
+| Observed Average Fee | After 1 Block | After 5 Blocks | After 10 Blocks | After 20 Blocks | Rush Minimum After 20 |
+|---|---:|---:|---:|---:|---:|
+| 1 -> 10,000 flakes | 1,000 | 4,095 | 6,511 | 8,781 | 87,810 |
+| 1,000 -> 10,000 flakes | 1,900 | 4,685 | 6,859 | 8,902 | 89,020 |
+| 10,000 -> 1 flake | 9,000 | 5,905 | 3,484 | 1,213 | 12,130 |
+
+Reading:
+
+- Suggested fee moves gradually, so one strange block does not permanently
+  distort the market quote.
+- When demand stays high, suggested fee converges toward the observed average.
+- When demand collapses, suggested fee decays back toward `MIN_FEE`.
+- Rush mode is the fast protection layer: once the mempool is congested, new
+  admissions must pay about 10 times the current suggested fee.

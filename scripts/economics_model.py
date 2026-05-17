@@ -15,6 +15,8 @@ BASE_REWARD_OPL = 332.0
 BLOCKS_PER_YEAR = 350_640
 EPOCH = 960
 AVERAGE_VEIN_YIELD = 1.0 + math.sqrt(math.pi) / 2.0
+CAPACITY_RATIO = 10
+MIN_FEE_FLAKES = 1
 
 
 def mined_block_row(difficulty: float) -> dict[str, float]:
@@ -63,6 +65,22 @@ def scenario(
         "total_burn": total_burn,
         "circulating_delta": gross_issue - total_burn,
     }
+
+
+def suggested_fee_sequence(
+    start_fee_flakes: int,
+    observed_average_fee_flakes: int,
+    blocks: int,
+) -> list[int]:
+    fees = []
+    suggested = start_fee_flakes
+    for _ in range(blocks):
+        suggested = max(
+            MIN_FEE_FLAKES,
+            (observed_average_fee_flakes + (CAPACITY_RATIO - 1) * suggested) // CAPACITY_RATIO,
+        )
+        fees.append(suggested)
+    return fees
 
 
 def print_table(headers: list[str], rows: list[list[str]]) -> None:
@@ -165,6 +183,37 @@ def main() -> None:
             "Burn/year",
             "Supply delta/year",
             "Refiner fee/year",
+        ],
+        rows,
+    )
+
+    print("\nSuggested fee response")
+    fee_scenarios = [
+        ("1 -> 10,000 flakes", 1, 10_000),
+        ("1,000 -> 10,000 flakes", 1_000, 10_000),
+        ("10,000 -> 1 flake", 10_000, 1),
+    ]
+    rows = []
+    for name, start, observed in fee_scenarios:
+        fees = suggested_fee_sequence(start, observed, 20)
+        rows.append(
+            [
+                name,
+                f"{fees[0]:,}",
+                f"{fees[4]:,}",
+                f"{fees[9]:,}",
+                f"{fees[19]:,}",
+                f"{fees[19] * CAPACITY_RATIO:,}",
+            ]
+        )
+    print_table(
+        [
+            "Observed avg",
+            "After 1 block",
+            "After 5 blocks",
+            "After 10 blocks",
+            "After 20 blocks",
+            "Rush min after 20",
         ],
         rows,
     )
