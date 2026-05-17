@@ -75,6 +75,9 @@ The script creates a dry-run ceremony, verifies it, starts an isolated mining
 node, mines blocks, submits a wallet transfer over authenticated loopback RPC,
 restarts the node, and confirms the height and recipient balance persist. Its
 artifacts are written under `launch-rehearsal-local/`, which is ignored by git.
+If a transfer is submitted just after the miner has already assembled a block
+candidate, inclusion may take one additional mined block. The rehearsal waits
+for the recipient balance instead of assuming the next block must contain it.
 
 ## 3. Production Ceremony
 

@@ -16,7 +16,7 @@ Opolys encodes these properties directly into consensus:
 | **Gold supply has no cap** | No maximum supply | There is no "21 million" moment. OPL issuance naturally declines as difficulty rises, but it never reaches zero. Like gold — there's always a little more to be found, it just costs more. |
 | **Gold is lost over time** | Mined-block fees and assays are burned | Mined-block fees and assay burns permanently destroy OPL from circulation. Shipwrecks, lost jewelry, melted coins — Opolys models this as supply attrition. The circulating supply can *shrink*. |
 | **Gold mining is a physical process** | EVO-OMAP memory-hard proof-of-work | Mining requires 256 MiB of memory and data-dependent computation. No shortcut, no ASIC cheat. Like digging a shaft — you have to move the rock. |
-| **Gold ore varies in richness** | Vein yield: `1 + ln(target / hash_int)` | A lucky gold strike yields more than a poor one. Vein yield models this: most blocks earn ~2x base reward, exceptional ones earn more. The math is natural, not scheduled. |
+| **Gold ore varies in richness** | Vein yield: `1 + sqrt(ln(target / hash_int))` | A lucky gold strike yields more than a poor one. Vein yield models this: most blocks earn ~2x base reward, exceptional ones earn more. The math is natural, not scheduled. |
 | **Gold production rate is known** | BASE_REWARD derived from world gold production via genesis ceremony | 3,630 tonnes of gold are mined annually (~116.7 million troy ounces). Divided by 350,640 blocks per year = 332 OPL per block at minimum difficulty. BASE_REWARD is set from live LBMA/USGS/WGC data at the genesis ceremony. |
 | **Gold must be refined before use** | Difficulty must be overcome to earn reward | You can't just claim gold exists — you have to prove you did the work. EVO-OMAP requires a valid proof-of-work with at least D leading zero bits. |
 | **Gold held in vaults secures settlement** | Refiner staking by bonded collateral | Bonded OPL gives refiners block production rights when the chain stalls. Refiner weight is stake-only: no time-based yield, no age rent, and no reward just for waiting. |
@@ -440,9 +440,12 @@ refiner_block_fee_income = sum(tx.fee) in refiner-produced blocks
 average_fee = explicit_fees_from_successful_txs / successful_tx_count
 suggested_fee =
     (average_fee + (CAPACITY_RATIO - 1) × previous_suggested_fee) / CAPACITY_RATIO
+pending_blocks = ceil(mempool_bytes / MAX_BLOCK_SIZE_BYTES)
+fee_multiplier = clamp(pending_blocks, 1, CAPACITY_RATIO)
+effective_min_fee = suggested_fee × fee_multiplier
 ```
 
-Floored at `MIN_FEE` (1 Flake). Empty blocks use `MIN_FEE` as the current signal, so the suggestion cools back toward the floor. Bond/unbond assays are burned as vault friction, but they do not inflate the ordinary transaction-fee signal.
+Floored at `MIN_FEE` (1 Flake). Empty blocks use `MIN_FEE` as the current signal, so the suggestion cools back toward the floor. When the mempool already holds more than about one block of pending data, the admission floor rises by queue depth up to `CAPACITY_RATIO`. Bond/unbond assays are burned as vault friction, but they do not inflate the ordinary transaction-fee signal.
 
 ---
 
@@ -826,6 +829,9 @@ average_fee = explicit_fees_from_successful_txs / successful_tx_count
 suggested_fee =
     (average_fee + (CAPACITY_RATIO - 1) × previous_suggested_fee) / CAPACITY_RATIO,
     floored at MIN_FEE
+pending_blocks = ceil(mempool_bytes / MAX_BLOCK_SIZE_BYTES)
+fee_multiplier = clamp(pending_blocks, 1, CAPACITY_RATIO)
+effective_min_fee = suggested_fee × fee_multiplier
 ```
 
 ### Refiner Weight
