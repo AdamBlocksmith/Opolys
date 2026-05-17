@@ -1529,7 +1529,7 @@ A comprehensive audit of all consensus-critical formulas and constants in the co
 
 **What it is:** `slash_evidence`, `attestations`, and `genesis_ceremony` lived outside the block header commitment even though they can affect state. A relay could mutate those fields without changing the block hash or PoW input.
 
-**How fixed:** `BlockHeader` now carries `evidence_root`, `attestation_root`, and `genesis_ceremony_hash`. These roots are included in `compute_block_hash()` and `serialize_header_for_pow()`, validated before block application, and filled before mining/refiner signing. `BLOCK_VERSION` was bumped to 2 for body commitments, then to 3 when signed finality fees changed the transaction format.
+**How fixed:** `BlockHeader` now carries `evidence_root`, `attestation_root`, and `genesis_ceremony_hash`. These roots are included in `compute_block_hash()` and `serialize_header_for_pow()`, validated before block application, and filled before mining/refiner signing. `BLOCK_VERSION` was bumped to 2 for body commitments, to 3 during the removed finality-fee experiment, and to 4 when Proof of Refinement removed finality fees and routed ordinary fees by block kind.
 
 ---
 
@@ -1569,7 +1569,7 @@ A comprehensive audit of all consensus-critical formulas and constants in the co
 
 **What it is:** Vein yield previously used `f64::ln()` / `sqrt()` in consensus reward math, and refiner weighting previously included age-based math. Transcendental floating-point functions are not guaranteed to produce identical results across libc/platform implementations. Reward and weight products also used truncating `u128 as u64` casts, which could wrap in overflow edge cases.
 
-**How fixed:** Emission math now uses deterministic fixed-point integer natural log and integer square root helpers. Block reward, refiner reward, and refiner weight conversions saturate at `u64::MAX` instead of truncating. Regression tests cover known log values, yield behavior, and overflow saturation.
+**How fixed:** Emission math now uses deterministic fixed-point integer natural log and integer square root helpers. Block reward and refiner weight conversions saturate at `u64::MAX` instead of truncating. Regression tests cover known log values, yield behavior, and overflow saturation. Refiners no longer receive passive issuance rewards.
 
 ---
 
