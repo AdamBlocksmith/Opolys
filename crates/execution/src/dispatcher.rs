@@ -20,8 +20,8 @@
 //! unbonds the specified amount using FIFO order — oldest entries consumed
 //! first. If the amount exceeds an entry's stake, that entry is fully
 //! consumed and the remainder comes from the next oldest. Split entries
-//! keep their original `bonded_at_timestamp`. Invalid amounts (below
-//! MIN_FEE floor or exceeding total stake) result in an error.
+//! keep their original `bonded_at_timestamp`. Invalid amounts (zero or
+//! exceeding total stake) result in an error.
 
 use opolys_consensus::account::{AccountStore, TransferResult};
 use opolys_consensus::refiner::RefinerSet;
@@ -292,9 +292,10 @@ impl TransactionDispatcher {
     /// If the sender is not yet a refiner, this creates a new refiner with
     /// this as their first bond entry (status: Bonding).
     ///
-    /// The sender's balance is debited by `stake + fee`, where `stake` becomes
-    /// locked refiner stake and `fee` is burned. If the bond fails (e.g.
-    /// insufficient balance), the debit is refunded.
+    /// The sender's balance is debited by `stake + fee + bond_assay`, where
+    /// `stake` becomes locked refiner stake, the ordinary fee is routed by
+    /// block kind, and the bond assay is burned. If the bond fails, the debit
+    /// is refunded.
     fn apply_bond(
         tx: &Transaction,
         sender: &ObjectId,
@@ -329,7 +330,7 @@ impl TransactionDispatcher {
             ));
         }
 
-        // Debit the sender's account for stake + fee
+        // Debit the sender's account for stake + fee + bond assay.
         if let Err(e) = accounts.debit(sender, total_needed) {
             return ApplyResult::err(&e.to_string());
         }

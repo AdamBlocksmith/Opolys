@@ -166,7 +166,7 @@ pub struct RefinerInfo {
     /// each signature to track liveness.
     pub last_signed_height: u64,
     /// Consecutive valid block attestations included on-chain for this refiner.
-    /// Reward weighting is introduced later; for now this records verified liveness.
+    /// This records verified liveness and does not create passive yield.
     pub consecutive_correct_attestations: u64,
 }
 

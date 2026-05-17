@@ -11,7 +11,7 @@
 //!
 //! Supported transaction types:
 //! - **Transfer** — move OPL between accounts
-//! - **RefinerBond** — lock OPL as refiner stake (min 100 OPL)
+//! - **RefinerBond** — lock OPL as refiner stake using the dynamic minimum
 //! - **RefinerUnbond** — release staked OPL back to the refiner's balance
 
 pub mod dispatcher;

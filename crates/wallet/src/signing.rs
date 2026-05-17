@@ -7,7 +7,7 @@
 //!
 //! Transactions are:
 //! - **Transfer** - move OPL between accounts (fees route by block kind)
-//! - **RefinerBond** — lock OPL as stake to become a refiner (min 1 OPL per entry)
+//! - **RefinerBond** — lock OPL as stake to become a refiner (dynamic minimum)
 //! - **RefinerUnbond** — release stake using FIFO order (oldest entries first)
 
 use crate::key::KeyPair;
@@ -26,9 +26,9 @@ pub struct TransactionSigner;
 impl TransactionSigner {
     /// Create a signed transfer transaction.
     ///
-    /// Moves `amount` OPL (in flakes) from sender to recipient. The `fee` is
-    /// **burned** (permanently removed from supply), not collected by any refiner.
-    /// This is a core Opolys design choice: fees are market-driven and burned.
+    /// Moves `amount` OPL (in flakes) from sender to recipient. The ordinary
+    /// `fee` is later routed by block kind: mined blocks burn it, while
+    /// refiner-produced blocks pay it to the selected refiner producer.
     ///
     /// `chain_id` must match the target network (`MAINNET_CHAIN_ID` for mainnet).
     /// It is included in both the tx_id hash and the signed data to prevent
@@ -66,8 +66,7 @@ impl TransactionSigner {
     ///
     /// Locks `amount` OPL (in flakes) as refiner stake. If the sender is
     /// already a refiner, this creates a new bond entry (top-up) with its
-    /// own timestamp. Each new entry must be at least
-    /// `MIN_BOND_STAKE` (1 OPL).
+    /// own timestamp. Each new entry must meet the dynamic on-chain minimum.
     ///
     /// `chain_id` must match the target network to prevent cross-chain replay attacks.
     pub fn create_refiner_bond(
