@@ -26,7 +26,11 @@ function Invoke-Rpc {
         id = $Id
     } | ConvertTo-Json -Depth 10 -Compress
 
-    Invoke-RestMethod -Uri "$RpcUrl/rpc" -Method Post -ContentType "application/json" -Body $body
+    $response = Invoke-RestMethod -Uri "$RpcUrl/rpc" -Method Post -ContentType "application/json" -Body $body
+    if ($null -ne $response.error) {
+        throw "RPC $Method failed: $($response.error.message)"
+    }
+    $response
 }
 
 function Stop-RehearsalProcess {
@@ -113,6 +117,11 @@ try {
     Write-Host "STEP 5: query block 1"
     $Block1 = Invoke-Rpc -RpcUrl $RpcUrl -Method "opl_getBlockByHeight" -Params @(1) -Id 2
     $Block1.result.header | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "block1.header.json")
+    $Block1Assay = Invoke-Rpc -RpcUrl $RpcUrl -Method "opl_getBlockAssayCertificate" -Params @(1) -Id 20
+    if ([uint64]$Block1Assay.result.height -ne 1) {
+        throw "Block 1 assay certificate returned wrong height"
+    }
+    $Block1Assay.result | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "block1.assay.json")
 
     Write-Host "STEP 6: create and send wallet transaction"
     $TxHex = (cargo run -p opolys-wallet -- --rpc-url $RpcUrl transfer --from-env $RecipientAddress 1 --fee 0.000001 | Select-Object -Last 1).Trim()
@@ -186,8 +195,13 @@ try {
     }
 
     $BalanceAfter = Invoke-Rpc -RpcUrl $RestartRpcUrl -Method "opl_getBalance" -Params @($RecipientAddress) -Id 7
+    $TipAssayAfter = Invoke-Rpc -RpcUrl $RestartRpcUrl -Method "opl_getBlockAssayCertificate" -Params @([uint64]$InfoAfter.result.height) -Id 21
+    if ([uint64]$TipAssayAfter.result.height -ne [uint64]$InfoAfter.result.height) {
+        throw "Tip assay certificate returned wrong height after restart"
+    }
     $InfoAfter.result | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "chain-after-restart.json")
     $BalanceAfter.result | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "recipient-after-restart.json")
+    $TipAssayAfter.result | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "tip.assay-after-restart.json")
     Write-Host "AFTER_RESTART_HEIGHT=$($InfoAfter.result.height)"
     Write-Host "AFTER_RESTART_RECIPIENT_FLAKES=$($BalanceAfter.result.balance_flakes)"
 

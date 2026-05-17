@@ -264,7 +264,9 @@ pub struct BlockHeader {
 /// - `Mined`: a miner solved EVO-OMAP PoW and earns newly extracted OPL.
 /// - `Refined`: a selected active refiner signed a stalled-chain block and
 ///   earns only the ordinary transaction fees included in that block.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize, Serialize, Deserialize,
+)]
 pub enum BlockProductionKind {
     /// Genesis has no producer, PoW proof, or refiner signature.
     Genesis,
@@ -436,6 +438,47 @@ pub struct Block {
     /// Skipped in JSON serialization; stored on-chain via Borsh (RocksDB).
     #[serde(skip)]
     pub genesis_ceremony: Option<GenesisCeremonyData>,
+}
+
+/// Non-consensus economic receipt persisted alongside an applied block.
+///
+/// This is an observability artifact, not part of the block hash. It records
+/// the exact issuance, fee routing, and burn amounts that were known only at
+/// block-application time, such as dynamic bond/unbond assay burns.
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize, Serialize, Deserialize)]
+pub struct BlockEconomicReceipt {
+    /// Block height this receipt belongs to.
+    pub height: BlockHeight,
+    /// Canonical block hash.
+    pub block_hash: Hash,
+    /// How the block was produced.
+    pub production_kind: BlockProductionKind,
+    /// Miner or refiner that produced the block. Zero for genesis.
+    pub producer: ObjectId,
+    /// Difficulty recorded in the block header.
+    pub difficulty: u64,
+    /// Vein-yield multiplier in milli-units. `1000` means 1.000x.
+    pub vein_yield_milli: u64,
+    /// Gross newly mined OPL before mine assay. Zero for genesis and POR blocks.
+    pub gross_reward: FlakeAmount,
+    /// Mine assay burned from the gross reward. Zero for POR blocks.
+    pub mine_assay_burned: FlakeAmount,
+    /// Net mined reward credited to the miner.
+    pub miner_credit: FlakeAmount,
+    /// Successful transaction count used for fee accounting.
+    pub successful_transaction_count: u64,
+    /// Ordinary transaction fees charged by successful transactions.
+    pub ordinary_fees: FlakeAmount,
+    /// Ordinary fees burned by mined blocks.
+    pub ordinary_fees_burned: FlakeAmount,
+    /// Ordinary fees paid to the refiner producer in POR blocks.
+    pub refiner_fee_income: FlakeAmount,
+    /// Dynamic bond/unbond assay burns charged by successful transactions.
+    pub bond_unbond_assay_burned: FlakeAmount,
+    /// Stake burned from valid slash evidence included in the block.
+    pub slashed_burned: FlakeAmount,
+    /// Total supply removed by this block.
+    pub total_burned: FlakeAmount,
 }
 
 /// Converts whole OPL to Flakes (the smallest on-chain unit).

@@ -21,7 +21,7 @@
 use borsh::{BorshDeserialize, BorshSerialize};
 use opolys_consensus::account::{Account, AccountStore};
 use opolys_consensus::refiner::{PendingUnbond, RefinerInfo, RefinerSet};
-use opolys_core::{Block, Hash, ObjectId, Transaction};
+use opolys_core::{Block, BlockEconomicReceipt, Hash, ObjectId, Transaction};
 use rocksdb::{WriteBatch, WriteOptions};
 use std::path::Path;
 
@@ -297,6 +297,7 @@ impl BlockchainStore {
     pub fn save_applied_block_atomic(
         &self,
         block: &Block,
+        receipt: &BlockEconomicReceipt,
         state: &PersistedChainState,
         accounts: &AccountStore,
         refiners: &RefinerSet,
@@ -327,6 +328,8 @@ impl BlockchainStore {
             borsh::to_vec(block).map_err(|e| format!("Block serialization failed: {}", e))?;
         let chain_data =
             borsh::to_vec(state).map_err(|e| format!("Chain state serialization failed: {}", e))?;
+        let receipt_data = borsh::to_vec(receipt)
+            .map_err(|e| format!("Economic receipt serialization failed: {}", e))?;
         let accounts_data = borsh::to_vec(&accounts.all_accounts())
             .map_err(|e| format!("Account serialization failed: {}", e))?;
 
@@ -341,10 +344,22 @@ impl BlockchainStore {
 
         let block_hash = opolys_consensus::block::compute_block_hash(&block.header);
         let hash_key = format!("hash_{}", block_hash.to_hex());
+        let receipt_height_key = format!("receipt_height_{}", block.header.height);
+        let receipt_hash_key = format!("receipt_hash_{}", block_hash.to_hex());
 
         let mut batch = WriteBatch::default();
         batch.put_cf(&blocks_cf, height_key, encode_value(&block_data));
         batch.put_cf(&blocks_cf, hash_key.as_bytes(), encode_value(&height_key));
+        batch.put_cf(
+            &blocks_cf,
+            receipt_height_key.as_bytes(),
+            encode_value(&receipt_data),
+        );
+        batch.put_cf(
+            &blocks_cf,
+            receipt_hash_key.as_bytes(),
+            encode_value(&receipt_data),
+        );
         batch.put_cf(&chain_cf, b"latest_block_height", encode_value(&height_key));
         batch.put_cf(&chain_cf, b"chain_state", encode_value(&chain_data));
         batch.put_cf(&accounts_cf, b"all_accounts", encode_value(&accounts_data));
@@ -385,6 +400,52 @@ impl BlockchainStore {
             .map_err(|e| format!("Atomic block/state write failed: {}", e))?;
 
         Ok(())
+    }
+
+    /// Load the economic receipt for an applied block by height.
+    ///
+    /// Receipts are observability sidecars. Old databases may not have them for
+    /// blocks written before receipt support was introduced.
+    pub fn load_block_receipt(&self, height: u64) -> Result<Option<BlockEconomicReceipt>, String> {
+        let blocks_cf = self
+            .db
+            .cf_handle("blocks")
+            .ok_or_else(|| "Column family 'blocks' not found".to_string())?;
+        let key = format!("receipt_height_{}", height);
+
+        match self.db.get_cf(&blocks_cf, key.as_bytes()) {
+            Ok(Some(data)) => {
+                let payload = decode_value("Block economic receipt", &data)?;
+                let receipt = BlockEconomicReceipt::try_from_slice(&payload)
+                    .map_err(|e| format!("Block economic receipt deserialization failed: {}", e))?;
+                Ok(Some(receipt))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(format!("Block economic receipt get failed: {}", e)),
+        }
+    }
+
+    /// Load the economic receipt for an applied block by hash.
+    pub fn load_block_receipt_by_hash(
+        &self,
+        hash: &Hash,
+    ) -> Result<Option<BlockEconomicReceipt>, String> {
+        let blocks_cf = self
+            .db
+            .cf_handle("blocks")
+            .ok_or_else(|| "Column family 'blocks' not found".to_string())?;
+        let key = format!("receipt_hash_{}", hash.to_hex());
+
+        match self.db.get_cf(&blocks_cf, key.as_bytes()) {
+            Ok(Some(data)) => {
+                let payload = decode_value("Block economic receipt", &data)?;
+                let receipt = BlockEconomicReceipt::try_from_slice(&payload)
+                    .map_err(|e| format!("Block economic receipt deserialization failed: {}", e))?;
+                Ok(Some(receipt))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(format!("Block economic receipt hash lookup failed: {}", e)),
+        }
     }
 
     /// Load a block by its Blake3 hash (hex-encoded).
@@ -837,6 +898,24 @@ mod tests {
         let genesis_config = GenesisConfig::default();
         let block = opolys_consensus::build_genesis_block(&genesis_config).unwrap();
         let block_hash = opolys_consensus::block::compute_block_hash(&block.header);
+        let receipt = BlockEconomicReceipt {
+            height: block.header.height,
+            block_hash: block_hash.clone(),
+            production_kind: block.header.production_kind().unwrap(),
+            producer: block.header.producer.clone(),
+            difficulty: block.header.difficulty,
+            vein_yield_milli: 0,
+            gross_reward: 0,
+            mine_assay_burned: 0,
+            miner_credit: 0,
+            successful_transaction_count: 0,
+            ordinary_fees: 0,
+            ordinary_fees_burned: 0,
+            refiner_fee_income: 0,
+            bond_unbond_assay_burned: 0,
+            slashed_burned: 0,
+            total_burned: 0,
+        };
 
         let mut accounts = AccountStore::new();
         let account_id = opolys_crypto::hash_to_object_id(b"atomic-account");
@@ -867,7 +946,7 @@ mod tests {
         };
 
         store
-            .save_applied_block_atomic(&block, &state, &accounts, &refiners)
+            .save_applied_block_atomic(&block, &receipt, &state, &accounts, &refiners)
             .unwrap();
 
         assert_eq!(
@@ -875,6 +954,18 @@ mod tests {
             Some(block.header.height)
         );
         assert!(store.load_block_by_hash(&block_hash).unwrap().is_some());
+        assert_eq!(
+            store.load_block_receipt(0).unwrap().unwrap().block_hash,
+            block_hash
+        );
+        assert_eq!(
+            store
+                .load_block_receipt_by_hash(&block_hash)
+                .unwrap()
+                .unwrap()
+                .production_kind,
+            opolys_core::BlockProductionKind::Genesis
+        );
         assert_eq!(
             store.load_chain_state().unwrap().unwrap().current_height,
             block.header.height

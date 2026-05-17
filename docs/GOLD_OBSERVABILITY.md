@@ -68,22 +68,33 @@ Every block can be explained with a certificate containing:
 ```text
 height
 block_hash
-block_kind = mined | refined
+production_kind = genesis | mined | refined
 producer
 difficulty
-base_component
 vein_yield_milli
 gross_mined_reward
 mine_assay_burned
+miner_credit
+successful_transaction_count
+ordinary_fees
 ordinary_fees_burned
 ordinary_fees_paid_to_refiner
 bond_unbond_assay_burned
 slashed_stake_burned
-net_miner_credit
-net_new_issuance
-state_root
-transaction_count
+total_burned
 ```
+
+RPC:
+
+```text
+opl_getBlockAssayCertificate([height])
+opl_getBlockAssayCertificate([block_hash_hex])
+```
+
+The certificate is persisted as a non-consensus sidecar when a block is applied.
+It does not change the block hash, PoW input, state root, or validity rules.
+Persisting it avoids guessing dynamic bond/unbond assay burns later, because
+those burns depend on live refiner state at block-application time.
 
 Mined block example:
 
@@ -109,7 +120,7 @@ Rules:
 
 - An assay certificate is a view of existing consensus data.
 - It must not become a separate signed object required for block validity.
-- It should be reproducible from block data plus chain state.
+- It is persisted beside the block as exact observability data.
 - It should make fee routing and burns visible.
 
 Gold analogy:

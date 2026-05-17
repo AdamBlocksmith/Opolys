@@ -95,6 +95,11 @@ inflation/burn examples, see [`docs/ECONOMIC_SCENARIOS.md`](docs/ECONOMIC_SCENAR
 or run `python scripts/economics_model.py`. For Hallmarks, Assay Certificates,
 and the Mint Ledger, see [`docs/GOLD_OBSERVABILITY.md`](docs/GOLD_OBSERVABILITY.md).
 
+Read-only RPC includes `opl_getBlockAssayCertificate([height_or_hash])`, which
+returns the per-block economic receipt: gross mined reward, mine assay burned,
+ordinary fees burned or paid to a refiner, bond/unbond assay burns, slashing
+burns, and net miner credit.
+
 ### CLI Flags
 
 | Flag | Default | Description |

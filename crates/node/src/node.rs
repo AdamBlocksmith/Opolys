@@ -1946,6 +1946,7 @@ impl OpolysNode {
         // Each item is verified independently; duplicates within the block are skipped.
         let mut processed_evidence_keys: std::collections::HashSet<(String, u64)> =
             std::collections::HashSet::new();
+        let mut total_slashed_burned: FlakeAmount = 0;
         for evidence in &block.slash_evidence {
             let dedup_key = (evidence.producer.to_hex(), evidence.height);
             if processed_evidence_keys.contains(&dedup_key) {
@@ -1956,6 +1957,7 @@ impl OpolysNode {
                 match refiners.slash_refiner(&evidence.producer, block.header.height) {
                     Ok(burned) if burned > 0 => {
                         chain.total_burned = chain.total_burned.saturating_add(burned);
+                        total_slashed_burned = total_slashed_burned.saturating_add(burned);
                         tracing::info!(
                             producer = %evidence.producer.to_hex(),
                             burned,
@@ -2014,16 +2016,23 @@ impl OpolysNode {
         // Supply starts at exactly zero.
         // First OPL enters circulation at block 1 when real mining begins.
         // Matches gold analogy — nobody found gold until someone dug.
+        let pow_hash_value = if production_kind == BlockProductionKind::Mined {
+            pow::compute_pow_hash_value(&block.header)
+        } else {
+            None
+        };
+        let vein_yield_milli = pow_hash_value
+            .map(|hash_value| emission::compute_vein_yield(block.header.difficulty, hash_value))
+            .unwrap_or(0);
         let block_reward = match production_kind {
             BlockProductionKind::Genesis | BlockProductionKind::Refined => 0,
             BlockProductionKind::Mined => {
                 // Mined block: use actual hash value for vein yield calculation.
                 // Lucky hashes (small hash_int) earn higher yield.
-                let pow_hash_value = pow::compute_pow_hash_value(&block.header).unwrap_or(0u64);
                 emission::compute_block_reward(
                     chain.base_reward,
                     block.header.difficulty,
-                    pow_hash_value,
+                    pow_hash_value.unwrap_or(0u64),
                 )
             }
         };
@@ -2135,6 +2144,16 @@ impl OpolysNode {
                 .checked_add(total_transaction_fees)
                 .ok_or_else(|| "Total burned overflow after transaction fees".to_string())?;
         }
+        let ordinary_fees_burned = if production_kind == BlockProductionKind::Mined {
+            total_transaction_fees
+        } else {
+            0
+        };
+        let refiner_fee_income = if production_kind == BlockProductionKind::Refined {
+            total_transaction_fees
+        } else {
+            0
+        };
 
         chain.total_burned = chain
             .total_burned
@@ -2230,9 +2249,32 @@ impl OpolysNode {
         account_hasher.update(&chain.current_height.to_be_bytes());
         chain.state_root = account_hasher.finalize();
 
+        let receipt = BlockEconomicReceipt {
+            height: block.header.height,
+            block_hash: block_hash.clone(),
+            production_kind,
+            producer: block.header.producer.clone(),
+            difficulty: block.header.difficulty,
+            vein_yield_milli,
+            gross_reward: reward_distribution.gross_reward,
+            mine_assay_burned: reward_distribution.mine_assay,
+            miner_credit: reward_distribution.miner_share,
+            successful_transaction_count,
+            ordinary_fees: total_transaction_fees,
+            ordinary_fees_burned,
+            refiner_fee_income,
+            bond_unbond_assay_burned: total_assay_burned,
+            slashed_burned: total_slashed_burned,
+            total_burned: ordinary_fees_burned
+                .saturating_add(total_assay_burned)
+                .saturating_add(reward_distribution.mine_assay)
+                .saturating_add(total_slashed_burned),
+        };
+
         // Persist state to disk
         if let Some(ref store) = self.store
-            && let Err(e) = Self::persist_state(store, &chain, &accounts, &refiners, block)
+            && let Err(e) =
+                Self::persist_state(store, &chain, &accounts, &refiners, block, &receipt)
         {
             tracing::error!("Failed to persist state: {}", e);
         }
@@ -2260,8 +2302,9 @@ impl OpolysNode {
         accounts: &AccountStore,
         refiners: &RefinerSet,
         block: &Block,
+        receipt: &BlockEconomicReceipt,
     ) -> Result<(), String> {
-        store.save_applied_block_atomic(block, &chain.to_persisted(), accounts, refiners)
+        store.save_applied_block_atomic(block, receipt, &chain.to_persisted(), accounts, refiners)
     }
 
     /// Retrieve a block from storage by height.

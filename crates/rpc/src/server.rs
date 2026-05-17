@@ -18,6 +18,7 @@
 //! - `opl_getDifficulty` — current difficulty + retarget info
 //! - `opl_getRefiners` — active refiner set with stakes and weights
 //! - `opl_getBlockConfidence` — on-chain attestation confidence for refiner blocks
+//! - `opl_getBlockAssayCertificate` — per-block economic receipt
 //!
 //! # Write Endpoints (submit to chain)
 //!
@@ -52,9 +53,9 @@ use opolys_consensus::difficulty::compute_next_difficulty;
 use opolys_consensus::mempool::Mempool;
 use opolys_consensus::refiner::RefinerSet;
 use opolys_core::{
-    Block, BlockAttestation, BlockProductionKind, EPOCH, FLAKES_PER_OPL, FlakeAmount, Hash,
-    MAINNET_CHAIN_ID, MAX_BLOCK_SIZE_BYTES, ObjectId, RefinerStatus, TX_MAX_SIZE_BYTES,
-    Transaction,
+    Block, BlockAttestation, BlockEconomicReceipt, BlockProductionKind, EPOCH, FLAKES_PER_OPL,
+    FlakeAmount, Hash, MAINNET_CHAIN_ID, MAX_BLOCK_SIZE_BYTES, ObjectId, RefinerStatus,
+    TX_MAX_SIZE_BYTES, Transaction,
 };
 use opolys_execution::verify_transaction;
 use opolys_storage::BlockchainStore;
@@ -325,6 +326,9 @@ pub async fn handle_jsonrpc(
         "opl_getDifficulty" => handle_get_difficulty(&state).await,
         "opl_getRefiners" => handle_get_refiners(&state).await,
         "opl_getBlockConfidence" => handle_get_block_confidence(&state, &req.params).await,
+        "opl_getBlockAssayCertificate" => {
+            handle_get_block_assay_certificate(&state, &req.params).await
+        }
         "opl_getFinalizedHeight" => handle_get_finalized_height(&state).await,
         // ── Write endpoints ──
         "opl_sendTransaction" => handle_send_transaction(&state, &req.params).await,
@@ -695,6 +699,15 @@ async fn handle_get_block_confidence(
 
 // ─── Write endpoint handlers ───────────────────────────────────────
 
+async fn handle_get_block_assay_certificate(
+    state: &RpcState,
+    params: &serde_json::Value,
+) -> Result<serde_json::Value, JsonRpcError> {
+    let receipt = load_block_assay_receipt(state, params)?;
+    serde_json::to_value(receipt_to_response(&receipt))
+        .map_err(|e| JsonRpcError::internal_error(&e.to_string()))
+}
+
 async fn handle_send_transaction(
     state: &RpcState,
     params: &serde_json::Value,
@@ -1035,6 +1048,91 @@ fn load_confidence_target_block(
     }
 }
 
+fn load_block_assay_receipt(
+    state: &RpcState,
+    params: &serde_json::Value,
+) -> Result<BlockEconomicReceipt, JsonRpcError> {
+    let arr = match params {
+        serde_json::Value::Array(a) => a,
+        _ => {
+            return Err(JsonRpcError::invalid_params(
+                "Expected params array with block height or hash",
+            ));
+        }
+    };
+    let Some(first) = arr.first() else {
+        return Err(JsonRpcError::invalid_params("Missing block height or hash"));
+    };
+
+    if let Some(height) = first.as_u64() {
+        if let Some(receipt) = state
+            .store
+            .load_block_receipt(height)
+            .map_err(|e| JsonRpcError::internal_error(&e.to_string()))?
+        {
+            return Ok(receipt);
+        }
+        return missing_receipt_fallback(state, height);
+    }
+
+    let Some(hash_hex) = first.as_str() else {
+        return Err(JsonRpcError::invalid_params(
+            "Block selector must be a height number or 32-byte hash hex string",
+        ));
+    };
+    let hash = parse_hash(hash_hex)?;
+    if let Some(receipt) = state
+        .store
+        .load_block_receipt_by_hash(&hash)
+        .map_err(|e| JsonRpcError::internal_error(&e.to_string()))?
+    {
+        return Ok(receipt);
+    }
+    let block = state
+        .store
+        .load_block_by_hash(&hash)
+        .map_err(|e| JsonRpcError::internal_error(&e.to_string()))?
+        .ok_or_else(|| JsonRpcError::not_found("Block not found"))?;
+    missing_receipt_fallback(state, block.header.height)
+}
+
+fn missing_receipt_fallback(
+    state: &RpcState,
+    height: u64,
+) -> Result<BlockEconomicReceipt, JsonRpcError> {
+    let block = state
+        .store
+        .load_block(height)
+        .map_err(|e| JsonRpcError::internal_error(&e.to_string()))?
+        .ok_or_else(|| JsonRpcError::not_found(&format!("Block at height {} not found", height)))?;
+
+    if block.header.height == 0 {
+        let block_hash = compute_block_hash(&block.header);
+        return Ok(BlockEconomicReceipt {
+            height: block.header.height,
+            block_hash,
+            production_kind: BlockProductionKind::Genesis,
+            producer: block.header.producer,
+            difficulty: block.header.difficulty,
+            vein_yield_milli: 0,
+            gross_reward: 0,
+            mine_assay_burned: 0,
+            miner_credit: 0,
+            successful_transaction_count: 0,
+            ordinary_fees: 0,
+            ordinary_fees_burned: 0,
+            refiner_fee_income: 0,
+            bond_unbond_assay_burned: 0,
+            slashed_burned: 0,
+            total_burned: 0,
+        });
+    }
+
+    Err(JsonRpcError::not_found(
+        "Block assay certificate not available for this block; it may have been written before receipt indexing was introduced",
+    ))
+}
+
 fn total_active_refiner_weight(refiners: &RefinerSet, current_timestamp: u64) -> u128 {
     refiners
         .all_refiners()
@@ -1112,12 +1210,11 @@ fn format_action(action: &opolys_core::TransactionAction) -> String {
 
 /// Convert a Block to a JSON-serializable response.
 fn block_to_response(block: &Block, finalized_height: u64) -> BlockResponse {
-    let production_kind = match block.header.production_kind() {
-        Some(BlockProductionKind::Genesis) => "genesis",
-        Some(BlockProductionKind::Mined) => "mined",
-        Some(BlockProductionKind::Refined) => "refined",
-        None => "invalid",
-    };
+    let production_kind = block
+        .header
+        .production_kind()
+        .map(format_production_kind)
+        .unwrap_or("invalid");
     BlockResponse {
         version: block.header.version,
         height: block.header.height,
@@ -1135,6 +1232,45 @@ fn block_to_response(block: &Block, finalized_height: u64) -> BlockResponse {
 }
 
 // ─── Response types ─────────────────────────────────────────────────
+
+fn format_production_kind(kind: BlockProductionKind) -> &'static str {
+    match kind {
+        BlockProductionKind::Genesis => "genesis",
+        BlockProductionKind::Mined => "mined",
+        BlockProductionKind::Refined => "refined",
+    }
+}
+
+fn receipt_to_response(receipt: &BlockEconomicReceipt) -> BlockAssayCertificateResponse {
+    BlockAssayCertificateResponse {
+        height: receipt.height,
+        block_hash: receipt.block_hash.to_hex(),
+        production_kind: format_production_kind(receipt.production_kind).to_string(),
+        producer: receipt.producer.to_hex(),
+        difficulty: receipt.difficulty,
+        vein_yield_milli: receipt.vein_yield_milli,
+        vein_yield_multiplier: format!("{:.3}", receipt.vein_yield_milli as f64 / 1000.0),
+        gross_reward_flakes: receipt.gross_reward,
+        gross_reward_opl: format_flake(receipt.gross_reward),
+        mine_assay_burned_flakes: receipt.mine_assay_burned,
+        mine_assay_burned_opl: format_flake(receipt.mine_assay_burned),
+        miner_credit_flakes: receipt.miner_credit,
+        miner_credit_opl: format_flake(receipt.miner_credit),
+        successful_transaction_count: receipt.successful_transaction_count,
+        ordinary_fees_flakes: receipt.ordinary_fees,
+        ordinary_fees_opl: format_flake(receipt.ordinary_fees),
+        ordinary_fees_burned_flakes: receipt.ordinary_fees_burned,
+        ordinary_fees_burned_opl: format_flake(receipt.ordinary_fees_burned),
+        refiner_fee_income_flakes: receipt.refiner_fee_income,
+        refiner_fee_income_opl: format_flake(receipt.refiner_fee_income),
+        bond_unbond_assay_burned_flakes: receipt.bond_unbond_assay_burned,
+        bond_unbond_assay_burned_opl: format_flake(receipt.bond_unbond_assay_burned),
+        slashed_burned_flakes: receipt.slashed_burned,
+        slashed_burned_opl: format_flake(receipt.slashed_burned),
+        total_burned_flakes: receipt.total_burned,
+        total_burned_opl: format_flake(receipt.total_burned),
+    }
+}
 
 /// Full chain info response including supply statistics and refiner data.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1194,6 +1330,36 @@ pub struct BlockResponse {
     pub block_hash: String,
     /// True if this block cannot be reverted.
     pub finalized: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockAssayCertificateResponse {
+    pub height: u64,
+    pub block_hash: String,
+    pub production_kind: String,
+    pub producer: String,
+    pub difficulty: u64,
+    pub vein_yield_milli: u64,
+    pub vein_yield_multiplier: String,
+    pub gross_reward_flakes: u64,
+    pub gross_reward_opl: String,
+    pub mine_assay_burned_flakes: u64,
+    pub mine_assay_burned_opl: String,
+    pub miner_credit_flakes: u64,
+    pub miner_credit_opl: String,
+    pub successful_transaction_count: u64,
+    pub ordinary_fees_flakes: u64,
+    pub ordinary_fees_opl: String,
+    pub ordinary_fees_burned_flakes: u64,
+    pub ordinary_fees_burned_opl: String,
+    pub refiner_fee_income_flakes: u64,
+    pub refiner_fee_income_opl: String,
+    pub bond_unbond_assay_burned_flakes: u64,
+    pub bond_unbond_assay_burned_opl: String,
+    pub slashed_burned_flakes: u64,
+    pub slashed_burned_opl: String,
+    pub total_burned_flakes: u64,
+    pub total_burned_opl: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

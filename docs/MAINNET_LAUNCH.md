@@ -58,7 +58,7 @@ For the full launch rehearsal, use a fresh temporary data directory and complete
 4. Confirm restart loads the same genesis hash and current height.
 5. Start a mining node with a throwaway miner key, local RPC, and `--allow-solo-mining`.
 6. Mine at least one block.
-7. Query `opl_getChainInfo` and `opl_getBlockByHeight`.
+7. Query `opl_getChainInfo`, `opl_getBlockByHeight`, and `opl_getBlockAssayCertificate`.
 8. Send one wallet transaction over loopback RPC with `opl --rpc-api-key ... send`.
 9. Restart again and confirm the block, transaction, balances, and chain height persist.
 
