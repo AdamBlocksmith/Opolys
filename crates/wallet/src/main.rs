@@ -15,6 +15,7 @@ use clap::{Args, Parser};
 use opolys_core::{FLAKES_PER_OPL, FlakeAmount, MAINNET_CHAIN_ID};
 use opolys_wallet::{Bip39Mnemonic, TransactionSigner};
 use reqwest::Url;
+use std::path::PathBuf;
 
 const DEFAULT_RPC_URL: &str = "http://127.0.0.1:4171";
 
@@ -24,6 +25,13 @@ struct Cli {
     /// RPC server URL (default: http://127.0.0.1:4171)
     #[arg(long, default_value = DEFAULT_RPC_URL)]
     rpc_url: String,
+
+    /// API key for authenticated write RPC methods.
+    ///
+    /// The node requires this for opl_sendTransaction unless it was started
+    /// with --no-rpc-auth. Read-only wallet commands do not need it.
+    #[arg(long)]
+    rpc_api_key: Option<String>,
 
     #[command(subcommand)]
     command: Command,
@@ -55,6 +63,19 @@ enum Command {
         mnemonic: MnemonicInput,
 
         /// Account index to derive (default: 0)
+        #[arg(long, default_value = "0")]
+        account: u32,
+    },
+
+    /// Write the derived account seed to a node-compatible key file
+    ExportKeyFile {
+        #[command(flatten)]
+        mnemonic: MnemonicInput,
+
+        /// Output path for the 32-byte ed25519 seed file
+        output: PathBuf,
+
+        /// Account index (default: 0)
         #[arg(long, default_value = "0")]
         account: u32,
     },
@@ -222,6 +243,18 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             println!("{}", keypair.object_id().to_hex());
         }
 
+        Command::ExportKeyFile {
+            mnemonic,
+            output,
+            account,
+        } => {
+            let mnemonic = read_mnemonic(mnemonic)?;
+            let seed = mnemonic.to_seed("");
+            let keypair = seed.derive_keypair(account);
+            keypair.write_key_file(&output)?;
+            println!("{}", keypair.object_id().to_hex());
+        }
+
         Command::Balance { address } => {
             let client = reqwest::Client::new();
             let resp = client
@@ -236,7 +269,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .await?;
 
             let body: serde_json::Value = resp.json().await?;
-            if let Some(error) = body.get("error") {
+            if let Some(error) = rpc_error(&body) {
                 return Err(format!("RPC error: {}", error).into());
             }
             println!(
@@ -344,19 +377,20 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
         Command::Send { tx_hex } => {
             let client = reqwest::Client::new();
-            let resp = client
+            let request = client
                 .post(format!("{}/rpc", cli.rpc_url))
                 .json(&serde_json::json!({
                     "jsonrpc": "2.0",
                     "method": "opl_sendTransaction",
                     "params": [tx_hex],
                     "id": 1
-                }))
+                }));
+            let resp = with_rpc_api_key(request, cli.rpc_api_key.as_deref())
                 .send()
                 .await?;
 
             let body: serde_json::Value = resp.json().await?;
-            if let Some(error) = body.get("error") {
+            if let Some(error) = rpc_error(&body) {
                 return Err(format!("RPC error: {}", error).into());
             }
             println!(
@@ -367,6 +401,20 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+fn with_rpc_api_key(
+    request: reqwest::RequestBuilder,
+    api_key: Option<&str>,
+) -> reqwest::RequestBuilder {
+    match api_key {
+        Some(key) => request.header("X-Api-Key", key),
+        None => request,
+    }
+}
+
+fn rpc_error(body: &serde_json::Value) -> Option<&serde_json::Value> {
+    body.get("error").filter(|error| !error.is_null())
 }
 
 fn is_loopback_host(host: &str) -> bool {
@@ -412,6 +460,9 @@ async fn query_nonce(rpc_url: &str, address: String) -> Result<u64, Box<dyn std:
         .await?;
 
     let body: serde_json::Value = resp.json().await?;
+    if let Some(error) = rpc_error(&body) {
+        return Err(format!("RPC error while querying account nonce: {}", error).into());
+    }
     let result = body.get("result").ok_or("No result in RPC response")?;
     let nonce = result
         .get("nonce")
@@ -434,7 +485,7 @@ async fn query_suggested_fee(rpc_url: &str) -> Result<FlakeAmount, Box<dyn std::
         .await?;
 
     let body: serde_json::Value = resp.json().await?;
-    if let Some(error) = body.get("error") {
+    if let Some(error) = rpc_error(&body) {
         return Err(format!("RPC error while querying suggested fee: {}", error).into());
     }
     let result = body.get("result").ok_or("No result in RPC response")?;
@@ -483,6 +534,27 @@ mod tests {
         let cli = Cli::parse_from(["opl", "new"]);
 
         assert_eq!(cli.rpc_url, DEFAULT_RPC_URL);
+    }
+
+    #[test]
+    fn cli_accepts_rpc_api_key_for_write_calls() {
+        let cli = Cli::parse_from(["opl", "--rpc-api-key", "secret", "send", "00"]);
+
+        assert_eq!(cli.rpc_api_key.as_deref(), Some("secret"));
+    }
+
+    #[test]
+    fn export_key_file_accepts_output_path() {
+        let cli = Cli::parse_from(["opl", "export-key-file", "--from-env", "miner.key"]);
+
+        let Command::ExportKeyFile {
+            output, account, ..
+        } = cli.command
+        else {
+            panic!("expected export-key-file command");
+        };
+        assert_eq!(output, std::path::PathBuf::from("miner.key"));
+        assert_eq!(account, 0);
     }
 
     #[test]
@@ -539,5 +611,26 @@ mod tests {
         let err = validate_rpc_url("ws://localhost:4171").unwrap_err();
 
         assert!(err.contains("Unsupported RPC URL scheme"));
+    }
+
+    #[test]
+    fn rpc_error_ignores_null_error_field() {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "result": true,
+            "error": null
+        });
+
+        assert!(rpc_error(&body).is_none());
+    }
+
+    #[test]
+    fn rpc_error_detects_error_object() {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "error": { "code": -32000, "message": "nope" }
+        });
+
+        assert!(rpc_error(&body).is_some());
     }
 }

@@ -102,6 +102,7 @@ residual risks, and operator safety rules, see
 | `--no-bootstrap` | disabled | Skip DNS seeds and peer cache; only dial `--bootstrap` peers |
 | `--log-level` | `info` | Log level: trace, debug, info, warn, error |
 | `--mine` | disabled | Enable PoW mining loop |
+| `--allow-solo-mining` | disabled | Rehearsal-only override for mining without the peer-safety quorum |
 | `--refine` | disabled | Enable refiner block production |
 | `--key-file` | _(none)_ | Path to 32-byte ed25519 seed file |
 | `--genesis-params` | _(none)_ | Path to genesis ceremony JSON (required) |
@@ -109,6 +110,9 @@ residual risks, and operator safety rules, see
 | `--rpc-listen-addr` | `127.0.0.1` | RPC listen address (`0.0.0.0` to expose publicly) |
 | `--rpc-api-key` | random generated key | API key for write/mining RPC methods |
 | `--no-rpc-auth` | disabled | Explicitly disable API-key auth for write/mining RPC methods |
+
+Mainnet miners should not use `--allow-solo-mining`; it exists so launch
+rehearsals can mine on an isolated local node without three outbound peers.
 
 ### Wallet CLI (`opl`)
 
@@ -123,8 +127,11 @@ opl new
 # Show wallet address
 opl address --from-stdin
 
+# Export the same account as a node miner/refiner key file
+opl export-key-file --from-stdin ./miner.key
+
 # Check balance via RPC
-opl balance
+opl balance <hex_object_id>
 
 # Transfer OPL
 opl transfer --from-stdin <hex_object_id> <amount_opl> --fee <fee_opl>
@@ -136,7 +143,7 @@ opl bond --from-stdin <amount_opl> --fee <fee_opl>
 opl unbond --from-stdin <amount_opl> --fee <fee_opl>
 
 # Sign and broadcast a transaction
-opl send --signed-tx <hex>
+opl --rpc-api-key "$OPOLYS_RPC_API_KEY" send <signed_tx_hex>
 ```
 
 ### Run Tests

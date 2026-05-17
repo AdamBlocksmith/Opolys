@@ -105,6 +105,14 @@ pub struct Args {
     #[arg(long)]
     pub mine: bool,
 
+    /// Allow mining with fewer than the mainnet peer-safety minimum.
+    ///
+    /// This is only for isolated launch rehearsals or private lab networks.
+    /// Mainnet miners should leave this disabled so mining waits for enough
+    /// outbound peers to reduce eclipse risk.
+    #[arg(long)]
+    pub allow_solo_mining: bool,
+
     /// Disable the JSON-RPC server.
     ///
     /// By default, the node listens for JSON-RPC connections on rpc_port.
@@ -180,6 +188,8 @@ pub struct NodeConfig {
     pub no_bootstrap: bool,
     pub log_level: String,
     pub mine: bool,
+    /// Permit mining before the node has the normal outbound peer quorum.
+    pub allow_solo_mining: bool,
     pub no_rpc: bool,
     pub refine: bool,
     /// Path to the miner/refiner key file (32-byte ed25519 seed).
@@ -206,6 +216,7 @@ impl Default for NodeConfig {
             no_bootstrap: false,
             log_level: "info".to_string(),
             mine: false,
+            allow_solo_mining: false,
             no_rpc: false,
             refine: false,
             key_file: None,
@@ -946,6 +957,42 @@ fn credit_or_create_account(
         .map_err(|e| format!("Failed to credit account {}: {}", account.to_hex(), e))
 }
 
+fn ensure_local_producer_account(
+    accounts: &mut AccountStore,
+    miner_id: &ObjectId,
+    signing_key: Option<&ed25519_dalek::SigningKey>,
+) {
+    let Some(signing_key) = signing_key else {
+        return;
+    };
+    if miner_id.0.is_zero() {
+        return;
+    }
+
+    let public_key = signing_key.verifying_key().as_bytes().to_vec();
+    if accounts.get_account(miner_id).is_none() {
+        accounts
+            .create_account(miner_id.clone())
+            .unwrap_or_else(|e| panic!("Failed to create local producer account: {}", e));
+    }
+
+    let account = accounts
+        .get_account_mut(miner_id)
+        .expect("local producer account was just created");
+    match account.public_key.as_ref() {
+        Some(existing) if existing == &public_key => {}
+        Some(_) => {
+            panic!(
+                "Refusing to use key file: local producer account {} already has a different public key",
+                miner_id.to_hex()
+            );
+        }
+        None => {
+            account.public_key = Some(public_key);
+        }
+    }
+}
+
 impl OpolysNode {
     /// Create a new node, either loading persisted state from disk or
     /// initializing from genesis.
@@ -987,7 +1034,7 @@ impl OpolysNode {
         let data_path = config.chain_data_dir();
         let store_result = BlockchainStore::open(&data_path);
 
-        let (chain_state, accounts, refiners, store) = match store_result {
+        let (chain_state, mut accounts, refiners, store) = match store_result {
             Ok(store) => {
                 let store = Arc::new(store);
                 match store.load_chain_state() {
@@ -1060,6 +1107,8 @@ impl OpolysNode {
                 );
             }
         };
+
+        ensure_local_producer_account(&mut accounts, &miner_id, signing_key.as_ref());
 
         let banned_peers = load_ban_list_from_disk(&data_path.to_string_lossy());
 
@@ -2240,6 +2289,7 @@ mod tests {
             no_bootstrap: true,
             log_level: "warn".to_string(),
             mine: true,
+            allow_solo_mining: true,
             no_rpc: true,
             refine: false,
             key_file: Some(key_path.to_string_lossy().to_string()),
@@ -2259,6 +2309,27 @@ mod tests {
             accounts.create_account(node.miner_id.clone()).unwrap();
         }
         accounts.get_account_mut(&node.miner_id).unwrap().public_key = Some(public_key);
+    }
+
+    #[tokio::test]
+    async fn local_key_file_registers_producer_account_at_startup() {
+        let (config, _dir) = test_config();
+        let node = OpolysNode::new(config);
+        let accounts = node.accounts.read().await;
+        let account = accounts
+            .get_account(&node.miner_id)
+            .expect("local producer account should exist");
+        assert_eq!(
+            account.public_key.as_deref(),
+            Some(
+                node.signing_key
+                    .as_ref()
+                    .unwrap()
+                    .verifying_key()
+                    .as_bytes()
+                    .as_slice()
+            )
+        );
     }
 
     async fn activate_test_refiner(node: &OpolysNode) {

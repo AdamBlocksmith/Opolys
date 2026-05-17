@@ -56,11 +56,14 @@ For the full launch rehearsal, use a fresh temporary data directory and complete
 2. Start a node with `--allow-dry-run-genesis --no-bootstrap`.
 3. Stop and restart the node against the same data directory.
 4. Confirm restart loads the same genesis hash and current height.
-5. Start a mining node with a throwaway miner key and local RPC.
+5. Start a mining node with a throwaway miner key, local RPC, and `--allow-solo-mining`.
 6. Mine at least one block.
 7. Query `opl_getChainInfo` and `opl_getBlockByHeight`.
-8. Send one wallet transaction over loopback RPC.
+8. Send one wallet transaction over loopback RPC with `opl --rpc-api-key ... send`.
 9. Restart again and confirm the block, transaction, balances, and chain height persist.
+
+`--allow-solo-mining` bypasses the normal 3-outbound-peer mining quorum only
+for an isolated rehearsal. Do not use it for production mainnet mining.
 
 ## 3. Production Ceremony
 
@@ -93,6 +96,11 @@ Only launch if verification returns `RESULT: PASS` with no unexpected warnings.
 ## 4. Start Mainnet Nodes
 
 Refiner/miner key files are 32-byte ed25519 seeds. Keep them separate from the genesis operator signing key.
+The wallet can export the same mnemonic-derived account to a node key file:
+
+```bash
+opl export-key-file --from-stdin /secure/path/miner.key
+```
 
 Private node, no RPC:
 
@@ -127,6 +135,7 @@ Before announcing the network:
 - `genesis-ceremony verify` passes independently on another machine.
 - Nodes start from empty data directories and create `mainnet` storage.
 - RPC write/mining methods require an API key unless RPC is disabled.
+- Miners do not use `--allow-solo-mining` outside isolated rehearsal.
 - Bootstrap peers are explicit and reachable.
 - At least two independent machines can mine or verify blocks from the same genesis.
 - The threat model has been reviewed, including residual risks that require testnet time or an external audit rather than another local patch.

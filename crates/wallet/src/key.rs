@@ -21,7 +21,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 #[cfg(windows)]
-use std::process::Command;
+use std::process::{Command, Stdio};
 use zeroize::Zeroizing;
 
 /// Errors that can occur during wallet operations.
@@ -154,6 +154,15 @@ impl KeyPair {
     /// Serialize the 32-byte private key seed.
     pub fn to_bytes(&self) -> Zeroizing<[u8; 32]> {
         Zeroizing::new(*self.seed)
+    }
+
+    /// Write the 32-byte private seed to a node-compatible key file.
+    ///
+    /// The file is created with restrictive permissions and `create_new`, so
+    /// an existing key file is never overwritten accidentally.
+    pub fn write_key_file(&self, path: &Path) -> Result<(), WalletError> {
+        let key_bytes = self.to_bytes();
+        write_private_key_file(path, &key_bytes).map_err(|e| WalletError::IoError(e.to_string()))
     }
 
     /// Reconstruct a key pair from a 32-byte seed.
@@ -376,7 +385,12 @@ fn run_icacls<'a>(
     path: &Path,
     args: impl IntoIterator<Item = &'a str>,
 ) -> Result<(), std::io::Error> {
-    let status = Command::new("icacls.exe").arg(path).args(args).status()?;
+    let status = Command::new("icacls.exe")
+        .arg(path)
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
 
     if status.success() {
         Ok(())

@@ -57,6 +57,7 @@ Opolys does not claim to solve:
 ## Operator Rules
 
 - Never use `--allow-dry-run-genesis` with production data.
+- Never use `--allow-solo-mining` outside isolated launch rehearsal or a private lab.
 - Never use `--no-rpc-auth` on a public interface unless another layer authenticates requests.
 - Keep the genesis operator key separate from miner/refiner keys.
 - Verify the genesis attestation on a second machine before launch.

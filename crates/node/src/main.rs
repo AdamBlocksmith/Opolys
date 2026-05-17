@@ -236,6 +236,14 @@ mod tests {
     }
 
     #[test]
+    fn mining_peer_quorum_requires_peers_unless_rehearsal_override_is_explicit() {
+        assert!(!has_mining_peer_quorum(0, false));
+        assert!(!has_mining_peer_quorum(MIN_OUTBOUND_FOR_MINING - 1, false));
+        assert!(has_mining_peer_quorum(MIN_OUTBOUND_FOR_MINING, false));
+        assert!(has_mining_peer_quorum(0, true));
+    }
+
+    #[test]
     fn peer_cache_deduplicates_valid_addresses_and_drops_invalid() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(KNOWN_PEERS_FILE);
@@ -272,6 +280,10 @@ fn clamp_sync_request_range(start_height: u64, count: u64, current_height: u64) 
 
 fn should_attempt_refinement(height_before_wait: u64, height_after_wait: u64) -> bool {
     height_after_wait <= height_before_wait
+}
+
+fn has_mining_peer_quorum(outbound_count: usize, allow_solo_mining: bool) -> bool {
+    allow_solo_mining || outbound_count >= MIN_OUTBOUND_FOR_MINING
 }
 
 fn is_compatible_opolys_protocol(protocol_version: &str) -> bool {
@@ -340,6 +352,7 @@ async fn main() {
         no_bootstrap: args.no_bootstrap,
         log_level: args.log_level,
         mine: args.mine,
+        allow_solo_mining: args.allow_solo_mining,
         no_rpc: args.no_rpc,
         refine: args.refine,
         key_file: args.key_file,
@@ -354,6 +367,7 @@ async fn main() {
         rpc_port = config.rpc_port,
         data_dir = %config.chain_data_dir().display(),
         mining = config.mine,
+        solo_mining = config.allow_solo_mining,
         validating = config.refine,
         rpc = !config.no_rpc,
         "Starting Opolys node"
@@ -581,6 +595,7 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
         let mining_node = node.clone();
         let mining_broadcast = block_broadcast_tx.clone();
         let mining_attestations = attestation_broadcast_tx.clone();
+        let allow_solo_mining = config.allow_solo_mining;
         mining_handle = Some(tokio::spawn(async move {
             // Mining parameters:
             // - RETRY_BACKOFF_MS: sleep between failed attempts to avoid CPU spinning
@@ -597,7 +612,7 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
                 // If all peers are attacker-controlled, a miner could be fed a fake chain.
                 {
                     let outbound_count = mining_node.outbound_peers.read().await.len();
-                    if outbound_count < MIN_OUTBOUND_FOR_MINING {
+                    if !has_mining_peer_quorum(outbound_count, allow_solo_mining) {
                         tracing::warn!(
                             outbound = outbound_count,
                             needed = MIN_OUTBOUND_FOR_MINING,
@@ -606,6 +621,12 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
                         );
                         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
                         continue;
+                    } else if allow_solo_mining && outbound_count < MIN_OUTBOUND_FOR_MINING {
+                        tracing::warn!(
+                            outbound = outbound_count,
+                            needed = MIN_OUTBOUND_FOR_MINING,
+                            "Solo mining peer-safety quorum bypassed by --allow-solo-mining"
+                        );
                     }
                 }
 
