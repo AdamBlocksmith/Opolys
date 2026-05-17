@@ -2,7 +2,9 @@
 
 This document is the current economic map of Opolys. It explains where OPL
 comes from, where it goes, what burns, what pays refiners, and which equations
-drive each mechanism.
+drive each mechanism. For read-only gold observability, see
+[`GOLD_OBSERVABILITY.md`](GOLD_OBSERVABILITY.md). For the latest economics
+review, see [`ECONOMIC_AUDIT.md`](ECONOMIC_AUDIT.md).
 
 Opolys is designed as digital gold:
 

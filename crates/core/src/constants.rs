@@ -89,13 +89,8 @@ pub const EPOCH: u64 = 960;
 
 /// Approximate number of blocks per year.
 /// Derived from: 365.25 × 86400 / 90 = 350,640
-/// Used for annual supply attrition and system-derived epoch calculations.
+/// Used for system-derived annualized calculations.
 pub const BLOCKS_PER_YEAR: u64 = (365 * 86400 + 86400 / 4) / 90; // 350_640
-
-/// Legacy physical-gold attrition reference in permille (1.5% = 15 permille).
-/// Retained as a documented benchmark, not used as a fixed refiner or mining
-/// tax. Mine assay and bond/unbond assays are now derived from live chain state.
-pub const ANNUAL_ATTRITION_PERMILLE: u64 = 15;
 
 /// Number of blocks a refiner must wait before unbonded stake is returned.
 /// Equal to EPOCH (960 blocks = exactly 24 hours at 90s/block). Unbonding stake

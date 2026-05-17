@@ -92,7 +92,8 @@ residual risks, and operator safety rules, see
 [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md). For the full economic flow
 map and equations, see [`docs/ECONOMICS.md`](docs/ECONOMICS.md). For numeric
 inflation/burn examples, see [`docs/ECONOMIC_SCENARIOS.md`](docs/ECONOMIC_SCENARIOS.md)
-or run `python scripts/economics_model.py`.
+or run `python scripts/economics_model.py`. For Hallmarks, Assay Certificates,
+and the Mint Ledger, see [`docs/GOLD_OBSERVABILITY.md`](docs/GOLD_OBSERVABILITY.md).
 
 ### CLI Flags
 
