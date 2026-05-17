@@ -15,6 +15,12 @@ average_vein_yield = 1 + sqrt(pi) / 2 = about 1.8862269x
 mine_assay = gross_reward * sqrt(effective_difficulty) / EPOCH
 ```
 
+The same model can be reproduced with:
+
+```text
+python scripts/economics_model.py
+```
+
 The average vein-yield estimate comes from the distribution of valid PoW
 hashes. If `U` is uniformly distributed over `(0, 1]`, then
 `-ln(U)` is exponentially distributed and:
@@ -66,6 +72,38 @@ offset the miner's net new issuance?
 | 1,000 | 0.605599 OPL | 0.006056 OPL | 0.000606 OPL |
 | 5,000 | 0.116020 OPL | 0.001160 OPL | 0.000116 OPL |
 | 10,000 | 0.056100 OPL | 0.000561 OPL | 0.000056 OPL |
+
+## Mine Assay Curve
+
+The mine assay is:
+
+```text
+mine_assay = gross_reward * sqrt(difficulty) / EPOCH
+```
+
+Because gross reward falls as `1 / difficulty`, while the assay fraction rises
+as `sqrt(difficulty) / EPOCH`, the assay gets stronger as a percentage of each
+block but smaller in absolute OPL at high difficulty.
+
+| Difficulty | Gross / Block | Mine Assay / Block | Assay % | Miner Net / Block | Assay / Year |
+|---:|---:|---:|---:|---:|---:|
+| 7 | 89.461048 OPL | 0.246554 OPL | 0.276% | 89.214495 OPL | 86,452 OPL |
+| 25 | 25.049094 OPL | 0.130464 OPL | 0.521% | 24.918630 OPL | 45,746 OPL |
+| 100 | 6.262273 OPL | 0.065232 OPL | 1.042% | 6.197041 OPL | 22,873 OPL |
+| 500 | 1.252455 OPL | 0.029173 OPL | 2.329% | 1.223282 OPL | 10,229 OPL |
+| 1,000 | 0.626227 OPL | 0.020628 OPL | 3.294% | 0.605599 OPL | 7,233 OPL |
+| 5,000 | 0.125245 OPL | 0.009225 OPL | 7.366% | 0.116020 OPL | 3,235 OPL |
+| 10,000 | 0.062623 OPL | 0.006523 OPL | 10.417% | 0.056100 OPL | 2,287 OPL |
+| 50,000 | 0.012525 OPL | 0.002917 OPL | 23.292% | 0.009607 OPL | 1,023 OPL |
+
+Reading:
+
+- At launch difficulty, mine assay is intentionally light.
+- At high difficulty, the miner gives up a larger percentage of each block.
+- Net issuance still falls mostly because the gross reward shrinks with
+  difficulty.
+- High-difficulty deflation comes from low issuance plus fee burns, not mine
+  assay alone.
 
 ## Reading
 
