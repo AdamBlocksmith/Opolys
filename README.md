@@ -20,7 +20,7 @@ Opolys encodes these properties directly into consensus:
 | **Gold production rate is known** | BASE_REWARD derived from world gold production via genesis ceremony | 3,630 tonnes of gold are mined annually (~116.7 million troy ounces). Divided by 350,640 blocks per year = 332 OPL per block at minimum difficulty. BASE_REWARD is set from live LBMA/USGS/WGC data at the genesis ceremony. |
 | **Gold must be refined before use** | Difficulty must be overcome to earn reward | You can't just claim gold exists — you have to prove you did the work. EVO-OMAP requires a valid proof-of-work with at least D leading zero bits. |
 | **Gold held in vaults secures settlement** | Refiner staking by bonded collateral | Bonded OPL gives refiners block production rights when the chain stalls. Refiner weight is stake-only: no time-based yield, no age rent, and no reward just for waiting. |
-| **Gold can be unvaulted** | FIFO unbonding with 1-epoch delay | Unbonding OPL is like withdrawing gold from a vault. It takes time (960 blocks = exactly 24 hours). During the delay, stake remains slashable but no longer earns reward weight. The oldest deposits are withdrawn first. |
+| **Gold can be unvaulted** | FIFO unbonding with 1-epoch delay | Unbonding OPL is like withdrawing gold from a vault. It takes time (960 blocks = exactly 24 hours). During the delay, stake remains slashable but no longer counts for POR selection or finality weight. The oldest deposits are withdrawn first. |
 | **Gold bars are uniform** | Every OPL is identical. One sub-unit (Flake). No tokens, no assets, no governance tokens | There's no "pennyweight" gold or "grain" gold in Opolys. 1 OPL = 1,000,000 Flakes. Period. The chain tracks one asset. |
 | **Gold supply is self-regulating** | Natural equilibrium — no governance needed | When burns outpace rewards, supply shrinks. When mining is too easy, difficulty rises and issuance drops. The protocol never needs a vote. |
 
@@ -459,7 +459,7 @@ The minimum applies only to new bond entries. At launch, the floor is 1 OPL. At 
 entry_weight = stake
 ```
 
-Bond timestamps are kept for FIFO unbonding and provenance, but they do not increase reward weight, finality weight, or producer selection odds. Refiner economics are based on posted collateral, not time-based accrual.
+Bond timestamps are kept for FIFO unbonding and provenance, but they do not increase fee income, finality weight, or producer selection odds. Refiner economics are based on posted collateral, not time-based accrual.
 
 ### FIFO Unbonding
 
@@ -469,7 +469,7 @@ RefinerUnbond { amount: FlakeAmount }
 
 Oldest entries are consumed first. If the unbond amount exceeds an entry's stake, that entry is fully consumed and the remainder comes from the next entry. Residuals keep their original `bonded_at_timestamp` for FIFO/provenance. Entries with the same `bonded_at_timestamp` are auto-merged.
 
-After unbonding, stake enters the **unbonding queue** for `UNBONDING_DELAY_BLOCKS` (960 blocks = exactly 24 hours). During the delay, the unbonding stake no longer counts for active-set ranking, producer selection, refiner rewards, or finality weight, but it remains slashable until it matures. Once matured, it's automatically credited back to the sender.
+After unbonding, stake enters the **unbonding queue** for `UNBONDING_DELAY_BLOCKS` (960 blocks = exactly 24 hours). During the delay, the unbonding stake no longer counts for active-set ranking, producer selection, POR fee income, or finality weight, but it remains slashable until it matures. Once matured, it's automatically credited back to the sender.
 
 ### Refiner Activation
 
@@ -484,13 +484,13 @@ Newly bonded refiners start in `Bonding` status. They activate to `Active` after
 
 ### Block Producer Selection
 
-A deterministic seed derived from the previous block hash selects the refiner block producer after the chain stalls. Selection is weighted by active bonded stake:
+A deterministic seed derived from the previous block hash selects the refiner block producer after the chain stalls. Selection is weighted by active bonded stake and uses deterministic rejection sampling so `seed % total_weight` modulo bias cannot tilt producer choice:
 
 ```text
 chance_to_produce = refiner_total_stake / total_active_stake
 ```
 
-The same stake-only model is used for producer selection, refiner reward distribution, and finality confidence. Splitting one stake across many accounts does not create more aggregate producer weight.
+The same stake-only model is used for producer selection and finality confidence. Splitting one stake across many accounts does not create more aggregate producer weight.
 
 ---
 

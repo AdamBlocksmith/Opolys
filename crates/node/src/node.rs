@@ -2356,6 +2356,41 @@ mod tests {
         }
     }
 
+    fn signed_bond(
+        signing_key: &ed25519_dalek::SigningKey,
+        amount: FlakeAmount,
+        fee: FlakeAmount,
+        nonce: u64,
+    ) -> Transaction {
+        let sender = opolys_crypto::hash_to_object_id(signing_key.verifying_key().as_bytes());
+        let action = TransactionAction::RefinerBond { amount };
+        let tx_id_bytes =
+            borsh::to_vec(&(sender.clone(), action.clone(), fee, nonce, MAINNET_CHAIN_ID))
+                .expect("test transaction id should serialize");
+        let tx_id =
+            opolys_crypto::hash_to_object_id_with_domain(opolys_crypto::DOMAIN_TX_ID, &tx_id_bytes);
+        let payload = opolys_crypto::transaction_signing_payload(
+            &sender,
+            &action,
+            fee,
+            nonce,
+            MAINNET_CHAIN_ID,
+        )
+        .expect("test signing payload should serialize");
+        Transaction {
+            tx_id,
+            sender,
+            action,
+            fee,
+            signature: signing_key.sign(&payload).to_bytes().to_vec(),
+            signature_type: SIGNATURE_TYPE_ED25519,
+            nonce,
+            chain_id: MAINNET_CHAIN_ID,
+            data: vec![],
+            public_key: signing_key.verifying_key().as_bytes().to_vec(),
+        }
+    }
+
     fn dummy_slash_evidence(height: u64) -> DoubleSignEvidence {
         DoubleSignEvidence {
             producer: ObjectId(Hash::from_bytes([42u8; 32])),
@@ -3074,6 +3109,115 @@ mod tests {
             accounts.get_account(&user_id).unwrap().balance,
             opl_to_flake(10) - amount - fee,
             "sender pays amount plus ordinary fee"
+        );
+    }
+
+    #[tokio::test]
+    async fn mined_block_burns_transaction_fees() {
+        let (config, _dir) = test_config();
+        let node = OpolysNode::new(config);
+        register_test_miner_account(&node).await;
+        node.chain.write().await.current_difficulty = MIN_DIFFICULTY;
+
+        let user_key = ed25519_dalek::SigningKey::from_bytes(&[10u8; 32]);
+        let user_id = opolys_crypto::hash_to_object_id(user_key.verifying_key().as_bytes());
+        let recipient = opolys_crypto::hash_to_object_id(b"mined-fee-recipient");
+        let amount = opl_to_flake(1);
+        let fee = 2_345;
+        {
+            let mut accounts = node.accounts.write().await;
+            accounts.create_account(user_id.clone()).unwrap();
+            let account = accounts.get_account_mut(&user_id).unwrap();
+            account.public_key = Some(user_key.verifying_key().as_bytes().to_vec());
+            account.balance = opl_to_flake(10);
+        }
+        node.mempool
+            .write()
+            .await
+            .add_transaction(
+                signed_transfer(&user_key, recipient.clone(), amount, fee, 0),
+                fee,
+                0,
+                0,
+                MIN_FEE,
+                MAINNET_CHAIN_ID,
+            )
+            .unwrap();
+
+        let block = node
+            .mine_block(1_000_000)
+            .await
+            .expect("difficulty-1 mined block should be found");
+        assert!(block.header.is_mined());
+        node.apply_block(&block)
+            .await
+            .expect("mined block with fee-paying transfer should apply");
+
+        let chain = node.chain.read().await;
+        assert!(
+            chain.total_issued > 0,
+            "mined blocks issue newly extracted OPL"
+        );
+        assert!(
+            chain.total_burned >= fee,
+            "mined blocks burn ordinary transaction fees"
+        );
+        drop(chain);
+
+        let accounts = node.accounts.read().await;
+        assert_eq!(accounts.get_account(&recipient).unwrap().balance, amount);
+        assert_eq!(
+            accounts.get_account(&user_id).unwrap().balance,
+            opl_to_flake(10) - amount - fee
+        );
+    }
+
+    #[tokio::test]
+    async fn proof_of_refinement_burns_assays_but_pays_ordinary_fee() {
+        let (config, _dir) = test_config();
+        let node = OpolysNode::new(config);
+        register_test_miner_account(&node).await;
+        activate_test_refiner(&node).await;
+        node.chain.write().await.current_difficulty = MIN_DIFFICULTY;
+
+        let user_key = ed25519_dalek::SigningKey::from_bytes(&[12u8; 32]);
+        let user_id = opolys_crypto::hash_to_object_id(user_key.verifying_key().as_bytes());
+        let bond_amount = opl_to_flake(5);
+        let fee = 3_456;
+        {
+            let mut accounts = node.accounts.write().await;
+            accounts.create_account(user_id.clone()).unwrap();
+            let account = accounts.get_account_mut(&user_id).unwrap();
+            account.public_key = Some(user_key.verifying_key().as_bytes().to_vec());
+            account.balance = opl_to_flake(100);
+        }
+
+        let mut block = produce_test_refiner_block(&node).await;
+        block.transactions = vec![signed_bond(&user_key, bond_amount, fee, 0)];
+        refresh_body_roots_and_refiner_signature(&node, &mut block);
+
+        let burned_before = node.chain.read().await.total_burned;
+        node.apply_block(&block)
+            .await
+            .expect("POR block with bond assay should apply");
+
+        let chain = node.chain.read().await;
+        assert_eq!(chain.total_issued, 0, "POR blocks do not issue OPL");
+        assert!(
+            chain.total_burned > burned_before,
+            "bond assay burns even inside a POR block"
+        );
+        drop(chain);
+
+        let accounts = node.accounts.read().await;
+        assert_eq!(
+            accounts.get_account(&node.miner_id).unwrap().balance,
+            fee,
+            "POR producer receives the ordinary fee, not the assay"
+        );
+        assert!(
+            accounts.get_account(&user_id).unwrap().balance < opl_to_flake(100) - bond_amount - fee,
+            "sender paid the bond amount, ordinary fee, and burned assay"
         );
     }
 

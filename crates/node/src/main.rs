@@ -229,6 +229,13 @@ mod tests {
     }
 
     #[test]
+    fn refinement_window_resets_when_any_block_arrives() {
+        assert!(should_attempt_refinement(10, 10));
+        assert!(!should_attempt_refinement(10, 11));
+        assert!(!should_attempt_refinement(10, 42));
+    }
+
+    #[test]
     fn peer_cache_deduplicates_valid_addresses_and_drops_invalid() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(KNOWN_PEERS_FILE);
@@ -261,6 +268,10 @@ fn clamp_sync_request_range(start_height: u64, count: u64, current_height: u64) 
     let available = current_height.saturating_sub(start).saturating_add(1);
     let count = count.min(MAX_SYNC_BLOCKS).min(available);
     (start, count)
+}
+
+fn should_attempt_refinement(height_before_wait: u64, height_after_wait: u64) -> bool {
+    height_after_wait <= height_before_wait
 }
 
 fn is_compatible_opolys_protocol(protocol_version: &str) -> bool {
@@ -686,7 +697,7 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
                 };
 
                 // A new block arrived (from miner or peer) — no need to produce
-                if height_after > height_before {
+                if !should_attempt_refinement(height_before, height_after) {
                     continue;
                 }
 

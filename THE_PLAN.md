@@ -339,7 +339,7 @@ Each `BondEntry` has its own timestamp for FIFO unbonding and provenance:
 entry_weight = entry.stake
 ```
 
-Bond age does not increase reward weight, finality weight, or producer selection odds. Refiner economics are based on posted collateral, not time-based accrual.
+Bond age does not increase fee income, finality weight, or producer selection odds. Refiner economics are based on posted collateral, not time-based accrual.
 
 ### Refiner vs Miner Block Reward
 
@@ -362,7 +362,7 @@ Stake-weighted sampling from active refiners. The seed is derived from the first
 chance_to_produce = refiner_total_stake / total_active_stake
 ```
 
-The same stake-only model is used for producer selection, refiner reward distribution, and finality confidence. Linear stake weighting is split-neutral: one 10,000 OPL refiner and ten 1,000 OPL refiners have the same aggregate producer weight.
+The same stake-only model is used for producer selection and finality confidence. Linear stake weighting is split-neutral: one 10,000 OPL refiner and ten 1,000 OPL refiners have the same aggregate producer weight. Producer tickets use deterministic rejection sampling rather than `seed % total_weight`, so modulo bias is not part of POR selection.
 
 ### Minimum Bond
 
@@ -424,7 +424,7 @@ Withdraws `amount` OPL using **FIFO order** — oldest entries consumed first:
 
 Unbonded stake enters the **unbonding queue** — a list of `PendingUnbond` entries. After `UNBONDING_DELAY_BLOCKS` (960 blocks = exactly 24 hours), matured entries are automatically credited back to the sender's account.
 
-Unbonding stake stops counting for active-set ranking, producer selection, refiner rewards, and finality weight immediately. It remains slashable while it is still in the unbonding queue, mirroring gold that has left the vault ledger but is still in custody during withdrawal.
+Unbonding stake stops counting for active-set ranking, producer selection, POR fee income, and finality weight immediately. It remains slashable while it is still in the unbonding queue, mirroring gold that has left the vault ledger but is still in custody during withdrawal.
 
 ---
 
@@ -1460,7 +1460,7 @@ All comments updated from "1,024 blocks/epoch" to "960 blocks/epoch". Test param
 48. DONE Attestation collection in block builder
 49. DONE Attestation verification in `apply_block`
 50. DONE Reliability score: `consecutive_correct_attestations` in `RefinerInfo`
-51. BY DESIGN: no attestation multiplier in refiner reward distribution
+51. BY DESIGN: no attestation multiplier in POR producer selection or fee income
 52. DONE Block confidence score derived on-chain
 53. DONE `opl_getBlockConfidence` RPC endpoint
 54. DONE Refiner-block attestation-weighted `finalized_height`

@@ -7,7 +7,7 @@
 //! `weight = Σ entry.stake`
 //!
 //! Bond timestamps are retained for FIFO unbonding and provenance, but bond age
-//! does not increase reward weight, finality weight, or producer selection odds.
+//! does not increase fee income, finality weight, or producer selection odds.
 //!
 //! **Unbonding is FIFO** — when a refiner unbonds, the oldest entries are
 //! consumed first. If the unbond amount exceeds an entry's stake, that entry
@@ -21,8 +21,11 @@
 //! all entries is burned (not confiscated to any treasury), permanently
 //! removing it from circulation.
 //!
-//! Block producers are selected by total-stake-weighted sampling among Active
-//! refiners, where the seed is derived from on-chain entropy.
+//! Proof-of-Refinement block producers are selected by total-stake-weighted
+//! sampling among Active refiners, where the seed is derived from on-chain
+//! entropy. Selection uses deterministic rejection sampling rather than
+//! `seed % total_stake`, avoiding modulo bias in consensus-critical producer
+//! choice.
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use opolys_core::{EPOCH, FLAKES_PER_OPL, FlakeAmount, ObjectId, OpolysError, RefinerStatus};
@@ -838,6 +841,24 @@ mod tests {
 
     fn test_id(seed: &[u8]) -> ObjectId {
         hash_to_object_id(seed)
+    }
+
+    #[test]
+    fn producer_ticket_rejects_modulo_bias_tail() {
+        // With upper=3, u64::MAX is the one value outside the unbiased zone.
+        // Plain `seed % 3` would return 0. Rejection sampling mixes once and
+        // returns the unbiased replacement ticket instead.
+        assert_eq!(u64::MAX % 3, 0);
+        assert_eq!(
+            uniform_amount_from_seed(u64::MAX, 3),
+            Some(mix_seed(u64::MAX) % 3)
+        );
+        assert_eq!(uniform_amount_from_seed(u64::MAX, 3), Some(2));
+    }
+
+    #[test]
+    fn producer_ticket_rejects_empty_weight() {
+        assert_eq!(uniform_amount_from_seed(42, 0), None);
     }
 
     #[test]
