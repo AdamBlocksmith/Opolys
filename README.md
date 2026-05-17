@@ -90,7 +90,8 @@ For the full ceremony, verification, and launch checklist, see
 [`docs/MAINNET_LAUNCH.md`](docs/MAINNET_LAUNCH.md). For explicit assumptions,
 residual risks, and operator safety rules, see
 [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md). For the full economic flow
-map and equations, see [`docs/ECONOMICS.md`](docs/ECONOMICS.md).
+map and equations, see [`docs/ECONOMICS.md`](docs/ECONOMICS.md). For numeric
+inflation/burn examples, see [`docs/ECONOMIC_SCENARIOS.md`](docs/ECONOMIC_SCENARIOS.md).
 
 ### CLI Flags
 
