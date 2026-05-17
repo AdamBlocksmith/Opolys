@@ -245,7 +245,8 @@ pub const MAX_BLOCK_SIZE_BYTES: usize = 10_485_760;
 /// Used by the two-state fee model: when congested, suggested_fee is multiplied
 /// by this ratio, reflecting that your transaction must outcompete ~10 blocks
 /// worth of pending data to be included in the next block.
-pub const CAPACITY_RATIO: u64 = 10;
+/// The value is computed from the byte limits, not manually assigned.
+pub const CAPACITY_RATIO: u64 = MEMPOOL_MAX_SIZE_BYTES.div_ceil(MAX_BLOCK_SIZE_BYTES) as u64;
 
 /// Congestion threshold: fraction of mempool that must be occupied before
 /// entering rush mode. Derived from 1/CAPACITY_RATIO — when there's more than
@@ -308,6 +309,16 @@ mod tests {
     #[test]
     fn min_fee_is_one_flake() {
         assert_eq!(MIN_FEE, 1);
+    }
+
+    #[test]
+    fn capacity_ratio_is_derived_from_mempool_and_block_capacity() {
+        assert_eq!(
+            CAPACITY_RATIO,
+            MEMPOOL_MAX_SIZE_BYTES.div_ceil(MAX_BLOCK_SIZE_BYTES) as u64
+        );
+        assert_eq!(CAPACITY_RATIO, 10);
+        assert_eq!(CONGESTION_THRESHOLD_PERMILLE, 100);
     }
 
     #[test]

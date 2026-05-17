@@ -154,7 +154,7 @@ enters rush mode:
 
 ```text
 effective_min_fee = suggested_fee * CAPACITY_RATIO
-CAPACITY_RATIO = 10
+CAPACITY_RATIO = ceil(MEMPOOL_MAX_SIZE_BYTES / MAX_BLOCK_SIZE_BYTES)
 ```
 
 Example response over 20 blocks:

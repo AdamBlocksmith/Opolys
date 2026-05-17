@@ -207,7 +207,8 @@ schedule beyond the one-Flake minimum.
 
 ```text
 current_average_fee = previous_block_fee_signal / successful_transaction_count
-window = CAPACITY_RATIO = 10
+CAPACITY_RATIO = ceil(MEMPOOL_MAX_SIZE_BYTES / MAX_BLOCK_SIZE_BYTES)
+window = CAPACITY_RATIO
 suggested_fee = max(MIN_FEE, (current_average_fee + 9 * previous_suggested_fee) / 10)
 ```
 
