@@ -74,9 +74,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\launch_rehearsal.ps1
 
 The script creates a dry-run ceremony, verifies it, starts an isolated mining
 node, mines blocks, submits a wallet transfer over authenticated loopback RPC,
-bonds the local key as a refiner, records its hallmark, restarts the node, and
-confirms the height, recipient balance, and refiner stake persist. Its artifacts
-are written under `launch-rehearsal-local/`, which is ignored by git.
+bonds the local key as a refiner using the live minimum reported by
+`opl_getChainInfo` plus a small inclusion buffer, records its hallmark, restarts
+the node, and confirms the height, recipient balance, and refiner stake persist.
+Its artifacts are written under `launch-rehearsal-local/`, which is ignored by
+git.
 If a transfer is submitted just after the miner has already assembled a block
 candidate, inclusion may take one additional mined block. The rehearsal waits
 for the recipient balance instead of assuming the next block must contain it.

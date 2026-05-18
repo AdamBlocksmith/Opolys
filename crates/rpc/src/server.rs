@@ -394,6 +394,8 @@ async fn handle_get_chain_info(state: &RpcState) -> Result<serde_json::Value, Js
         bonding_refiners: refiners.total_bonding_refiners(),
         waiting_refiners: refiners.total_waiting_refiners(),
         max_active_refiners: RefinerSet::active_refiner_limit(chain.total_issued),
+        minimum_refiner_bond_flakes: RefinerSet::minimum_bond_stake(chain.total_issued),
+        minimum_refiner_bond_opl: format_flake(RefinerSet::minimum_bond_stake(chain.total_issued)),
         bonded_stake: refiners.total_bonded_stake(),
         protocol_version: opolys_core::NETWORK_PROTOCOL_VERSION.to_string(),
         finalized_height: chain.finalized_height,
@@ -1416,6 +1418,9 @@ pub struct ChainInfoResponse {
     pub waiting_refiners: usize,
     /// Dynamic protocol bound on simultaneously Active refiners.
     pub max_active_refiners: usize,
+    /// Dynamic minimum required for each new refiner bond entry.
+    pub minimum_refiner_bond_flakes: u64,
+    pub minimum_refiner_bond_opl: String,
     pub bonded_stake: u64,
     pub protocol_version: String,
     /// Height of the most recently finalized block (cannot be reverted).

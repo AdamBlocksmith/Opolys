@@ -609,7 +609,7 @@ JSON-RPC 2.0 server on port 4171 (default: `listen_port + 1`).
 | Method | Parameters | Description |
 |---|---|---|
 | `opl_getBlockHeight` | _(none)_ | Current chain height |
-| `opl_getChainInfo` | _(none)_ | Chain statistics (height, difficulty, supply, refiners, suggested_fee) |
+| `opl_getChainInfo` | _(none)_ | Chain statistics (height, difficulty, supply, refiners, suggested_fee, current minimum refiner bond) |
 | `opl_getNetworkVersion` | _(none)_ | Protocol version string |
 | `opl_getBalance` | `["object_id_hex"]` | Account balance (flakes and OPL) |
 | `opl_getAccount` | `["object_id_hex"]` | Full account details (balance, nonce, public_key) |

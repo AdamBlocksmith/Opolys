@@ -5,8 +5,6 @@ param(
     [int]$RestartPort = 48172,
     [int]$RestartRpcPort = 48173,
     [string]$ApiKey = "rehearsal-local-api-key-2026",
-    [string]$RefinerBondOpl = "20",
-    [uint64]$RefinerBondMinFlakes = 20000000,
     [int]$MineTimeoutSeconds = 900,
     [int]$RestartTimeoutSeconds = 90
 )
@@ -42,6 +40,14 @@ function Stop-RehearsalProcess {
         Stop-Process -Id $Process.Id -Force
         $Process.WaitForExit()
     }
+}
+
+function Convert-FlakesToOplString {
+    param([uint64]$Flakes)
+
+    $Whole = [math]::Floor($Flakes / 1000000)
+    $Fraction = $Flakes % 1000000
+    "$Whole.$($Fraction.ToString('D6'))"
 }
 
 $Root = (Resolve-Path ".").Path
@@ -156,6 +162,11 @@ try {
     }
 
     Write-Host "STEP 8: bond local refiner"
+    $BondInfo = Invoke-Rpc -RpcUrl $RpcUrl -Method "opl_getChainInfo" -Id 26
+    $RefinerBondMinFlakes = [uint64]$BondInfo.result.minimum_refiner_bond_flakes
+    $RefinerBondFlakes = $RefinerBondMinFlakes + 10000000
+    $RefinerBondOpl = Convert-FlakesToOplString -Flakes $RefinerBondFlakes
+    Write-Host "minimum_refiner_bond=$($BondInfo.result.minimum_refiner_bond_opl); rehearsal_bond=$RefinerBondOpl OPL"
     $BondTxHex = (cargo run -p opolys-wallet -- --rpc-url $RpcUrl bond --from-env $RefinerBondOpl --fee 0.000001 | Select-Object -Last 1).Trim()
     cargo run -p opolys-wallet -- --rpc-url $RpcUrl --rpc-api-key $ApiKey send $BondTxHex |
         Tee-Object -FilePath (Join-Path $RunRootPath "bond-send.out")

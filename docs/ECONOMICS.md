@@ -266,6 +266,13 @@ The bond remains owned by the refiner, but it is locked and slashable.
 New bond entries must meet the dynamic minimum. Residual entries created by
 FIFO unbond splitting are not forced to top up.
 
+Operators can read the current requirement from `opl_getChainInfo`:
+
+```text
+minimum_refiner_bond_flakes
+minimum_refiner_bond_opl
+```
+
 Gold analogy:
 
 Bonding is placing good-delivery collateral in the vault. As the economy gets
