@@ -50,6 +50,113 @@ function Convert-FlakesToOplString {
     "$Whole.$($Fraction.ToString('D6'))"
 }
 
+function Test-EconomicBooks {
+    param(
+        [string]$RpcUrl,
+        [object]$MintLedger,
+        [string]$OutputPath
+    )
+
+    $Supply = Invoke-Rpc -RpcUrl $RpcUrl -Method "opl_getSupply" -Id 31
+    $Ledger = $MintLedger.result
+    [uint64]$Height = [uint64]$Ledger.height
+
+    if ([uint64]$Supply.result.total_issued_flakes -ne [uint64]$Ledger.total_issued_flakes) {
+        throw "Economic invariant failed: supply total_issued disagrees with Mint Ledger"
+    }
+    if ([uint64]$Supply.result.total_burned_flakes -ne [uint64]$Ledger.total_burned_flakes) {
+        throw "Economic invariant failed: supply total_burned disagrees with Mint Ledger"
+    }
+    if ([uint64]$Supply.result.circulating_supply_flakes -ne [uint64]$Ledger.circulating_supply_flakes) {
+        throw "Economic invariant failed: supply circulating disagrees with Mint Ledger"
+    }
+
+    [uint64]$ExpectedCirculating = [uint64]$Ledger.total_issued_flakes - [uint64]$Ledger.total_burned_flakes
+    if ([uint64]$Ledger.circulating_supply_flakes -ne $ExpectedCirculating) {
+        throw "Economic invariant failed: circulating supply is not issued minus burned"
+    }
+
+    [uint64]$LedgerIssued = [uint64]$Ledger.total_genesis_issued_flakes + [uint64]$Ledger.total_mined_gross_reward_flakes
+    if ([uint64]$Ledger.total_issued_flakes -ne $LedgerIssued) {
+        throw "Economic invariant failed: total issued is not genesis issued plus mined gross reward"
+    }
+
+    [uint64]$LedgerBurned = [uint64]$Ledger.total_mine_assay_burned_flakes +
+        [uint64]$Ledger.total_ordinary_fees_burned_flakes +
+        [uint64]$Ledger.total_bond_unbond_assay_burned_flakes +
+        [uint64]$Ledger.total_slashed_stake_burned_flakes
+    if ([uint64]$Ledger.total_burned_flakes -ne $LedgerBurned) {
+        throw "Economic invariant failed: total burned is not the sum of burn categories"
+    }
+
+    [uint64]$ReceiptGross = 0
+    [uint64]$ReceiptMineAssay = 0
+    [uint64]$ReceiptFeesBurned = 0
+    [uint64]$ReceiptBondAssay = 0
+    [uint64]$ReceiptSlashed = 0
+    [uint64]$ReceiptRefinerIncome = 0
+    [uint64]$ReceiptMinedBlocks = 0
+    [uint64]$ReceiptRefinedBlocks = 0
+    [uint64]$ReceiptSuccessfulTransactions = 0
+
+    for ([uint64]$H = 1; $H -le $Height; $H++) {
+        $Receipt = Invoke-Rpc -RpcUrl $RpcUrl -Method "opl_getBlockAssayCertificate" -Params @($H) -Id 32
+        $R = $Receipt.result
+        $ReceiptGross += [uint64]$R.gross_reward_flakes
+        $ReceiptMineAssay += [uint64]$R.mine_assay_burned_flakes
+        $ReceiptFeesBurned += [uint64]$R.ordinary_fees_burned_flakes
+        $ReceiptBondAssay += [uint64]$R.bond_unbond_assay_burned_flakes
+        $ReceiptSlashed += [uint64]$R.slashed_burned_flakes
+        $ReceiptRefinerIncome += [uint64]$R.refiner_fee_income_flakes
+        $ReceiptSuccessfulTransactions += [uint64]$R.successful_transaction_count
+        if ($R.production_kind -eq "mined") {
+            $ReceiptMinedBlocks += 1
+        }
+        if ($R.production_kind -eq "refined") {
+            $ReceiptRefinedBlocks += 1
+        }
+    }
+
+    if ($ReceiptGross -ne [uint64]$Ledger.total_mined_gross_reward_flakes) {
+        throw "Economic invariant failed: receipt gross reward sum disagrees with Mint Ledger"
+    }
+    if ($ReceiptMineAssay -ne [uint64]$Ledger.total_mine_assay_burned_flakes) {
+        throw "Economic invariant failed: receipt mine assay sum disagrees with Mint Ledger"
+    }
+    if ($ReceiptFeesBurned -ne [uint64]$Ledger.total_ordinary_fees_burned_flakes) {
+        throw "Economic invariant failed: receipt burned fee sum disagrees with Mint Ledger"
+    }
+    if ($ReceiptBondAssay -ne [uint64]$Ledger.total_bond_unbond_assay_burned_flakes) {
+        throw "Economic invariant failed: receipt bond/unbond assay sum disagrees with Mint Ledger"
+    }
+    if ($ReceiptSlashed -ne [uint64]$Ledger.total_slashed_stake_burned_flakes) {
+        throw "Economic invariant failed: receipt slashed burn sum disagrees with Mint Ledger"
+    }
+    if ($ReceiptRefinerIncome -ne [uint64]$Ledger.total_refiner_fee_income_flakes) {
+        throw "Economic invariant failed: receipt refiner income sum disagrees with Mint Ledger"
+    }
+    if ($ReceiptMinedBlocks -ne [uint64]$Ledger.total_mined_blocks) {
+        throw "Economic invariant failed: receipt mined block count disagrees with Mint Ledger"
+    }
+    if ($ReceiptRefinedBlocks -ne [uint64]$Ledger.total_refined_blocks) {
+        throw "Economic invariant failed: receipt refined block count disagrees with Mint Ledger"
+    }
+    if ($ReceiptSuccessfulTransactions -ne [uint64]$Ledger.total_successful_transactions) {
+        throw "Economic invariant failed: receipt successful transaction count disagrees with Mint Ledger"
+    }
+
+    [pscustomobject]@{
+        height = $Height
+        total_issued_flakes = [uint64]$Ledger.total_issued_flakes
+        total_burned_flakes = [uint64]$Ledger.total_burned_flakes
+        circulating_supply_flakes = [uint64]$Ledger.circulating_supply_flakes
+        receipt_mined_blocks = $ReceiptMinedBlocks
+        receipt_refined_blocks = $ReceiptRefinedBlocks
+        receipt_successful_transactions = $ReceiptSuccessfulTransactions
+        result = "PASS"
+    } | ConvertTo-Json -Depth 8 | Out-File $OutputPath
+}
+
 $Root = (Resolve-Path ".").Path
 $RunRootPath = Join-Path $Root $RunRoot
 $GenesisDir = Join-Path $RunRootPath "genesis-dry-run"
@@ -230,6 +337,7 @@ try {
     if ([uint64]$WalletMintLedgerBefore.total_issued_flakes -ne [uint64]$MintLedgerBefore.result.total_issued_flakes) {
         throw "Wallet ledger command disagrees with Mint Ledger RPC before restart"
     }
+    Test-EconomicBooks -RpcUrl $RpcUrl -MintLedger $MintLedgerBefore -OutputPath (Join-Path $RunRootPath "economic-invariants-before-restart.json")
     $InfoBefore.result | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "chain-before-restart.json")
     $MintLedgerBefore.result | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "mint-ledger-before-restart.json")
     $WalletMintLedgerBefore | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "wallet.mint-ledger-before-restart.json")
@@ -292,6 +400,7 @@ try {
     if ([uint64]$WalletMintLedgerAfter.total_issued_flakes -ne [uint64]$MintLedgerAfter.result.total_issued_flakes) {
         throw "Wallet ledger command disagrees with Mint Ledger RPC after restart"
     }
+    Test-EconomicBooks -RpcUrl $RestartRpcUrl -MintLedger $MintLedgerAfter -OutputPath (Join-Path $RunRootPath "economic-invariants-after-restart.json")
     $InfoAfter.result | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "chain-after-restart.json")
     $BalanceAfter.result | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "recipient-after-restart.json")
     $TipAssayAfter.result | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "tip.assay-after-restart.json")

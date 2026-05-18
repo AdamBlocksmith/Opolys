@@ -79,8 +79,9 @@ bonds the local key as a refiner using the live minimum reported by
 `bond-minimum` output agrees, records the refiner hallmark through both raw RPC
 and `opl refiner`, records assay certificates through both raw RPC and
 `opl assay`, records the Mint Ledger through both raw RPC and `opl ledger`,
-restarts the node, and confirms the height, recipient balance, assay
-certificate, mint ledger, and refiner stake persist. Its artifacts are written under
+checks the economic books against supply and block assay receipts, restarts the
+node, and confirms the height, recipient balance, assay certificate, mint
+ledger, economic invariants, and refiner stake persist. Its artifacts are written under
 `launch-rehearsal-local/`, which is ignored by git.
 If a transfer is submitted just after the miner has already assembled a block
 candidate, inclusion may take one additional mined block. The rehearsal waits
