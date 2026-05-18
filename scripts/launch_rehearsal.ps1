@@ -163,7 +163,13 @@ try {
 
     Write-Host "STEP 8: bond local refiner"
     $BondInfo = Invoke-Rpc -RpcUrl $RpcUrl -Method "opl_getChainInfo" -Id 26
+    $WalletBondMinimumJson = (cargo run -p opolys-wallet -- --rpc-url $RpcUrl bond-minimum | Out-String).Trim()
+    $WalletBondMinimum = $WalletBondMinimumJson | ConvertFrom-Json
     $RefinerBondMinFlakes = [uint64]$BondInfo.result.minimum_refiner_bond_flakes
+    if ([uint64]$WalletBondMinimum.minimum_refiner_bond_flakes -ne $RefinerBondMinFlakes) {
+        throw "Wallet bond-minimum disagrees with opl_getChainInfo"
+    }
+    $WalletBondMinimum | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "wallet.bond-minimum.json")
     $RefinerBondFlakes = $RefinerBondMinFlakes + 10000000
     $RefinerBondOpl = Convert-FlakesToOplString -Flakes $RefinerBondFlakes
     Write-Host "minimum_refiner_bond=$($BondInfo.result.minimum_refiner_bond_opl); rehearsal_bond=$RefinerBondOpl OPL"
@@ -199,7 +205,16 @@ try {
     }
 
     $RefinersBefore = Invoke-Rpc -RpcUrl $RpcUrl -Method "opl_getRefiners" -Id 24
+    $WalletHallmarkBeforeJson = (cargo run -p opolys-wallet -- --rpc-url $RpcUrl refiner $MinerAddress | Out-String).Trim()
+    $WalletHallmarkBefore = $WalletHallmarkBeforeJson | ConvertFrom-Json
+    if ([uint64]$WalletHallmarkBefore.total_stake_flakes -lt $RefinerBondMinFlakes) {
+        throw "Wallet refiner command did not show the bonded stake before restart"
+    }
+    if ($WalletHallmarkBefore.status -ne $HallmarkBefore.result.status) {
+        throw "Wallet refiner status disagrees with Hallmark RPC before restart"
+    }
     $HallmarkBefore.result | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "refiner.hallmark-before-restart.json")
+    $WalletHallmarkBefore | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "wallet.refiner-before-restart.json")
     $RefinersBefore.result | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "refiners-before-restart.json")
 
     $InfoBefore = Invoke-Rpc -RpcUrl $RpcUrl -Method "opl_getChainInfo" -Id 5
@@ -247,6 +262,8 @@ try {
     $BalanceAfter = Invoke-Rpc -RpcUrl $RestartRpcUrl -Method "opl_getBalance" -Params @($RecipientAddress) -Id 7
     $TipAssayAfter = Invoke-Rpc -RpcUrl $RestartRpcUrl -Method "opl_getBlockAssayCertificate" -Params @([uint64]$InfoAfter.result.height) -Id 21
     $HallmarkAfter = Invoke-Rpc -RpcUrl $RestartRpcUrl -Method "opl_getRefinerHallmark" -Params @($MinerAddress) -Id 25
+    $WalletHallmarkAfterJson = (cargo run -p opolys-wallet -- --rpc-url $RestartRpcUrl refiner $MinerAddress | Out-String).Trim()
+    $WalletHallmarkAfter = $WalletHallmarkAfterJson | ConvertFrom-Json
     if ([uint64]$TipAssayAfter.result.height -ne [uint64]$InfoAfter.result.height) {
         throw "Tip assay certificate returned wrong height after restart"
     }
@@ -254,6 +271,7 @@ try {
     $BalanceAfter.result | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "recipient-after-restart.json")
     $TipAssayAfter.result | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "tip.assay-after-restart.json")
     $HallmarkAfter.result | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "refiner.hallmark-after-restart.json")
+    $WalletHallmarkAfter | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "wallet.refiner-after-restart.json")
     Write-Host "AFTER_RESTART_HEIGHT=$($InfoAfter.result.height)"
     Write-Host "AFTER_RESTART_RECIPIENT_FLAKES=$($BalanceAfter.result.balance_flakes)"
     Write-Host "AFTER_RESTART_REFINER_STATUS=$($HallmarkAfter.result.status)"
@@ -264,6 +282,12 @@ try {
     }
     if ([uint64]$HallmarkAfter.result.total_stake_flakes -lt $RefinerBondMinFlakes) {
         throw "Refiner bond missing after restart"
+    }
+    if ([uint64]$WalletHallmarkAfter.total_stake_flakes -lt $RefinerBondMinFlakes) {
+        throw "Wallet refiner command did not show the bonded stake after restart"
+    }
+    if ($WalletHallmarkAfter.status -ne $HallmarkAfter.result.status) {
+        throw "Wallet refiner status disagrees with Hallmark RPC after restart"
     }
 }
 finally {
