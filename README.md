@@ -149,6 +149,9 @@ opl balance <hex_object_id>
 # Transfer OPL
 opl transfer --from-stdin <hex_object_id> <amount_opl> --fee <fee_opl>
 
+# Check the live minimum refiner bond
+opl bond-minimum
+
 # Bond stake as refiner
 opl bond --from-stdin <amount_opl> --fee <fee_opl>
 

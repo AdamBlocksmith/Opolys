@@ -120,6 +120,15 @@ The wallet can export the same mnemonic-derived account to a node key file:
 opl export-key-file --from-stdin /secure/path/miner.key
 ```
 
+Before bonding a refiner, query the live dynamic minimum:
+
+```bash
+opl --rpc-url http://127.0.0.1:4171 bond-minimum
+```
+
+Bond above the minimum when blocks may arrive before inclusion, because the
+minimum can rise as `total_issued` increases.
+
 Private node, no RPC:
 
 ```bash

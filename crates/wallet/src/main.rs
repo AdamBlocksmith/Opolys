@@ -86,6 +86,9 @@ enum Command {
         address: String,
     },
 
+    /// Show the live dynamic minimum refiner bond via RPC
+    BondMinimum,
+
     /// Create a signed transfer transaction
     Transfer {
         #[command(flatten)]
@@ -275,6 +278,24 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&body.get("result").unwrap_or(&body))?
+            );
+        }
+
+        Command::BondMinimum => {
+            let minimum = query_minimum_refiner_bond(&cli.rpc_url).await?;
+            let suggested = minimum
+                .checked_add(10 * FLAKES_PER_OPL)
+                .ok_or("Suggested bond amount overflowed")?;
+
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "minimum_refiner_bond_flakes": minimum,
+                    "minimum_refiner_bond_opl": format_flakes(minimum),
+                    "suggested_buffered_bond_flakes": suggested,
+                    "suggested_buffered_bond_opl": format_flakes(suggested),
+                    "note": "Bonding exactly the current minimum can fail if new blocks raise total issued before inclusion."
+                }))?
             );
         }
 
@@ -496,6 +517,41 @@ async fn query_suggested_fee(rpc_url: &str) -> Result<FlakeAmount, Box<dyn std::
     Ok(suggested_fee.max(opolys_core::MIN_FEE))
 }
 
+async fn query_minimum_refiner_bond(
+    rpc_url: &str,
+) -> Result<FlakeAmount, Box<dyn std::error::Error>> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/rpc", rpc_url))
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "opl_getChainInfo",
+            "params": [],
+            "id": 1
+        }))
+        .send()
+        .await?;
+
+    let body: serde_json::Value = resp.json().await?;
+    if let Some(error) = rpc_error(&body) {
+        return Err(format!("RPC error while querying refiner bond minimum: {}", error).into());
+    }
+    let result = body.get("result").ok_or("No result in RPC response")?;
+    let minimum = result
+        .get("minimum_refiner_bond_flakes")
+        .and_then(|n| n.as_u64())
+        .ok_or("No minimum_refiner_bond_flakes in chain info response")?;
+    Ok(minimum)
+}
+
+fn format_flakes(flakes: FlakeAmount) -> String {
+    format!(
+        "{}.{:06} OPL",
+        flakes / FLAKES_PER_OPL,
+        flakes % FLAKES_PER_OPL
+    )
+}
+
 async fn resolve_fee(
     rpc_url: &str,
     explicit_fee: Option<String>,
@@ -589,6 +645,19 @@ mod tests {
             panic!("expected transfer command");
         };
         assert_eq!(fee.as_deref(), Some("0.123456"));
+    }
+
+    #[test]
+    fn bond_minimum_command_parses() {
+        let cli = Cli::parse_from(["opl", "bond-minimum"]);
+
+        assert!(matches!(cli.command, Command::BondMinimum));
+    }
+
+    #[test]
+    fn format_flakes_uses_six_decimal_places() {
+        assert_eq!(format_flakes(1), "0.000001 OPL");
+        assert_eq!(format_flakes(21 * FLAKES_PER_OPL), "21.000000 OPL");
     }
 
     #[test]
