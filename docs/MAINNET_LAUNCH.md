@@ -129,6 +129,12 @@ opl --rpc-url http://127.0.0.1:4171 bond-minimum
 Bond above the minimum when blocks may arrive before inclusion, because the
 minimum can rise as `total_issued` increases.
 
+After bonding, check the refiner's status and recent hallmark activity:
+
+```bash
+opl --rpc-url http://127.0.0.1:4171 refiner <hex_object_id>
+```
+
 Private node, no RPC:
 
 ```bash

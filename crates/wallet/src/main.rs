@@ -89,6 +89,16 @@ enum Command {
     /// Show the live dynamic minimum refiner bond via RPC
     BondMinimum,
 
+    /// Show refiner status and recent hallmark activity via RPC
+    Refiner {
+        /// Refiner ObjectId/address hex
+        address: String,
+
+        /// Optional lookback blocks for recent hallmark scan
+        #[arg(long)]
+        lookback: Option<u64>,
+    },
+
     /// Create a signed transfer transaction
     Transfer {
         #[command(flatten)]
@@ -297,6 +307,11 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     "note": "Bonding exactly the current minimum can fail if new blocks raise total issued before inclusion."
                 }))?
             );
+        }
+
+        Command::Refiner { address, lookback } => {
+            let status = query_refiner_hallmark(&cli.rpc_url, &address, lookback).await?;
+            println!("{}", serde_json::to_string_pretty(&status)?);
         }
 
         Command::Transfer {
@@ -544,6 +559,34 @@ async fn query_minimum_refiner_bond(
     Ok(minimum)
 }
 
+async fn query_refiner_hallmark(
+    rpc_url: &str,
+    address: &str,
+    lookback: Option<u64>,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let params = match lookback {
+        Some(lookback) => serde_json::json!([address, lookback]),
+        None => serde_json::json!([address]),
+    };
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/rpc", rpc_url))
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "opl_getRefinerHallmark",
+            "params": params,
+            "id": 1
+        }))
+        .send()
+        .await?;
+
+    let body: serde_json::Value = resp.json().await?;
+    if let Some(error) = rpc_error(&body) {
+        return Err(format!("RPC error while querying refiner hallmark: {}", error).into());
+    }
+    Ok(body.get("result").cloned().unwrap_or(body))
+}
+
 fn format_flakes(flakes: FlakeAmount) -> String {
     format!(
         "{}.{:06} OPL",
@@ -652,6 +695,17 @@ mod tests {
         let cli = Cli::parse_from(["opl", "bond-minimum"]);
 
         assert!(matches!(cli.command, Command::BondMinimum));
+    }
+
+    #[test]
+    fn refiner_command_parses_with_optional_lookback() {
+        let cli = Cli::parse_from(["opl", "refiner", "aa", "--lookback", "12"]);
+
+        let Command::Refiner { address, lookback } = cli.command else {
+            panic!("expected refiner command");
+        };
+        assert_eq!(address, "aa");
+        assert_eq!(lookback, Some(12));
     }
 
     #[test]

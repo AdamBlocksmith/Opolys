@@ -152,6 +152,9 @@ opl transfer --from-stdin <hex_object_id> <amount_opl> --fee <fee_opl>
 # Check the live minimum refiner bond
 opl bond-minimum
 
+# Check refiner status and recent hallmark activity
+opl refiner <hex_object_id>
+
 # Bond stake as refiner
 opl bond --from-stdin <amount_opl> --fee <fee_opl>
 
