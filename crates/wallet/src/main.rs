@@ -99,6 +99,12 @@ enum Command {
         lookback: Option<u64>,
     },
 
+    /// Show a block assay certificate via RPC
+    Assay {
+        /// Block height or 32-byte block hash hex
+        block: String,
+    },
+
     /// Create a signed transfer transaction
     Transfer {
         #[command(flatten)]
@@ -312,6 +318,11 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Refiner { address, lookback } => {
             let status = query_refiner_hallmark(&cli.rpc_url, &address, lookback).await?;
             println!("{}", serde_json::to_string_pretty(&status)?);
+        }
+
+        Command::Assay { block } => {
+            let certificate = query_block_assay_certificate(&cli.rpc_url, &block).await?;
+            println!("{}", serde_json::to_string_pretty(&certificate)?);
         }
 
         Command::Transfer {
@@ -587,6 +598,37 @@ async fn query_refiner_hallmark(
     Ok(body.get("result").cloned().unwrap_or(body))
 }
 
+async fn query_block_assay_certificate(
+    rpc_url: &str,
+    block: &str,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let selector = match block.parse::<u64>() {
+        Ok(height) => serde_json::json!(height),
+        Err(_) => serde_json::json!(block),
+    };
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/rpc", rpc_url))
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "opl_getBlockAssayCertificate",
+            "params": [selector],
+            "id": 1
+        }))
+        .send()
+        .await?;
+
+    let body: serde_json::Value = resp.json().await?;
+    if let Some(error) = rpc_error(&body) {
+        return Err(format!(
+            "RPC error while querying block assay certificate: {}",
+            error
+        )
+        .into());
+    }
+    Ok(body.get("result").cloned().unwrap_or(body))
+}
+
 fn format_flakes(flakes: FlakeAmount) -> String {
     format!(
         "{}.{:06} OPL",
@@ -706,6 +748,16 @@ mod tests {
         };
         assert_eq!(address, "aa");
         assert_eq!(lookback, Some(12));
+    }
+
+    #[test]
+    fn assay_command_parses_height_or_hash() {
+        let cli = Cli::parse_from(["opl", "assay", "12"]);
+
+        let Command::Assay { block } = cli.command else {
+            panic!("expected assay command");
+        };
+        assert_eq!(block, "12");
     }
 
     #[test]

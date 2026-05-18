@@ -155,6 +155,9 @@ opl bond-minimum
 # Check refiner status and recent hallmark activity
 opl refiner <hex_object_id>
 
+# Check a block assay certificate
+opl assay <height_or_hash>
+
 # Bond stake as refiner
 opl bond --from-stdin <amount_opl> --fee <fee_opl>
 

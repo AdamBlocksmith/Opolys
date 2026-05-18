@@ -5,7 +5,7 @@ param(
     [int]$RestartPort = 48172,
     [int]$RestartRpcPort = 48173,
     [string]$ApiKey = "rehearsal-local-api-key-2026",
-    [int]$MineTimeoutSeconds = 900,
+    [int]$MineTimeoutSeconds = 2400,
     [int]$RestartTimeoutSeconds = 90
 )
 
@@ -130,7 +130,13 @@ try {
     if ([uint64]$Block1Assay.result.height -ne 1) {
         throw "Block 1 assay certificate returned wrong height"
     }
+    $WalletBlock1AssayJson = (cargo run -p opolys-wallet -- --rpc-url $RpcUrl assay 1 | Out-String).Trim()
+    $WalletBlock1Assay = $WalletBlock1AssayJson | ConvertFrom-Json
+    if ($WalletBlock1Assay.block_hash -ne $Block1Assay.result.block_hash) {
+        throw "Wallet assay command disagrees with block 1 assay RPC"
+    }
     $Block1Assay.result | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "block1.assay.json")
+    $WalletBlock1Assay | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "wallet.block1.assay.json")
 
     Write-Host "STEP 6: create and send wallet transaction"
     $TxHex = (cargo run -p opolys-wallet -- --rpc-url $RpcUrl transfer --from-env $RecipientAddress 1 --fee 0.000001 | Select-Object -Last 1).Trim()
@@ -261,15 +267,21 @@ try {
 
     $BalanceAfter = Invoke-Rpc -RpcUrl $RestartRpcUrl -Method "opl_getBalance" -Params @($RecipientAddress) -Id 7
     $TipAssayAfter = Invoke-Rpc -RpcUrl $RestartRpcUrl -Method "opl_getBlockAssayCertificate" -Params @([uint64]$InfoAfter.result.height) -Id 21
+    $WalletTipAssayAfterJson = (cargo run -p opolys-wallet -- --rpc-url $RestartRpcUrl assay "$($InfoAfter.result.height)" | Out-String).Trim()
+    $WalletTipAssayAfter = $WalletTipAssayAfterJson | ConvertFrom-Json
     $HallmarkAfter = Invoke-Rpc -RpcUrl $RestartRpcUrl -Method "opl_getRefinerHallmark" -Params @($MinerAddress) -Id 25
     $WalletHallmarkAfterJson = (cargo run -p opolys-wallet -- --rpc-url $RestartRpcUrl refiner $MinerAddress | Out-String).Trim()
     $WalletHallmarkAfter = $WalletHallmarkAfterJson | ConvertFrom-Json
     if ([uint64]$TipAssayAfter.result.height -ne [uint64]$InfoAfter.result.height) {
         throw "Tip assay certificate returned wrong height after restart"
     }
+    if ($WalletTipAssayAfter.block_hash -ne $TipAssayAfter.result.block_hash) {
+        throw "Wallet assay command disagrees with tip assay RPC after restart"
+    }
     $InfoAfter.result | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "chain-after-restart.json")
     $BalanceAfter.result | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "recipient-after-restart.json")
     $TipAssayAfter.result | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "tip.assay-after-restart.json")
+    $WalletTipAssayAfter | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "wallet.tip.assay-after-restart.json")
     $HallmarkAfter.result | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "refiner.hallmark-after-restart.json")
     $WalletHallmarkAfter | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "wallet.refiner-after-restart.json")
     Write-Host "AFTER_RESTART_HEIGHT=$($InfoAfter.result.height)"

@@ -58,10 +58,10 @@ For the full launch rehearsal, use a fresh temporary data directory and complete
 4. Confirm restart loads the same genesis hash and current height.
 5. Start a mining node with a throwaway miner key, local RPC, and `--allow-solo-mining`.
 6. Mine at least one block.
-7. Query `opl_getChainInfo`, `opl_getBlockByHeight`, and `opl_getBlockAssayCertificate`.
+7. Query `opl_getChainInfo`, `opl_getBlockByHeight`, `opl_getBlockAssayCertificate`, and `opl assay`.
 8. Send one wallet transaction over loopback RPC with `opl --rpc-api-key ... send`.
 9. Query `opl bond-minimum`, bond the local key as a refiner, and query `opl_getRefiners`, `opl_getRefinerHallmark`, plus `opl refiner`.
-10. Restart again and confirm the block, transaction, balances, chain height, refiner hallmark, and wallet refiner view persist.
+10. Restart again and confirm the block, transaction, balances, chain height, assay certificate, refiner hallmark, and wallet refiner view persist.
 
 `--allow-solo-mining` bypasses the normal 3-outbound-peer mining quorum only
 for an isolated rehearsal. Do not use it for production mainnet mining.
@@ -77,12 +77,15 @@ node, mines blocks, submits a wallet transfer over authenticated loopback RPC,
 bonds the local key as a refiner using the live minimum reported by
 `opl_getChainInfo` plus a small inclusion buffer, confirms the wallet
 `bond-minimum` output agrees, records the refiner hallmark through both raw RPC
-and `opl refiner`, restarts the node, and confirms the height, recipient balance,
-and refiner stake persist. Its artifacts are written under
+and `opl refiner`, records assay certificates through both raw RPC and
+`opl assay`, restarts the node, and confirms the height, recipient balance,
+assay certificate, and refiner stake persist. Its artifacts are written under
 `launch-rehearsal-local/`, which is ignored by git.
 If a transfer is submitted just after the miner has already assembled a block
 candidate, inclusion may take one additional mined block. The rehearsal waits
 for the recipient balance instead of assuming the next block must contain it.
+The default mining wait is intentionally generous because local EVO-OMAP block
+times vary; a slow run is not a failure unless the timeout is reached.
 
 ## 3. Production Ceremony
 
@@ -134,6 +137,12 @@ After bonding, check the refiner's status and recent hallmark activity:
 
 ```bash
 opl --rpc-url http://127.0.0.1:4171 refiner <hex_object_id>
+```
+
+Inspect a block's assay certificate:
+
+```bash
+opl --rpc-url http://127.0.0.1:4171 assay <height_or_hash>
 ```
 
 Private node, no RPC:
