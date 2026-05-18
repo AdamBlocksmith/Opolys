@@ -5,6 +5,8 @@ param(
     [int]$RestartPort = 48172,
     [int]$RestartRpcPort = 48173,
     [string]$ApiKey = "rehearsal-local-api-key-2026",
+    [string]$RefinerBondOpl = "20",
+    [uint64]$RefinerBondMinFlakes = 20000000,
     [int]$MineTimeoutSeconds = 900,
     [int]$RestartTimeoutSeconds = 90
 )
@@ -88,6 +90,7 @@ $MiningArgs = @(
     "--no-bootstrap",
     "--mine",
     "--allow-solo-mining",
+    "--refine",
     "--key-file", $KeyPath,
     "--log-level", "info"
 )
@@ -152,6 +155,42 @@ try {
         throw "Recipient balance did not show the wallet transaction within $MineTimeoutSeconds seconds"
     }
 
+    Write-Host "STEP 8: bond local refiner"
+    $BondTxHex = (cargo run -p opolys-wallet -- --rpc-url $RpcUrl bond --from-env $RefinerBondOpl --fee 0.000001 | Select-Object -Last 1).Trim()
+    cargo run -p opolys-wallet -- --rpc-url $RpcUrl --rpc-api-key $ApiKey send $BondTxHex |
+        Tee-Object -FilePath (Join-Path $RunRootPath "bond-send.out")
+
+    Write-Host "STEP 9: wait for refiner bond inclusion"
+    $Deadline = (Get-Date).AddSeconds($MineTimeoutSeconds)
+    $HallmarkBefore = $null
+    do {
+        Start-Sleep -Seconds 2
+        if ($MiningProc.HasExited) {
+            throw "Mining node exited early with code $($MiningProc.ExitCode). See $MiningErr"
+        }
+        try {
+            $HallmarkBefore = Invoke-Rpc -RpcUrl $RpcUrl -Method "opl_getRefinerHallmark" -Params @($MinerAddress) -Id 22
+            $Info = Invoke-Rpc -RpcUrl $RpcUrl -Method "opl_getChainInfo" -Id 23
+            Write-Host "height=$($Info.result.height) refiner_status=$($HallmarkBefore.result.status) refiner_stake=$($HallmarkBefore.result.total_stake_flakes)"
+        } catch {
+            # Bond transaction may still be waiting for inclusion.
+        }
+    } while (($null -eq $HallmarkBefore -or [uint64]$HallmarkBefore.result.total_stake_flakes -lt $RefinerBondMinFlakes) -and (Get-Date) -lt $Deadline)
+
+    if ($null -eq $HallmarkBefore) {
+        throw "Refiner hallmark did not become available within $MineTimeoutSeconds seconds"
+    }
+    if ([uint64]$HallmarkBefore.result.total_stake_flakes -lt $RefinerBondMinFlakes) {
+        throw "Refiner hallmark did not show the bonded stake"
+    }
+    if ($HallmarkBefore.result.status -ne "Bonding" -and $HallmarkBefore.result.status -ne "Waiting" -and $HallmarkBefore.result.status -ne "Active") {
+        throw "Unexpected refiner status after bond: $($HallmarkBefore.result.status)"
+    }
+
+    $RefinersBefore = Invoke-Rpc -RpcUrl $RpcUrl -Method "opl_getRefiners" -Id 24
+    $HallmarkBefore.result | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "refiner.hallmark-before-restart.json")
+    $RefinersBefore.result | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "refiners-before-restart.json")
+
     $InfoBefore = Invoke-Rpc -RpcUrl $RpcUrl -Method "opl_getChainInfo" -Id 5
     $InfoBefore.result | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "chain-before-restart.json")
     Write-Host "BEFORE_RESTART_HEIGHT=$($InfoBefore.result.height)"
@@ -160,7 +199,7 @@ finally {
     Stop-RehearsalProcess -Process $MiningProc
 }
 
-Write-Host "STEP 8: restart node against same data directory"
+Write-Host "STEP 10: restart node against same data directory"
 $RestartArgs = @(
     "run", "-p", "opolys-node", "--",
     "--genesis-params", (Join-Path $GenesisDir "genesis_attestation.json"),
@@ -196,17 +235,24 @@ try {
 
     $BalanceAfter = Invoke-Rpc -RpcUrl $RestartRpcUrl -Method "opl_getBalance" -Params @($RecipientAddress) -Id 7
     $TipAssayAfter = Invoke-Rpc -RpcUrl $RestartRpcUrl -Method "opl_getBlockAssayCertificate" -Params @([uint64]$InfoAfter.result.height) -Id 21
+    $HallmarkAfter = Invoke-Rpc -RpcUrl $RestartRpcUrl -Method "opl_getRefinerHallmark" -Params @($MinerAddress) -Id 25
     if ([uint64]$TipAssayAfter.result.height -ne [uint64]$InfoAfter.result.height) {
         throw "Tip assay certificate returned wrong height after restart"
     }
     $InfoAfter.result | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "chain-after-restart.json")
     $BalanceAfter.result | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "recipient-after-restart.json")
     $TipAssayAfter.result | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "tip.assay-after-restart.json")
+    $HallmarkAfter.result | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "refiner.hallmark-after-restart.json")
     Write-Host "AFTER_RESTART_HEIGHT=$($InfoAfter.result.height)"
     Write-Host "AFTER_RESTART_RECIPIENT_FLAKES=$($BalanceAfter.result.balance_flakes)"
+    Write-Host "AFTER_RESTART_REFINER_STATUS=$($HallmarkAfter.result.status)"
+    Write-Host "AFTER_RESTART_REFINER_STAKE=$($HallmarkAfter.result.total_stake_flakes)"
 
     if ([uint64]$BalanceAfter.result.balance_flakes -lt 1000000) {
         throw "Recipient balance missing after restart"
+    }
+    if ([uint64]$HallmarkAfter.result.total_stake_flakes -lt $RefinerBondMinFlakes) {
+        throw "Refiner bond missing after restart"
     }
 }
 finally {

@@ -58,9 +58,10 @@ For the full launch rehearsal, use a fresh temporary data directory and complete
 4. Confirm restart loads the same genesis hash and current height.
 5. Start a mining node with a throwaway miner key, local RPC, and `--allow-solo-mining`.
 6. Mine at least one block.
-7. Query `opl_getChainInfo`, `opl_getBlockByHeight`, `opl_getBlockAssayCertificate`, and `opl_getRefinerHallmark` for any bonded refiner.
+7. Query `opl_getChainInfo`, `opl_getBlockByHeight`, and `opl_getBlockAssayCertificate`.
 8. Send one wallet transaction over loopback RPC with `opl --rpc-api-key ... send`.
-9. Restart again and confirm the block, transaction, balances, and chain height persist.
+9. Bond the local key as a refiner and query `opl_getRefiners` plus `opl_getRefinerHallmark`.
+10. Restart again and confirm the block, transaction, balances, chain height, and refiner hallmark persist.
 
 `--allow-solo-mining` bypasses the normal 3-outbound-peer mining quorum only
 for an isolated rehearsal. Do not use it for production mainnet mining.
@@ -73,8 +74,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\launch_rehearsal.ps1
 
 The script creates a dry-run ceremony, verifies it, starts an isolated mining
 node, mines blocks, submits a wallet transfer over authenticated loopback RPC,
-restarts the node, and confirms the height and recipient balance persist. Its
-artifacts are written under `launch-rehearsal-local/`, which is ignored by git.
+bonds the local key as a refiner, records its hallmark, restarts the node, and
+confirms the height, recipient balance, and refiner stake persist. Its artifacts
+are written under `launch-rehearsal-local/`, which is ignored by git.
 If a transfer is submitted just after the miner has already assembled a block
 candidate, inclusion may take one additional mined block. The rehearsal waits
 for the recipient balance instead of assuming the next block must contain it.
