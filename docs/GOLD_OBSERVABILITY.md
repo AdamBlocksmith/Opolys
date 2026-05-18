@@ -36,7 +36,20 @@ valid_attestations_included_on_chain
 refiner_blocks_finalized_with_help_from_this_refiner
 double_sign_slash_events
 last_signed_height
+consecutive_correct_attestations
 ```
+
+RPC:
+
+```text
+opl_getRefinerHallmark([refiner_id_hex])
+opl_getRefinerHallmark([refiner_id_hex, lookback_blocks])
+```
+
+The first implementation is intentionally bounded: it scans at most one epoch
+of recent blocks, even if a larger lookback is requested. That keeps public RPC
+safe from deep-history scan abuse. Lifetime hallmark totals can be added later
+as a persisted cumulative index without changing consensus.
 
 Rules:
 

@@ -100,6 +100,10 @@ returns the per-block economic receipt: gross mined reward, mine assay burned,
 ordinary fees burned or paid to a refiner, bond/unbond assay burns, slashing
 burns, and net miner credit.
 
+It also includes `opl_getRefinerHallmark([refiner_id, lookback_blocks])`, a
+bounded refiner service-history view showing recent refined blocks,
+attestations, slash events, and explicit fee income.
+
 ### CLI Flags
 
 | Flag | Default | Description |

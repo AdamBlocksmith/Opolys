@@ -17,6 +17,7 @@
 //! - `opl_getSupply` — issued, burned, circulating supply breakdown
 //! - `opl_getDifficulty` — current difficulty + retarget info
 //! - `opl_getRefiners` — active refiner set with stakes and weights
+//! - `opl_getRefinerHallmark` — bounded refiner service-history view
 //! - `opl_getBlockConfidence` — on-chain attestation confidence for refiner blocks
 //! - `opl_getBlockAssayCertificate` — per-block economic receipt
 //!
@@ -325,6 +326,7 @@ pub async fn handle_jsonrpc(
         "opl_getSupply" => handle_get_supply(&state).await,
         "opl_getDifficulty" => handle_get_difficulty(&state).await,
         "opl_getRefiners" => handle_get_refiners(&state).await,
+        "opl_getRefinerHallmark" => handle_get_refiner_hallmark(&state, &req.params).await,
         "opl_getBlockConfidence" => handle_get_block_confidence(&state, &req.params).await,
         "opl_getBlockAssayCertificate" => {
             handle_get_block_assay_certificate(&state, &req.params).await
@@ -617,6 +619,102 @@ async fn handle_get_refiners(state: &RpcState) -> Result<serde_json::Value, Json
         });
     }
     serde_json::to_value(result).map_err(|e| JsonRpcError::internal_error(&e.to_string()))
+}
+
+async fn handle_get_refiner_hallmark(
+    state: &RpcState,
+    params: &serde_json::Value,
+) -> Result<serde_json::Value, JsonRpcError> {
+    let (refiner_id, lookback_blocks) = require_hallmark_params(params)?;
+
+    let chain = state.chain.read().await;
+    let current_height = chain.height;
+    let current_timestamp = chain.block_timestamps.last().copied().unwrap_or(0);
+    drop(chain);
+
+    let refiners = state.refiners.read().await;
+    let Some(refiner) = refiners.get_refiner(&refiner_id).cloned() else {
+        return Err(JsonRpcError::not_found("Refiner not found"));
+    };
+    let total_stake = refiner.total_stake();
+    let total_weight = refiner.weight(current_timestamp);
+    drop(refiners);
+
+    let scan_len = lookback_blocks
+        .min(EPOCH)
+        .min(current_height.saturating_add(1));
+    let scan_from_height = current_height.saturating_add(1).saturating_sub(scan_len);
+    let mut refined_blocks_produced = 0u64;
+    let mut attestations_included = 0u64;
+    let mut slash_events_included = 0u64;
+    let mut refiner_fee_income = 0u64;
+    let mut missing_receipts = 0u64;
+    let mut last_refined_block_height = None;
+    let mut last_attestation_included_height = None;
+    let mut last_slash_height = None;
+
+    for height in scan_from_height..=current_height {
+        let block = match state.store.load_block(height) {
+            Ok(Some(block)) => block,
+            Ok(None) => continue,
+            Err(e) => return Err(JsonRpcError::internal_error(&e.to_string())),
+        };
+
+        if block.header.is_refined() && block.header.producer == refiner_id {
+            refined_blocks_produced = refined_blocks_produced.saturating_add(1);
+            last_refined_block_height = Some(block.header.height);
+            match state.store.load_block_receipt(block.header.height) {
+                Ok(Some(receipt)) => {
+                    refiner_fee_income =
+                        refiner_fee_income.saturating_add(receipt.refiner_fee_income);
+                }
+                Ok(None) => missing_receipts = missing_receipts.saturating_add(1),
+                Err(e) => return Err(JsonRpcError::internal_error(&e.to_string())),
+            }
+        }
+
+        let block_attestations = block
+            .attestations
+            .iter()
+            .filter(|attestation| attestation.refiner == refiner_id)
+            .count() as u64;
+        if block_attestations > 0 {
+            attestations_included = attestations_included.saturating_add(block_attestations);
+            last_attestation_included_height = Some(block.header.height);
+        }
+
+        let block_slashes = block
+            .slash_evidence
+            .iter()
+            .filter(|evidence| evidence.producer == refiner_id)
+            .count() as u64;
+        if block_slashes > 0 {
+            slash_events_included = slash_events_included.saturating_add(block_slashes);
+            last_slash_height = Some(block.header.height);
+        }
+    }
+
+    serde_json::to_value(RefinerHallmarkResponse {
+        object_id: refiner.object_id.to_hex(),
+        status: format!("{:?}", refiner.status),
+        total_stake_flakes: total_stake,
+        total_stake_opl: format_flake(total_stake),
+        total_weight_flakes: total_weight,
+        last_signed_height: refiner.last_signed_height,
+        consecutive_correct_attestations: refiner.consecutive_correct_attestations,
+        scan_from_height,
+        scan_to_height: current_height,
+        refined_blocks_produced,
+        attestations_included,
+        slash_events_included,
+        refiner_fee_income_flakes: refiner_fee_income,
+        refiner_fee_income_opl: format_flake(refiner_fee_income),
+        missing_receipts,
+        last_refined_block_height,
+        last_attestation_included_height,
+        last_slash_height,
+    })
+    .map_err(|e| JsonRpcError::internal_error(&e.to_string()))
 }
 
 async fn handle_get_block_confidence(
@@ -991,6 +1089,31 @@ fn optional_u64_param(params: &serde_json::Value, default: u64) -> Result<u64, J
         return Ok(default);
     }
     Ok(arr[0].as_u64().unwrap_or(default))
+}
+
+fn require_hallmark_params(params: &serde_json::Value) -> Result<(ObjectId, u64), JsonRpcError> {
+    let arr = match params {
+        serde_json::Value::Array(a) => a,
+        _ => {
+            return Err(JsonRpcError::invalid_params(
+                "Expected params array with refiner ObjectId and optional lookback blocks",
+            ));
+        }
+    };
+    let Some(first) = arr.first() else {
+        return Err(JsonRpcError::invalid_params("Missing refiner ObjectId"));
+    };
+    let Some(refiner_hex) = first.as_str() else {
+        return Err(JsonRpcError::invalid_params(
+            "Refiner ObjectId must be a 32-byte hex string",
+        ));
+    };
+    let lookback = arr
+        .get(1)
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(EPOCH)
+        .max(1);
+    Ok((parse_object_id(refiner_hex)?, lookback))
 }
 
 /// Parse a Blake3 hash from hex.
@@ -1422,6 +1545,28 @@ pub struct RefinerResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RefinerHallmarkResponse {
+    pub object_id: String,
+    pub status: String,
+    pub total_stake_flakes: u64,
+    pub total_stake_opl: String,
+    pub total_weight_flakes: u64,
+    pub last_signed_height: u64,
+    pub consecutive_correct_attestations: u64,
+    pub scan_from_height: u64,
+    pub scan_to_height: u64,
+    pub refined_blocks_produced: u64,
+    pub attestations_included: u64,
+    pub slash_events_included: u64,
+    pub refiner_fee_income_flakes: u64,
+    pub refiner_fee_income_opl: String,
+    pub missing_receipts: u64,
+    pub last_refined_block_height: Option<u64>,
+    pub last_attestation_included_height: Option<u64>,
+    pub last_slash_height: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockConfidenceResponse {
     pub height: u64,
     pub block_hash: String,
@@ -1610,6 +1755,25 @@ mod tests {
     fn object_id_from_invalid_hex() {
         assert!(parse_object_id("not_hex").is_err());
         assert!(parse_object_id("0123").is_err());
+    }
+
+    #[test]
+    fn hallmark_params_parse_default_and_explicit_lookback() {
+        let id = test_refiner(b"hallmark");
+        let params = serde_json::json!([id.to_hex()]);
+        let (parsed, lookback) = require_hallmark_params(&params).unwrap();
+        assert_eq!(parsed, id);
+        assert_eq!(lookback, EPOCH);
+
+        let params = serde_json::json!([id.to_hex(), 12]);
+        let (_, lookback) = require_hallmark_params(&params).unwrap();
+        assert_eq!(lookback, 12);
+    }
+
+    #[test]
+    fn hallmark_params_reject_missing_refiner() {
+        assert!(require_hallmark_params(&serde_json::json!([])).is_err());
+        assert!(require_hallmark_params(&serde_json::json!([7])).is_err());
     }
 
     #[test]
