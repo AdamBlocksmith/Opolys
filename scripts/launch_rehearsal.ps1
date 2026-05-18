@@ -224,7 +224,15 @@ try {
     $RefinersBefore.result | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "refiners-before-restart.json")
 
     $InfoBefore = Invoke-Rpc -RpcUrl $RpcUrl -Method "opl_getChainInfo" -Id 5
+    $MintLedgerBefore = Invoke-Rpc -RpcUrl $RpcUrl -Method "opl_getMintLedger" -Id 27
+    $WalletMintLedgerBeforeJson = (cargo run -p opolys-wallet -- --rpc-url $RpcUrl ledger | Out-String).Trim()
+    $WalletMintLedgerBefore = $WalletMintLedgerBeforeJson | ConvertFrom-Json
+    if ([uint64]$WalletMintLedgerBefore.total_issued_flakes -ne [uint64]$MintLedgerBefore.result.total_issued_flakes) {
+        throw "Wallet ledger command disagrees with Mint Ledger RPC before restart"
+    }
     $InfoBefore.result | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "chain-before-restart.json")
+    $MintLedgerBefore.result | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "mint-ledger-before-restart.json")
+    $WalletMintLedgerBefore | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "wallet.mint-ledger-before-restart.json")
     Write-Host "BEFORE_RESTART_HEIGHT=$($InfoBefore.result.height)"
 }
 finally {
@@ -269,6 +277,9 @@ try {
     $TipAssayAfter = Invoke-Rpc -RpcUrl $RestartRpcUrl -Method "opl_getBlockAssayCertificate" -Params @([uint64]$InfoAfter.result.height) -Id 21
     $WalletTipAssayAfterJson = (cargo run -p opolys-wallet -- --rpc-url $RestartRpcUrl assay "$($InfoAfter.result.height)" | Out-String).Trim()
     $WalletTipAssayAfter = $WalletTipAssayAfterJson | ConvertFrom-Json
+    $MintLedgerAfter = Invoke-Rpc -RpcUrl $RestartRpcUrl -Method "opl_getMintLedger" -Id 28
+    $WalletMintLedgerAfterJson = (cargo run -p opolys-wallet -- --rpc-url $RestartRpcUrl ledger | Out-String).Trim()
+    $WalletMintLedgerAfter = $WalletMintLedgerAfterJson | ConvertFrom-Json
     $HallmarkAfter = Invoke-Rpc -RpcUrl $RestartRpcUrl -Method "opl_getRefinerHallmark" -Params @($MinerAddress) -Id 25
     $WalletHallmarkAfterJson = (cargo run -p opolys-wallet -- --rpc-url $RestartRpcUrl refiner $MinerAddress | Out-String).Trim()
     $WalletHallmarkAfter = $WalletHallmarkAfterJson | ConvertFrom-Json
@@ -278,10 +289,15 @@ try {
     if ($WalletTipAssayAfter.block_hash -ne $TipAssayAfter.result.block_hash) {
         throw "Wallet assay command disagrees with tip assay RPC after restart"
     }
+    if ([uint64]$WalletMintLedgerAfter.total_issued_flakes -ne [uint64]$MintLedgerAfter.result.total_issued_flakes) {
+        throw "Wallet ledger command disagrees with Mint Ledger RPC after restart"
+    }
     $InfoAfter.result | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "chain-after-restart.json")
     $BalanceAfter.result | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "recipient-after-restart.json")
     $TipAssayAfter.result | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "tip.assay-after-restart.json")
     $WalletTipAssayAfter | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "wallet.tip.assay-after-restart.json")
+    $MintLedgerAfter.result | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "mint-ledger-after-restart.json")
+    $WalletMintLedgerAfter | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "wallet.mint-ledger-after-restart.json")
     $HallmarkAfter.result | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "refiner.hallmark-after-restart.json")
     $WalletHallmarkAfter | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "wallet.refiner-after-restart.json")
     Write-Host "AFTER_RESTART_HEIGHT=$($InfoAfter.result.height)"

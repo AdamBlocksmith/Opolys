@@ -21,11 +21,11 @@
 use borsh::{BorshDeserialize, BorshSerialize};
 use opolys_consensus::account::{Account, AccountStore};
 use opolys_consensus::refiner::{PendingUnbond, RefinerInfo, RefinerSet};
-use opolys_core::{Block, BlockEconomicReceipt, Hash, ObjectId, Transaction};
+use opolys_core::{Block, BlockEconomicReceipt, Hash, MintLedgerTotals, ObjectId, Transaction};
 use rocksdb::{WriteBatch, WriteOptions};
 use std::path::Path;
 
-pub const STORAGE_SCHEMA_VERSION: u32 = 1;
+pub const STORAGE_SCHEMA_VERSION: u32 = 2;
 const STORAGE_SCHEMA_VERSION_KEY: &[u8] = b"schema_version";
 
 /// Serializable snapshot of chain state persisted across node restarts.
@@ -55,6 +55,8 @@ pub struct PersistedChainState {
     pub total_issued: u64,
     /// Total OPL flakes permanently removed via fee burning.
     pub total_burned: u64,
+    /// Chain-wide mint and burn accounting totals for O(1) ledger RPC.
+    pub mint_ledger: MintLedgerTotals,
     /// Rolling window of block timestamps used for difficulty retargeting.
     pub block_timestamps: Vec<u64>,
     /// Blake3-256 hash of the most recent block header.
@@ -817,6 +819,7 @@ mod tests {
             current_difficulty: 100,
             total_issued: 500_000_000,
             total_burned: 1_000_000,
+            mint_ledger: MintLedgerTotals::default(),
             block_timestamps: vec![1000, 1120, 1240],
             latest_block_hash: [99u8; 32],
             state_root: [0u8; 32],
@@ -935,6 +938,7 @@ mod tests {
             current_difficulty: block.header.difficulty,
             total_issued: 1_000_000,
             total_burned: 0,
+            mint_ledger: MintLedgerTotals::default(),
             block_timestamps: vec![block.header.timestamp],
             latest_block_hash: block_hash.0,
             state_root: block.header.state_root.0,
@@ -1002,6 +1006,7 @@ mod tests {
             current_difficulty: 1,
             total_issued: 0,
             total_burned: 0,
+            mint_ledger: MintLedgerTotals::default(),
             block_timestamps: vec![1000],
             latest_block_hash: [1u8; 32],
             state_root: [2u8; 32],

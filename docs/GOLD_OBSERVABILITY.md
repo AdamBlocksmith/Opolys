@@ -193,9 +193,10 @@ opl_getBlockAssayCertificate(height_or_hash)
 opl_getMintLedger()
 ```
 
-The first implementation can compute these views from existing data. If later
-performance requires indexes, those indexes must be checked against the
-canonical block/state data so observability cannot drift from consensus.
+The Mint Ledger is maintained as an aggregate in persisted chain state so the
+RPC can answer in constant time instead of scanning every historical block.
+Block Assay Certificates remain the per-block receipts that explain each ledger
+increment.
 
 ## Non-Goals
 

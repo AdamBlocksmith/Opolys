@@ -179,6 +179,7 @@ fn chain_state_to_info(chain: &ChainState) -> ChainInfo {
         total_issued: chain.total_issued,
         total_burned: chain.total_burned,
         circulating_supply: chain.circulating_supply(),
+        mint_ledger: chain.mint_ledger.clone(),
         latest_block_hash: chain.latest_block_hash.clone(),
         state_root: chain.state_root.clone(),
         block_timestamps: chain.block_timestamps.clone(),

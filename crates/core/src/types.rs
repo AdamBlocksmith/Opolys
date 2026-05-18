@@ -481,6 +481,77 @@ pub struct BlockEconomicReceipt {
     pub total_burned: FlakeAmount,
 }
 
+/// Chain-wide mint and burn accounting totals.
+///
+/// This is an observability ledger, not a governance surface. It lets operators
+/// prove how much OPL was issued, assayed, burned, and paid as explicit
+/// refiner service income without scanning every historical block over RPC.
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, BorshSerialize, BorshDeserialize, Serialize, Deserialize,
+)]
+pub struct MintLedgerTotals {
+    /// OPL issued by genesis account allocation, if any.
+    pub total_genesis_issued: FlakeAmount,
+    /// Gross mined reward before mine assay.
+    pub total_mined_gross_reward: FlakeAmount,
+    /// Mine assay burned from gross mined reward.
+    pub total_mine_assay_burned: FlakeAmount,
+    /// Ordinary fees burned by mined blocks.
+    pub total_ordinary_fees_burned: FlakeAmount,
+    /// Bond/unbond assay burns.
+    pub total_bond_unbond_assay_burned: FlakeAmount,
+    /// Slashed refiner stake burned.
+    pub total_slashed_stake_burned: FlakeAmount,
+    /// Ordinary fees paid to POR refiner producers.
+    pub total_refiner_fee_income: FlakeAmount,
+    /// Number of mined blocks applied, excluding genesis.
+    pub total_mined_blocks: u64,
+    /// Number of POR/refined blocks applied.
+    pub total_refined_blocks: u64,
+    /// Number of successful transactions included in applied blocks.
+    pub total_successful_transactions: u64,
+}
+
+impl MintLedgerTotals {
+    pub fn record_genesis_issuance(&mut self, amount: FlakeAmount) {
+        self.total_genesis_issued = self.total_genesis_issued.saturating_add(amount);
+    }
+
+    pub fn record_receipt(&mut self, receipt: &BlockEconomicReceipt) {
+        match receipt.production_kind {
+            BlockProductionKind::Genesis => {}
+            BlockProductionKind::Mined => {
+                self.total_mined_blocks = self.total_mined_blocks.saturating_add(1);
+                self.total_mined_gross_reward = self
+                    .total_mined_gross_reward
+                    .saturating_add(receipt.gross_reward);
+            }
+            BlockProductionKind::Refined => {
+                self.total_refined_blocks = self.total_refined_blocks.saturating_add(1);
+            }
+        }
+
+        self.total_mine_assay_burned = self
+            .total_mine_assay_burned
+            .saturating_add(receipt.mine_assay_burned);
+        self.total_ordinary_fees_burned = self
+            .total_ordinary_fees_burned
+            .saturating_add(receipt.ordinary_fees_burned);
+        self.total_bond_unbond_assay_burned = self
+            .total_bond_unbond_assay_burned
+            .saturating_add(receipt.bond_unbond_assay_burned);
+        self.total_slashed_stake_burned = self
+            .total_slashed_stake_burned
+            .saturating_add(receipt.slashed_burned);
+        self.total_refiner_fee_income = self
+            .total_refiner_fee_income
+            .saturating_add(receipt.refiner_fee_income);
+        self.total_successful_transactions = self
+            .total_successful_transactions
+            .saturating_add(receipt.successful_transaction_count);
+    }
+}
+
 /// Converts whole OPL to Flakes (the smallest on-chain unit).
 ///
 /// Uses saturating multiplication — if the result overflows u64, it returns `u64::MAX`
@@ -618,6 +689,59 @@ mod tests {
         invalid.pow_proof = Some(vec![0; 8]);
         invalid.refiner_signature = Some(vec![0; 64]);
         assert_eq!(invalid.production_kind(), None);
+    }
+
+    #[test]
+    fn mint_ledger_records_receipt_categories() {
+        let mut ledger = MintLedgerTotals::default();
+        ledger.record_genesis_issuance(10);
+        ledger.record_receipt(&BlockEconomicReceipt {
+            height: 1,
+            block_hash: Hash::zero(),
+            production_kind: BlockProductionKind::Mined,
+            producer: ObjectId::zero(),
+            difficulty: 7,
+            vein_yield_milli: 1000,
+            gross_reward: 1_000,
+            mine_assay_burned: 10,
+            miner_credit: 990,
+            successful_transaction_count: 2,
+            ordinary_fees: 5,
+            ordinary_fees_burned: 5,
+            refiner_fee_income: 0,
+            bond_unbond_assay_burned: 3,
+            slashed_burned: 2,
+            total_burned: 20,
+        });
+        ledger.record_receipt(&BlockEconomicReceipt {
+            height: 2,
+            block_hash: Hash::zero(),
+            production_kind: BlockProductionKind::Refined,
+            producer: ObjectId::zero(),
+            difficulty: 7,
+            vein_yield_milli: 0,
+            gross_reward: 0,
+            mine_assay_burned: 0,
+            miner_credit: 0,
+            successful_transaction_count: 1,
+            ordinary_fees: 4,
+            ordinary_fees_burned: 0,
+            refiner_fee_income: 4,
+            bond_unbond_assay_burned: 1,
+            slashed_burned: 0,
+            total_burned: 1,
+        });
+
+        assert_eq!(ledger.total_genesis_issued, 10);
+        assert_eq!(ledger.total_mined_gross_reward, 1_000);
+        assert_eq!(ledger.total_mine_assay_burned, 10);
+        assert_eq!(ledger.total_ordinary_fees_burned, 5);
+        assert_eq!(ledger.total_bond_unbond_assay_burned, 4);
+        assert_eq!(ledger.total_slashed_stake_burned, 2);
+        assert_eq!(ledger.total_refiner_fee_income, 4);
+        assert_eq!(ledger.total_mined_blocks, 1);
+        assert_eq!(ledger.total_refined_blocks, 1);
+        assert_eq!(ledger.total_successful_transactions, 3);
     }
 
     #[test]

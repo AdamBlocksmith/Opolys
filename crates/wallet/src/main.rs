@@ -105,6 +105,9 @@ enum Command {
         block: String,
     },
 
+    /// Show aggregate mint, burn, and refiner fee accounting via RPC
+    Ledger,
+
     /// Create a signed transfer transaction
     Transfer {
         #[command(flatten)]
@@ -323,6 +326,11 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Assay { block } => {
             let certificate = query_block_assay_certificate(&cli.rpc_url, &block).await?;
             println!("{}", serde_json::to_string_pretty(&certificate)?);
+        }
+
+        Command::Ledger => {
+            let ledger = query_mint_ledger(&cli.rpc_url).await?;
+            println!("{}", serde_json::to_string_pretty(&ledger)?);
         }
 
         Command::Transfer {
@@ -629,6 +637,26 @@ async fn query_block_assay_certificate(
     Ok(body.get("result").cloned().unwrap_or(body))
 }
 
+async fn query_mint_ledger(rpc_url: &str) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/rpc", rpc_url))
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "opl_getMintLedger",
+            "params": [],
+            "id": 1
+        }))
+        .send()
+        .await?;
+
+    let body: serde_json::Value = resp.json().await?;
+    if let Some(error) = rpc_error(&body) {
+        return Err(format!("RPC error while querying mint ledger: {}", error).into());
+    }
+    Ok(body.get("result").cloned().unwrap_or(body))
+}
+
 fn format_flakes(flakes: FlakeAmount) -> String {
     format!(
         "{}.{:06} OPL",
@@ -758,6 +786,13 @@ mod tests {
             panic!("expected assay command");
         };
         assert_eq!(block, "12");
+    }
+
+    #[test]
+    fn ledger_command_parses() {
+        let cli = Cli::parse_from(["opl", "ledger"]);
+
+        assert!(matches!(cli.command, Command::Ledger));
     }
 
     #[test]

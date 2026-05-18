@@ -158,6 +158,9 @@ opl refiner <hex_object_id>
 # Check a block assay certificate
 opl assay <height_or_hash>
 
+# Check aggregate mint, burn, and refiner fee accounting
+opl ledger
+
 # Bond stake as refiner
 opl bond --from-stdin <amount_opl> --fee <fee_opl>
 

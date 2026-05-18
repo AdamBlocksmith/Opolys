@@ -55,8 +55,8 @@ use opolys_consensus::mempool::Mempool;
 use opolys_consensus::refiner::RefinerSet;
 use opolys_core::{
     Block, BlockAttestation, BlockEconomicReceipt, BlockProductionKind, EPOCH, FLAKES_PER_OPL,
-    FlakeAmount, Hash, MAINNET_CHAIN_ID, MAX_BLOCK_SIZE_BYTES, ObjectId, RefinerStatus,
-    TX_MAX_SIZE_BYTES, Transaction,
+    FlakeAmount, Hash, MAINNET_CHAIN_ID, MAX_BLOCK_SIZE_BYTES, MintLedgerTotals, ObjectId,
+    RefinerStatus, TX_MAX_SIZE_BYTES, Transaction,
 };
 use opolys_execution::verify_transaction;
 use opolys_storage::BlockchainStore;
@@ -91,6 +91,8 @@ pub struct ChainInfo {
     pub total_burned: u64,
     /// Circulating supply (total_issued - total_burned).
     pub circulating_supply: u64,
+    /// Chain-wide mint and burn accounting totals.
+    pub mint_ledger: MintLedgerTotals,
     /// Blake3-256 hash of the most recent block header.
     pub latest_block_hash: Hash,
     /// Blake3-256 hash of the state root after the most recent block.
@@ -324,6 +326,7 @@ pub async fn handle_jsonrpc(
         "opl_getTransaction" => handle_get_transaction(&state, &req.params).await,
         "opl_getMempoolStatus" => handle_get_mempool_status(&state).await,
         "opl_getSupply" => handle_get_supply(&state).await,
+        "opl_getMintLedger" => handle_get_mint_ledger(&state).await,
         "opl_getDifficulty" => handle_get_difficulty(&state).await,
         "opl_getRefiners" => handle_get_refiners(&state).await,
         "opl_getRefinerHallmark" => handle_get_refiner_hallmark(&state, &req.params).await,
@@ -565,6 +568,38 @@ async fn handle_get_supply(state: &RpcState) -> Result<serde_json::Value, JsonRp
         total_issued_opl: format_flake(chain.total_issued),
         total_burned_opl: format_flake(chain.total_burned),
         circulating_supply_opl: format_flake(chain.circulating_supply),
+    })
+    .map_err(|e| JsonRpcError::internal_error(&e.to_string()))
+}
+
+async fn handle_get_mint_ledger(state: &RpcState) -> Result<serde_json::Value, JsonRpcError> {
+    let chain = state.chain.read().await;
+    let ledger = &chain.mint_ledger;
+    serde_json::to_value(MintLedgerResponse {
+        height: chain.height,
+        total_issued_flakes: chain.total_issued,
+        total_issued_opl: format_flake(chain.total_issued),
+        total_burned_flakes: chain.total_burned,
+        total_burned_opl: format_flake(chain.total_burned),
+        circulating_supply_flakes: chain.circulating_supply,
+        circulating_supply_opl: format_flake(chain.circulating_supply),
+        total_genesis_issued_flakes: ledger.total_genesis_issued,
+        total_genesis_issued_opl: format_flake(ledger.total_genesis_issued),
+        total_mined_gross_reward_flakes: ledger.total_mined_gross_reward,
+        total_mined_gross_reward_opl: format_flake(ledger.total_mined_gross_reward),
+        total_mine_assay_burned_flakes: ledger.total_mine_assay_burned,
+        total_mine_assay_burned_opl: format_flake(ledger.total_mine_assay_burned),
+        total_ordinary_fees_burned_flakes: ledger.total_ordinary_fees_burned,
+        total_ordinary_fees_burned_opl: format_flake(ledger.total_ordinary_fees_burned),
+        total_bond_unbond_assay_burned_flakes: ledger.total_bond_unbond_assay_burned,
+        total_bond_unbond_assay_burned_opl: format_flake(ledger.total_bond_unbond_assay_burned),
+        total_slashed_stake_burned_flakes: ledger.total_slashed_stake_burned,
+        total_slashed_stake_burned_opl: format_flake(ledger.total_slashed_stake_burned),
+        total_refiner_fee_income_flakes: ledger.total_refiner_fee_income,
+        total_refiner_fee_income_opl: format_flake(ledger.total_refiner_fee_income),
+        total_mined_blocks: ledger.total_mined_blocks,
+        total_refined_blocks: ledger.total_refined_blocks,
+        total_successful_transactions: ledger.total_successful_transactions,
     })
     .map_err(|e| JsonRpcError::internal_error(&e.to_string()))
 }
@@ -1516,6 +1551,34 @@ pub struct SupplyResponse {
     pub total_issued_opl: String,
     pub total_burned_opl: String,
     pub circulating_supply_opl: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MintLedgerResponse {
+    pub height: u64,
+    pub total_issued_flakes: u64,
+    pub total_issued_opl: String,
+    pub total_burned_flakes: u64,
+    pub total_burned_opl: String,
+    pub circulating_supply_flakes: u64,
+    pub circulating_supply_opl: String,
+    pub total_genesis_issued_flakes: u64,
+    pub total_genesis_issued_opl: String,
+    pub total_mined_gross_reward_flakes: u64,
+    pub total_mined_gross_reward_opl: String,
+    pub total_mine_assay_burned_flakes: u64,
+    pub total_mine_assay_burned_opl: String,
+    pub total_ordinary_fees_burned_flakes: u64,
+    pub total_ordinary_fees_burned_opl: String,
+    pub total_bond_unbond_assay_burned_flakes: u64,
+    pub total_bond_unbond_assay_burned_opl: String,
+    pub total_slashed_stake_burned_flakes: u64,
+    pub total_slashed_stake_burned_opl: String,
+    pub total_refiner_fee_income_flakes: u64,
+    pub total_refiner_fee_income_opl: String,
+    pub total_mined_blocks: u64,
+    pub total_refined_blocks: u64,
+    pub total_successful_transactions: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -267,6 +267,8 @@ pub struct ChainState {
     pub total_issued: FlakeAmount,
     /// Total OPL flakes permanently removed via fee burning.
     pub total_burned: FlakeAmount,
+    /// Chain-wide mint and burn accounting totals.
+    pub mint_ledger: MintLedgerTotals,
     /// Rolling window of block timestamps used for difficulty retargeting.
     pub block_timestamps: Vec<u64>,
     /// Blake3-256 hash of the genesis block header for this chain.
@@ -316,6 +318,7 @@ impl ChainState {
             current_difficulty: genesis_config.initial_difficulty,
             total_issued: 0,
             total_burned: 0,
+            mint_ledger: MintLedgerTotals::default(),
             block_timestamps: vec![genesis.header.timestamp],
             genesis_hash: genesis_hash.clone(),
             latest_block_hash: genesis_hash,
@@ -338,6 +341,7 @@ impl ChainState {
             current_difficulty: p.current_difficulty,
             total_issued: p.total_issued,
             total_burned: p.total_burned,
+            mint_ledger: p.mint_ledger.clone(),
             block_timestamps,
             genesis_hash: Hash::from_bytes(p.genesis_hash),
             latest_block_hash: Hash::from_bytes(p.latest_block_hash),
@@ -390,6 +394,7 @@ impl ChainState {
             current_difficulty: self.current_difficulty,
             total_issued: self.total_issued,
             total_burned: self.total_burned,
+            mint_ledger: self.mint_ledger.clone(),
             block_timestamps,
             latest_block_hash: self.latest_block_hash.0,
             state_root: self.state_root.0,
@@ -1090,6 +1095,7 @@ impl OpolysNode {
                         // Track genesis issuance in chain state
                         let mut chain = chain;
                         chain.total_issued = chain.total_issued.saturating_add(genesis_issued);
+                        chain.mint_ledger.record_genesis_issuance(genesis_issued);
                         (chain, accounts, refiners, Some(store))
                     }
                     Err(e) => {
@@ -2270,6 +2276,7 @@ impl OpolysNode {
                 .saturating_add(reward_distribution.mine_assay)
                 .saturating_add(total_slashed_burned),
         };
+        chain.mint_ledger.record_receipt(&receipt);
 
         // Persist state to disk
         if let Some(ref store) = self.store
@@ -2938,6 +2945,7 @@ mod tests {
         let genesis_config = GenesisConfig::default();
         let mut chain = ChainState::new(&genesis_config);
         chain.block_timestamps = (0..(BLOCK_TIMESTAMP_WINDOW_LEN as u64 + 10)).collect();
+        chain.mint_ledger.total_mined_gross_reward = 123;
         chain
             .attestation_finality_refiners
             .entry((7, Hash::from_bytes([7u8; 32])))
@@ -2949,6 +2957,7 @@ mod tests {
         assert_eq!(restored.current_difficulty, chain.current_difficulty);
         assert_eq!(restored.total_issued, chain.total_issued);
         assert_eq!(restored.total_burned, chain.total_burned);
+        assert_eq!(restored.mint_ledger, chain.mint_ledger);
         assert_eq!(restored.genesis_hash, chain.genesis_hash);
         assert_eq!(restored.latest_block_hash, chain.latest_block_hash);
         assert_eq!(restored.state_root, chain.state_root);
