@@ -99,7 +99,10 @@ Equation:
 
 ```text
 current_average_fee = previous_block_fee_signal / successful_transaction_count
-suggested_fee = max(MIN_FEE, (current_average_fee + 9 * previous_suggested_fee) / 10)
+suggested_fee = max(
+    MIN_FEE,
+    (current_average_fee + (CAPACITY_RATIO - 1) * previous_suggested_fee) / CAPACITY_RATIO
+)
 ```
 
 Interpretation:
@@ -107,9 +110,8 @@ Interpretation:
 - Suggested fee responds gradually to recent user-paid fees.
 - Empty blocks decay the quote toward `MIN_FEE`.
 
-Status: acceptable. The `9` is the smoothing memory and is currently a protocol
-choice. It is not system-derived, but it is a market-smoothing rule rather than
-a monetary allocation.
+Status: clean. The smoothing memory is derived from `CAPACITY_RATIO`, so the
+fee quote reacts across the same block-capacity window that bounds the mempool.
 
 ## Queue-Depth Fee Floor
 

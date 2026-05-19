@@ -249,8 +249,6 @@ pub fn compute_suggested_fee(
     successful_transaction_count: u64,
     previous_suggested_fee: FlakeAmount,
 ) -> FlakeAmount {
-    // EMA with α = 0.1: new = α × current + (1 - α) × old
-    // In integer arithmetic: new = (current + 9 × old) / 10
     let current = previous_block_fees
         .checked_div(successful_transaction_count)
         .unwrap_or(opolys_core::MIN_FEE);

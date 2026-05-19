@@ -146,7 +146,10 @@ toward net deflation as the network matures.
 The suggested fee is an exponential moving average:
 
 ```text
-suggested_fee = max(MIN_FEE, (observed_average_fee + 9 * previous_suggested_fee) / 10)
+suggested_fee = max(
+    MIN_FEE,
+    (observed_average_fee + (CAPACITY_RATIO - 1) * previous_suggested_fee) / CAPACITY_RATIO
+)
 ```
 
 Admission fees scale with the actual pending queue depth:

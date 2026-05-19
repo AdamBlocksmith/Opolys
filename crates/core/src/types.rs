@@ -354,7 +354,7 @@ pub struct Transaction {
 /// Evidence that a refiner signed two different blocks at the same height.
 ///
 /// Embedded in a future block's body so every full node can independently verify
-/// the proof and apply graduated slashing — no single node's memory is trusted.
+/// the proof and apply the 100% burn slash; no single node's memory is trusted.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize, Serialize, Deserialize)]
 pub struct DoubleSignEvidence {
     /// The refiner who double-signed.

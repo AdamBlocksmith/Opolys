@@ -150,8 +150,7 @@ impl BondEntry {
 /// Refiners hold one or more bond entries. Total weight is the sum of bonded
 /// stake across entries.
 ///
-/// Double-signing triggers graduated slashing: 10% burn on first offense,
-/// 33% burn + suspension on second, 100% burn + permanent Slashed on third+.
+/// Double-signing triggers a 100% burn and permanent Slashed status.
 /// Slashed stake is removed from circulation, not transferred to any treasury.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct RefinerInfo {

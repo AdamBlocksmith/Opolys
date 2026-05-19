@@ -1090,7 +1090,7 @@ mod tests {
         );
     }
 
-    /// Unbond more than total stake — unbonds all available.
+    /// Unbond more than total stake is rejected.
     #[test]
     fn unbond_more_than_stake() {
         let mut accounts = AccountStore::new();

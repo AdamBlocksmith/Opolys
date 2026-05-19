@@ -211,7 +211,10 @@ schedule beyond the one-Flake minimum.
 current_average_fee = previous_block_fee_signal / successful_transaction_count
 CAPACITY_RATIO = ceil(MEMPOOL_MAX_SIZE_BYTES / MAX_BLOCK_SIZE_BYTES)
 window = CAPACITY_RATIO
-suggested_fee = max(MIN_FEE, (current_average_fee + 9 * previous_suggested_fee) / 10)
+suggested_fee = max(
+    MIN_FEE,
+    (current_average_fee + (CAPACITY_RATIO - 1) * previous_suggested_fee) / CAPACITY_RATIO
+)
 ```
 
 For mempool admission, the effective minimum scales with the actual pending
@@ -240,8 +243,8 @@ Example:
 previous_suggested_fee = 1,000 Flakes
 previous block had 1 tx with fee = 10,000 Flakes
 
-suggested_fee = (10,000 + 9 * 1,000) / 10
-              = 19,000 / 10
+suggested_fee = (10,000 + (CAPACITY_RATIO - 1) * 1,000) / CAPACITY_RATIO
+              = 19,000 / 10       // with today's CAPACITY_RATIO = 10
               = 1,900 Flakes
 ```
 
@@ -249,7 +252,7 @@ If 100 transactions paid 100,000 total Flakes:
 
 ```text
 current_average_fee = 100,000 / 100 = 1,000 Flakes
-suggested_fee = (1,000 + 9 * 1,000) / 10 = 1,000 Flakes
+suggested_fee = (1,000 + (CAPACITY_RATIO - 1) * 1,000) / CAPACITY_RATIO = 1,000 Flakes
 ```
 
 ## Bonding

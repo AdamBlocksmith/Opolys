@@ -39,9 +39,6 @@ const MAX_TXS_PER_PEER_PER_SECOND: u32 = 50;
 const MAX_HEIGHT_LOOKAHEAD: u64 = 10;
 /// Fee multiplier for immediate network-wide relay (high-priority tier).
 const FEE_MULTIPLIER_HIGH: u64 = 10;
-/// Delay in milliseconds before relaying a transaction whose fee is below
-/// the current suggested_fee. All valid txs still enter the local mempool immediately.
-const DELAY_LOW_FEE_MS: u64 = 5_000;
 
 /// Minimum outbound peer connections required before the mining loop starts.
 /// Prevents eclipse attacks where all of a miner's peers are attacker-controlled.
@@ -962,8 +959,6 @@ async fn run_node(
             // Per-peer gossip rate limit state (rolling 1-second window)
             let mut peer_rate_limits: std::collections::HashMap<PeerId, PeerRateLimit> =
                 std::collections::HashMap::new();
-            // Low-fee tx queue: (raw bytes, time enqueued). Drained after DELAY_LOW_FEE_MS.
-            let mut pending_low_fee_txs: Vec<(Vec<u8>, std::time::Instant)> = Vec::new();
             // FIX 7: peers that have passed the memory-fingerprinting challenge
             let mut verified_peers: std::collections::HashSet<PeerId> =
                 std::collections::HashSet::new();
@@ -977,8 +972,6 @@ async fn run_node(
                 std::collections::HashMap::new();
             let mut peer_subnets: std::collections::HashMap<PeerId, [u8; 3]> =
                 std::collections::HashMap::new();
-            let mut low_fee_drain_interval =
-                tokio::time::interval(std::time::Duration::from_millis(1_000));
             // Check for timed-out challenges every 5 seconds
             let mut challenge_check_interval =
                 tokio::time::interval(std::time::Duration::from_secs(5));
@@ -986,7 +979,7 @@ async fn run_node(
             let mut mempool_evict_interval =
                 tokio::time::interval(std::time::Duration::from_secs(600));
             loop {
-                // Use tokio::select! to handle P2P events, local broadcasts, and delayed relays
+                // Use tokio::select! to handle P2P events and local broadcasts.
                 tokio::select! {
                     event = net.next_event() => {
                         match event {
@@ -1001,7 +994,6 @@ async fn run_node(
                                 handle_network_event(
                                     event, &net_node, &net_chain_info, &net, &net_data_dir,
                                     &mut peer_strikes, &mut peer_rate_limits,
-                                    &mut pending_low_fee_txs,
                                     &mut verified_peers,
                                     &mut pending_challenges,
                                     &mut subnet_counts,
@@ -1032,21 +1024,6 @@ async fn run_node(
                         {
                             tracing::warn!("Failed to broadcast attestation: {}", e);
                         }
-                    }
-                    _ = low_fee_drain_interval.tick() => {
-                        // Drain low-fee txs whose delay has elapsed and relay them
-                        let threshold = std::time::Duration::from_millis(DELAY_LOW_FEE_MS);
-                        let mut remaining = Vec::new();
-                        for (data, queued_at) in pending_low_fee_txs.drain(..) {
-                            if queued_at.elapsed() >= threshold {
-                                if let Err(e) = net.broadcast_transaction(data).await {
-                                    tracing::debug!("Failed to relay delayed low-fee tx: {}", e);
-                                }
-                            } else {
-                                remaining.push((data, queued_at));
-                            }
-                        }
-                        pending_low_fee_txs = remaining;
                     }
                     _ = challenge_check_interval.tick() => {
                         // FIX 7: disconnect peers whose challenge timed out
@@ -1151,7 +1128,6 @@ async fn handle_network_event(
     data_dir: &str,
     peer_strikes: &mut std::collections::HashMap<PeerId, u32>,
     peer_rate_limits: &mut std::collections::HashMap<PeerId, PeerRateLimit>,
-    pending_low_fee_txs: &mut Vec<(Vec<u8>, std::time::Instant)>,
     verified_peers: &mut std::collections::HashSet<PeerId>,
     pending_challenges: &mut std::collections::HashMap<PeerId, (u64, std::time::Instant)>,
     subnet_counts: &mut std::collections::HashMap<[u8; 3], usize>,
@@ -1383,7 +1359,7 @@ async fn handle_network_event(
                         .unwrap_or(0);
                     let suggested_fee = node.chain.read().await.suggested_fee;
                     {
-                        // All valid txs enter the mempool immediately regardless of fee tier.
+                        // Accepted txs have already cleared signature, nonce, and congestion-fee gates.
                         let mut mempool = node.mempool.write().await;
                         match mempool.add_transaction(
                             tx,
@@ -1403,9 +1379,7 @@ async fn handle_network_event(
                         }
                     }
 
-                    // Fee-weighted P2P relay: high/normal fees relay immediately,
-                    // low fees are queued and relayed after DELAY_LOW_FEE_MS.
-                    // (suggested_fee already fetched above)
+                    // Fee-weighted P2P relay. Below-floor txs were rejected by admission.
                     let high_threshold = suggested_fee.saturating_mul(FEE_MULTIPLIER_HIGH);
                     if tx_fee >= high_threshold {
                         tracing::debug!(tx_fee, suggested_fee, "High-fee tx: relaying immediately");
@@ -1425,10 +1399,8 @@ async fn handle_network_event(
                         tracing::debug!(
                             tx_fee,
                             suggested_fee,
-                            "Low-fee tx: queued for delayed relay"
+                            "Accepted tx below current relay quote"
                         );
-                        pending_low_fee_txs
-                            .push((tx_data_for_rebroadcast, std::time::Instant::now()));
                     }
                 }
                 Err(e) => {

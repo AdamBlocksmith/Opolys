@@ -812,7 +812,7 @@ Every block applied to the chain must pass these checks:
 | `MEMPOOL_MAX_SIZE_BYTES` | 100 MiB | Max mempool memory |
 | `MEMPOOL_MAX_TXS_PER_ACCOUNT` | 50 | Max pending txs per account |
 | `MEMPOOL_TX_EXPIRY_SECS` | 86,400 (24h) | Mempool transaction expiry |
-| `GOSSIP_MAX_MESSAGE_SIZE_BYTES` | 5 MiB | Max gossip message size |
+| `GOSSIP_MAX_MESSAGE_SIZE_BYTES` | 10 MiB | Max gossip message size |
 
 ---
 
@@ -905,7 +905,7 @@ Opolys implements layered P2P defenses to protect honest nodes from adversarial 
 | **Fake PoW pre-check** | Vein yield pre-check filters gossip blocks before expensive `apply_block()` lock acquisition, preventing cheap CPU-waste attacks. |
 | **Wrong chain_id ban** | Transactions from a different chain (replay attacks) result in 24h ban. |
 | **Rate limiting** | Per-peer gossip rate limits: 10 blocks/sec and 50 txs/sec (doubled for known refiners). |
-| **Fee-weighted relay** | Low-fee transactions are delayed 5 seconds before P2P relay to reduce low-cost mempool spam. |
+| **Fee-weighted relay** | Transactions must clear the congestion-adjusted fee floor before admission; accepted higher-fee transactions relay immediately. |
 | **Mempool DoS protection** | 100 MiB cap, 50 tx/account limit, 24h expiry, nonce-gap filtering, epoch-boundary eviction. |
 | **Persistent ban list** | Bans survive node restarts (stored in `data/banned_peers.json`). |
 
