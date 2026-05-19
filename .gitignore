@@ -4,5 +4,6 @@
 *.swp
 *.swo
 /data
+/dist
 /launch-rehearsal-local
 AGENTS.md

@@ -94,6 +94,8 @@ map and equations, see [`docs/ECONOMICS.md`](docs/ECONOMICS.md). For numeric
 inflation/burn examples, see [`docs/ECONOMIC_SCENARIOS.md`](docs/ECONOMIC_SCENARIOS.md)
 or run `python scripts/economics_model.py`. For Hallmarks, Assay Certificates,
 and the Mint Ledger, see [`docs/GOLD_OBSERVABILITY.md`](docs/GOLD_OBSERVABILITY.md).
+For operator release packaging and checksum verification, see
+[`docs/RELEASE.md`](docs/RELEASE.md).
 
 Read-only RPC includes `opl_getBlockAssayCertificate([height_or_hash])`, which
 returns the per-block economic receipt: gross mined reward, mine assay burned,

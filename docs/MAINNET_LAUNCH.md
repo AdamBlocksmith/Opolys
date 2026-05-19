@@ -18,6 +18,16 @@ cargo fmt --check
 
 `evo-omap` is vendored at `vendor/evo-omap`. Operators do not download it separately; Cargo builds the audited source committed in this repository.
 
+To build a checksummed local operator package, run:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build_release.ps1
+```
+
+The package is written under `dist/` and includes the node, wallet, genesis
+ceremony tools, launch docs, a release manifest, and SHA-256 checksums. See
+`docs/RELEASE.md` for the verification flow.
+
 ## 2. Rehearse The Ceremony
 
 Run this before launch day. It performs no network fetches and uses a deterministic test key.
