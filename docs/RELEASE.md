@@ -84,6 +84,34 @@ Get-ChildItem dist\opolys-<version>-<commit>-<host> -File |
 
 The output must match the package's `SHA256SUMS.txt`, except that `SHA256SUMS.txt` itself is not included in the recomputed list.
 
+## Smoke-Test A Package
+
+After building the package, run the packaged binaries without `cargo run`:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\release_smoke.ps1
+```
+
+The smoke script uses the latest package under `dist/` by default. It runs a
+dry-run ceremony, verifies the attestation, exports a throwaway wallet key,
+starts the packaged node with loopback RPC, checks RPC health, queries chain
+state, runs packaged wallet read commands, and confirms the node printed the
+`Launch configuration summary`.
+
+Artifacts are written under `release-smoke-local/`, including:
+
+- `release-smoke-report.md`
+- ceremony and verification logs
+- node stdout/stderr logs
+- throwaway dry-run data
+
+To test a specific package directory:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\release_smoke.ps1 `
+  -PackageDir dist\opolys-<version>-<commit>-<host>
+```
+
 ## Operator Rules
 
 - Build from a clean checkout.
