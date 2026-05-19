@@ -144,8 +144,8 @@ opolys-<platform>
 Each artifact contains the packaged directory, the `.zip` archive, and the
 archive `.sha256` file produced by `scripts/build_release.ps1`.
 
-The release workflow intentionally uses `actions/checkout@v5` and
-`actions/upload-artifact@v5` so the JavaScript actions run on the Node.js 24
-runtime. GitHub began warning that Node.js 20 actions will be forced onto
-Node.js 24 starting June 2, 2026, so release packaging should stay on Node.js
-24-compatible action versions.
+The release workflow intentionally uses current checkout/upload actions and
+sets `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true`. GitHub began warning that
+Node.js 20 actions will be forced onto Node.js 24 starting June 2, 2026, so
+release packaging opts into Node.js 24 now instead of waiting for the runner
+default to change.
