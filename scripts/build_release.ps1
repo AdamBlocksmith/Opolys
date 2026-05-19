@@ -50,7 +50,8 @@ $Binaries = @(
 )
 
 foreach ($Binary in $Binaries) {
-    $Source = Join-Path $Root "target\release\$Binary$BinaryExt"
+    $ReleaseDir = Join-Path (Join-Path $Root "target") "release"
+    $Source = Join-Path $ReleaseDir "$Binary$BinaryExt"
     if (-not (Test-Path $Source)) {
         throw "Expected release binary not found: $Source"
     }

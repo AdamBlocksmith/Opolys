@@ -123,3 +123,29 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\release_smoke.ps1 `
 - Never expose public write RPC without authentication or an authenticated reverse proxy.
 
 For the end-to-end launch sequence, use `docs/MAINNET_LAUNCH.md`.
+
+## Build Packages On GitHub
+
+The `Release Artifacts` workflow builds downloadable packages on GitHub for:
+
+- Windows x86_64
+- Linux x86_64
+- macOS arm64
+
+The workflow runs automatically when a tag beginning with `v` is pushed, and it
+can also be started manually from GitHub Actions with `workflow_dispatch`.
+
+Each platform uploads an artifact named:
+
+```text
+opolys-<platform>
+```
+
+Each artifact contains the packaged directory, the `.zip` archive, and the
+archive `.sha256` file produced by `scripts/build_release.ps1`.
+
+The release workflow intentionally uses `actions/checkout@v5` and
+`actions/upload-artifact@v5` so the JavaScript actions run on the Node.js 24
+runtime. GitHub began warning that Node.js 20 actions will be forced onto
+Node.js 24 starting June 2, 2026, so release packaging should stay on Node.js
+24-compatible action versions.
