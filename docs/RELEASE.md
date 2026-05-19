@@ -14,6 +14,7 @@ The release script builds with the committed `Cargo.lock` and copies these binar
 It also includes:
 
 - `README.md`
+- `LAUNCH_BINDER.md`
 - `MAINNET_LAUNCH.md`
 - `OPERATOR_CONFIG.md`
 - `THREAT_MODEL.md`
@@ -49,6 +50,7 @@ dist/
     release-manifest.json
     SHA256SUMS.txt
     README.md
+    LAUNCH_BINDER.md
     MAINNET_LAUNCH.md
     OPERATOR_CONFIG.md
     THREAT_MODEL.md
@@ -122,7 +124,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\release_smoke.ps1 `
 - Never run production data with `--allow-dry-run-genesis`.
 - Never expose public write RPC without authentication or an authenticated reverse proxy.
 
-For the end-to-end launch sequence, use `docs/MAINNET_LAUNCH.md`.
+For the end-to-end packaged-operator launch sequence, use
+`docs/LAUNCH_BINDER.md`. For the source-tree launch runbook, use
+`docs/MAINNET_LAUNCH.md`.
 
 ## Build Packages On GitHub
 
