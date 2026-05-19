@@ -83,6 +83,7 @@ checks the economic books against supply and block assay receipts, restarts the
 node, and confirms the height, recipient balance, assay certificate, mint
 ledger, economic invariants, and refiner stake persist. Its artifacts are written under
 `launch-rehearsal-local/`, which is ignored by git.
+The final human-readable summary is `launch-rehearsal-local/launch-report.md`.
 If a transfer is submitted just after the miner has already assembled a block
 candidate, inclusion may take one additional mined block. The rehearsal waits
 for the recipient balance instead of assuming the next block must contain it.

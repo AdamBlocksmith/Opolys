@@ -157,6 +157,99 @@ function Test-EconomicBooks {
     } | ConvertTo-Json -Depth 8 | Out-File $OutputPath
 }
 
+function Write-LaunchReport {
+    param(
+        [string]$OutputPath,
+        [object]$Info,
+        [object]$Balance,
+        [object]$MintLedger,
+        [object]$EconomicInvariants,
+        [object]$TipAssay,
+        [object]$Hallmark,
+        [string]$MinerAddress,
+        [string]$RecipientAddress,
+        [string]$ArtifactDir
+    )
+
+    $Ledger = $MintLedger.result
+    $Assay = $TipAssay.result
+    $Refiner = $Hallmark.result
+    $Invariant = $EconomicInvariants
+    $GeneratedAt = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+    $TipBlockHash = if ($null -ne $Assay.block_hash) { $Assay.block_hash } else { "" }
+    $RecentRefinedBlocks = if ($null -ne $Refiner.recent_refined_blocks_produced) { $Refiner.recent_refined_blocks_produced } else { 0 }
+    $RecentAttestations = if ($null -ne $Refiner.recent_attestations_included) { $Refiner.recent_attestations_included } else { 0 }
+
+    $Lines = @(
+        "# Opolys Launch Rehearsal Report",
+        "",
+        "Generated: $GeneratedAt",
+        "Artifact directory: $ArtifactDir",
+        "",
+        "## Result",
+        "",
+        "- Rehearsal: PASS",
+        "- Economic books: $($Invariant.result)",
+        "- Restart persistence: PASS",
+        "",
+        "## Chain",
+        "",
+        "- Height: $($Info.result.height)",
+        "- Difficulty: $($Info.result.difficulty)",
+        "- Finalized height: $($Info.result.finalized_height)",
+        "- Tip block hash: $TipBlockHash",
+        "- Miner/refiner address: $MinerAddress",
+        "- Recipient address: $RecipientAddress",
+        "- Recipient balance after restart: $($Balance.result.balance_opl)",
+        "",
+        "## Mint Ledger",
+        "",
+        "- Total issued: $($Ledger.total_issued_opl)",
+        "- Total burned: $($Ledger.total_burned_opl)",
+        "- Circulating supply: $($Ledger.circulating_supply_opl)",
+        "- Mined gross reward: $($Ledger.total_mined_gross_reward_opl)",
+        "- Mine assay burned: $($Ledger.total_mine_assay_burned_opl)",
+        "- Ordinary fees burned: $($Ledger.total_ordinary_fees_burned_opl)",
+        "- Bond/unbond assay burned: $($Ledger.total_bond_unbond_assay_burned_opl)",
+        "- Slashed stake burned: $($Ledger.total_slashed_stake_burned_opl)",
+        "- Refiner fee income: $($Ledger.total_refiner_fee_income_opl)",
+        "- Mined blocks: $($Ledger.total_mined_blocks)",
+        "- Refined blocks: $($Ledger.total_refined_blocks)",
+        "- Successful transactions: $($Ledger.total_successful_transactions)",
+        "",
+        "## Tip Assay Certificate",
+        "",
+        "- Height: $($Assay.height)",
+        "- Production kind: $($Assay.production_kind)",
+        "- Gross reward: $($Assay.gross_reward_opl)",
+        "- Mine assay burned: $($Assay.mine_assay_burned_opl)",
+        "- Miner credit: $($Assay.miner_credit_opl)",
+        "- Ordinary fees burned: $($Assay.ordinary_fees_burned_opl)",
+        "- Refiner fee income: $($Assay.refiner_fee_income_opl)",
+        "- Bond/unbond assay burned: $($Assay.bond_unbond_assay_burned_opl)",
+        "",
+        "## Refiner",
+        "",
+        "- Status: $($Refiner.status)",
+        "- Total stake: $($Refiner.total_stake_opl)",
+        "- Total weight: $($Refiner.total_weight_flakes) flakes",
+        "- Recent refined blocks: $RecentRefinedBlocks",
+        "- Recent attestations included: $RecentAttestations",
+        "",
+        "## Economic Invariants",
+        "",
+        "- Supply equals Mint Ledger totals: PASS",
+        "- Circulating supply equals issued minus burned: PASS",
+        "- Burn categories sum to total burned: PASS",
+        "- Block assay receipts sum to Mint Ledger: PASS",
+        "- Receipt mined blocks: $($Invariant.receipt_mined_blocks)",
+        "- Receipt refined blocks: $($Invariant.receipt_refined_blocks)",
+        "- Receipt successful transactions: $($Invariant.receipt_successful_transactions)"
+    )
+
+    $Lines | Out-File $OutputPath -Encoding utf8
+}
+
 $Root = (Resolve-Path ".").Path
 $RunRootPath = Join-Path $Root $RunRoot
 $GenesisDir = Join-Path $RunRootPath "genesis-dry-run"
@@ -400,7 +493,9 @@ try {
     if ([uint64]$WalletMintLedgerAfter.total_issued_flakes -ne [uint64]$MintLedgerAfter.result.total_issued_flakes) {
         throw "Wallet ledger command disagrees with Mint Ledger RPC after restart"
     }
-    Test-EconomicBooks -RpcUrl $RestartRpcUrl -MintLedger $MintLedgerAfter -OutputPath (Join-Path $RunRootPath "economic-invariants-after-restart.json")
+    $EconomicInvariantsAfterPath = Join-Path $RunRootPath "economic-invariants-after-restart.json"
+    Test-EconomicBooks -RpcUrl $RestartRpcUrl -MintLedger $MintLedgerAfter -OutputPath $EconomicInvariantsAfterPath
+    $EconomicInvariantsAfter = Get-Content $EconomicInvariantsAfterPath | ConvertFrom-Json
     $InfoAfter.result | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "chain-after-restart.json")
     $BalanceAfter.result | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "recipient-after-restart.json")
     $TipAssayAfter.result | ConvertTo-Json -Depth 8 | Out-File (Join-Path $RunRootPath "tip.assay-after-restart.json")
@@ -426,6 +521,18 @@ try {
     if ($WalletHallmarkAfter.status -ne $HallmarkAfter.result.status) {
         throw "Wallet refiner status disagrees with Hallmark RPC after restart"
     }
+
+    Write-LaunchReport `
+        -OutputPath (Join-Path $RunRootPath "launch-report.md") `
+        -Info $InfoAfter `
+        -Balance $BalanceAfter `
+        -MintLedger $MintLedgerAfter `
+        -EconomicInvariants $EconomicInvariantsAfter `
+        -TipAssay $TipAssayAfter `
+        -Hallmark $HallmarkAfter `
+        -MinerAddress $MinerAddress `
+        -RecipientAddress $RecipientAddress `
+        -ArtifactDir $RunRootPath
 }
 finally {
     Stop-RehearsalProcess -Process $RestartProc
