@@ -2,7 +2,7 @@
 
 This runbook is the operator path for launching Opolys mainnet. It keeps the gold analogy honest: genesis supply is derived from real gold production data, attested once, verified by everyone, and then treated as consensus input.
 
-Read `docs/THREAT_MODEL.md` before launch. It lists the remaining trust assumptions, including the single production genesis operator key and the operational rules around RPC auth and dry-run attestations.
+Read `docs/THREAT_MODEL.md` before launch. It lists the remaining trust assumptions, including the single production genesis operator key and the operational rules around RPC auth and dry-run attestations. Read `docs/OPERATOR_CONFIG.md` for the flag-by-flag node, wallet, and ceremony configuration rules.
 
 ## 1. Build From A Clean Checkout
 
@@ -174,6 +174,10 @@ cargo run --release -p opolys-node -- \
   --key-file /secure/path/miner.key \
   --no-rpc
 ```
+
+Block-producing nodes must include `--key-file`. Read-only observer nodes may
+omit it, but `--mine`, `--refine`, and external mining jobs require a real
+producer identity so rewards and refiner signatures bind to an on-chain account.
 
 Local RPC only, with an explicit API key:
 

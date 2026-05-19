@@ -133,8 +133,9 @@ pub struct Args {
     ///
     /// The ObjectId (Blake3 hash of the public key) derived from this key
     /// is used as the block producer identity. If not provided, the miner_id
-    /// defaults to zero (rewards are not credited to any account).
-    /// For production use, generate a key with `opl keygen` and provide the path.
+    /// defaults to zero for non-producing read-only nodes.
+    /// Block-producing modes (`--mine` or `--refine`) require this flag.
+    /// For production use, export a key with `opl export-key-file` and provide the path.
     #[arg(long)]
     pub key_file: Option<String>,
 

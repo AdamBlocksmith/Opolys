@@ -94,6 +94,8 @@ map and equations, see [`docs/ECONOMICS.md`](docs/ECONOMICS.md). For numeric
 inflation/burn examples, see [`docs/ECONOMIC_SCENARIOS.md`](docs/ECONOMIC_SCENARIOS.md)
 or run `python scripts/economics_model.py`. For Hallmarks, Assay Certificates,
 and the Mint Ledger, see [`docs/GOLD_OBSERVABILITY.md`](docs/GOLD_OBSERVABILITY.md).
+For flag-by-flag operator configuration rules, see
+[`docs/OPERATOR_CONFIG.md`](docs/OPERATOR_CONFIG.md).
 For operator release packaging and checksum verification, see
 [`docs/RELEASE.md`](docs/RELEASE.md).
 
@@ -119,7 +121,7 @@ attestations, slash events, and explicit fee income.
 | `--mine` | disabled | Enable PoW mining loop |
 | `--allow-solo-mining` | disabled | Rehearsal-only override for mining without the peer-safety quorum |
 | `--refine` | disabled | Enable refiner block production |
-| `--key-file` | _(none)_ | Path to 32-byte ed25519 seed file |
+| `--key-file` | _(none)_ | Path to 32-byte ed25519 seed file; required for `--mine`, `--refine`, and external mining jobs |
 | `--genesis-params` | _(none)_ | Path to genesis ceremony JSON (required) |
 | `--no-rpc` | disabled | Disable JSON-RPC server |
 | `--rpc-listen-addr` | `127.0.0.1` | RPC listen address (`0.0.0.0` to expose publicly) |

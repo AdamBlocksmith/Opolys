@@ -245,6 +245,28 @@ mod tests {
     }
 
     #[test]
+    fn block_production_requires_key_file() {
+        let args = Args::parse_from([
+            "opolys-node",
+            "--genesis-params",
+            "genesis_attestation.json",
+            "--mine",
+        ]);
+        let err = validate_operator_args(&args).expect_err("missing key file should be rejected");
+        assert!(err.contains("--key-file"));
+
+        let args = Args::parse_from([
+            "opolys-node",
+            "--genesis-params",
+            "genesis_attestation.json",
+            "--mine",
+            "--key-file",
+            "miner.key",
+        ]);
+        validate_operator_args(&args).expect("keyed miner should be accepted");
+    }
+
+    #[test]
     fn peer_cache_deduplicates_valid_addresses_and_drops_invalid() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(KNOWN_PEERS_FILE);
@@ -291,6 +313,24 @@ fn is_compatible_opolys_protocol(protocol_version: &str) -> bool {
     protocol_version == opolys_core::NETWORK_PROTOCOL_VERSION
 }
 
+fn validate_operator_args(args: &Args) -> Result<(), String> {
+    if args.genesis_params.is_none() {
+        return Err(
+            "Node requires --genesis-params <path>. Generate the file with the genesis-ceremony tool before starting."
+                .to_string(),
+        );
+    }
+
+    if (args.mine || args.refine) && args.key_file.is_none() {
+        return Err(
+            "Block production requires --key-file <path>. Export one with `opl export-key-file` before using --mine or --refine."
+                .to_string(),
+        );
+    }
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() {
     // Parse CLI arguments (port, data directory, log level, --mine, --no-rpc, etc.)
@@ -304,12 +344,8 @@ async fn main() {
         )
         .init();
 
-    // --genesis-params is required: it anchors the supply model to real gold data
-    if args.genesis_params.is_none() {
-        tracing::error!(
-            "Node requires --genesis-params <path>. \
-             Generate the file with the genesis-ceremony tool before starting."
-        );
+    if let Err(e) = validate_operator_args(&args) {
+        tracing::error!("{}", e);
         std::process::exit(1);
     }
 

@@ -15,6 +15,7 @@ It also includes:
 
 - `README.md`
 - `MAINNET_LAUNCH.md`
+- `OPERATOR_CONFIG.md`
 - `THREAT_MODEL.md`
 - `RELEASE.md`
 - `release-manifest.json`
@@ -49,6 +50,7 @@ dist/
     SHA256SUMS.txt
     README.md
     MAINNET_LAUNCH.md
+    OPERATOR_CONFIG.md
     THREAT_MODEL.md
     RELEASE.md
   opolys-<version>-<commit>-<host>.zip

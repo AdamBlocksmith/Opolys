@@ -59,6 +59,7 @@ foreach ($Binary in $Binaries) {
 
 Copy-Item (Join-Path $Root "README.md") (Join-Path $StageDir "README.md")
 Copy-Item (Join-Path $Root "docs\MAINNET_LAUNCH.md") (Join-Path $StageDir "MAINNET_LAUNCH.md")
+Copy-Item (Join-Path $Root "docs\OPERATOR_CONFIG.md") (Join-Path $StageDir "OPERATOR_CONFIG.md")
 Copy-Item (Join-Path $Root "docs\THREAT_MODEL.md") (Join-Path $StageDir "THREAT_MODEL.md")
 Copy-Item (Join-Path $Root "docs\RELEASE.md") (Join-Path $StageDir "RELEASE.md")
 

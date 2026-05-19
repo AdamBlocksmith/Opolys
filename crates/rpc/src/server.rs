@@ -917,6 +917,12 @@ fn decode_verified_rpc_transaction(hex_data: &str) -> Result<(Transaction, usize
 // ─── Mining endpoint handlers ──────────────────────────────────────
 
 async fn handle_get_mining_job(state: &RpcState) -> Result<serde_json::Value, JsonRpcError> {
+    if state.miner_id.0 == Hash::zero() {
+        return Err(JsonRpcError::invalid_request(
+            "Mining jobs require the node to start with --key-file",
+        ));
+    }
+
     let chain = state.chain.read().await;
     let refiners = state.refiners.read().await;
     let mempool = state.mempool.read().await;
