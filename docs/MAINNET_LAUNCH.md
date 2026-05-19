@@ -193,6 +193,11 @@ cargo run --release -p opolys-node -- \
 
 Public RPC should only be exposed behind an authenticated reverse proxy or firewall. Avoid `--no-rpc-auth` on mainnet unless another layer enforces authentication.
 
+On startup, check the `Launch configuration summary` log line. Confirm the
+`genesis_hash`, `data_dir`, `rpc_auth`, `production_mode`, `producer_id`, and
+dangerous-flag fields match the intended launch configuration before leaving
+the node running.
+
 ## 5. Launch Checks
 
 Before announcing the network:
@@ -202,6 +207,7 @@ Before announcing the network:
 - Nodes start from empty data directories and create `mainnet` storage.
 - RPC write/mining methods require an API key unless RPC is disabled.
 - Miners do not use `--allow-solo-mining` outside isolated rehearsal.
+- The `Launch configuration summary` shows the expected genesis hash, data directory, producer id, RPC auth mode, and production mode.
 - Bootstrap peers are explicit and reachable.
 - At least two independent machines can mine or verify blocks from the same genesis.
 - The threat model has been reviewed, including residual risks that require testnet time or an external audit rather than another local patch.

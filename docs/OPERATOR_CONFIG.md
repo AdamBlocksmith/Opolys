@@ -80,3 +80,31 @@ Read-only RPC methods are public. Write and mining RPC methods require the API k
 - Do not mine mainnet with `--allow-solo-mining`.
 - Do not expose unauthenticated write/mining RPC.
 - Package binaries with `scripts/build_release.ps1` and verify checksums before copying them to another machine.
+
+## Startup Summary
+
+At startup, the node logs a single `Launch configuration summary` after loading
+genesis or persisted state. Operators should check it before leaving the node
+running. The summary includes:
+
+- `chain_id`
+- `genesis_hash`
+- `latest_hash`
+- `height`
+- `difficulty`
+- `data_dir`
+- `p2p_peer_id`
+- `p2p_port`
+- `bootstrap_mode`
+- `bootstrap_peers`
+- `rpc`
+- `rpc_listen`
+- `rpc_auth`
+- `production_mode`
+- `producer_id`
+- `solo_mining`
+- `dry_run_genesis_allowed`
+
+Any warning about `--allow-dry-run-genesis`, `--allow-solo-mining`, or
+`--no-rpc-auth` should be treated as intentional rehearsal/private-lab behavior,
+not normal production mainnet operation.

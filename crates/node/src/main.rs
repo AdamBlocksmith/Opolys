@@ -267,6 +267,33 @@ mod tests {
     }
 
     #[test]
+    fn launch_summary_modes_are_human_readable() {
+        let mut config = NodeConfig::default();
+        assert_eq!(block_production_mode(&config), "observer");
+        assert_eq!(rpc_auth_mode(&config), "disabled-by-flag");
+        assert_eq!(bootstrap_mode(&config, 0), "peer-cache+dns+explicit");
+
+        config.mine = true;
+        assert_eq!(block_production_mode(&config), "mining");
+
+        config.refine = true;
+        assert_eq!(block_production_mode(&config), "mining+refinement");
+
+        config.mine = false;
+        assert_eq!(block_production_mode(&config), "refinement");
+
+        config.rpc_api_key = Some("key".to_string());
+        assert_eq!(rpc_auth_mode(&config), "api-key");
+
+        config.no_rpc = true;
+        assert_eq!(rpc_auth_mode(&config), "disabled");
+
+        config.no_bootstrap = true;
+        assert_eq!(bootstrap_mode(&config, 0), "disabled");
+        assert_eq!(bootstrap_mode(&config, 1), "explicit-only");
+    }
+
+    #[test]
     fn peer_cache_deduplicates_valid_addresses_and_drops_invalid() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(KNOWN_PEERS_FILE);
@@ -313,6 +340,35 @@ fn is_compatible_opolys_protocol(protocol_version: &str) -> bool {
     protocol_version == opolys_core::NETWORK_PROTOCOL_VERSION
 }
 
+fn block_production_mode(config: &NodeConfig) -> &'static str {
+    match (config.mine, config.refine) {
+        (true, true) => "mining+refinement",
+        (true, false) => "mining",
+        (false, true) => "refinement",
+        (false, false) => "observer",
+    }
+}
+
+fn rpc_auth_mode(config: &NodeConfig) -> &'static str {
+    if config.no_rpc {
+        "disabled"
+    } else if config.rpc_api_key.is_some() {
+        "api-key"
+    } else {
+        "disabled-by-flag"
+    }
+}
+
+fn bootstrap_mode(config: &NodeConfig, bootstrap_peer_count: usize) -> &'static str {
+    if config.no_bootstrap && bootstrap_peer_count == 0 {
+        "disabled"
+    } else if config.no_bootstrap {
+        "explicit-only"
+    } else {
+        "peer-cache+dns+explicit"
+    }
+}
+
 fn validate_operator_args(args: &Args) -> Result<(), String> {
     if args.genesis_params.is_none() {
         return Err(
@@ -329,6 +385,30 @@ fn validate_operator_args(args: &Args) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn log_dangerous_operator_flags(config: &NodeConfig) {
+    if config.allow_dry_run_genesis {
+        tracing::warn!(
+            "Dangerous flag active: --allow-dry-run-genesis. Use only for isolated rehearsal data."
+        );
+    }
+    if config.allow_solo_mining {
+        tracing::warn!(
+            "Dangerous flag active: --allow-solo-mining. Mainnet miners should wait for the peer quorum."
+        );
+    }
+    if !config.no_rpc && config.rpc_api_key.is_none() {
+        tracing::warn!(
+            "Dangerous flag active: --no-rpc-auth. Write/mining RPC methods are not protected by the node."
+        );
+    }
+    if !config.no_rpc && config.rpc_listen_addr != "127.0.0.1" && config.rpc_api_key.is_none() {
+        tracing::warn!(
+            listen = %config.rpc_listen_addr,
+            "Public RPC listen address without node RPC auth. Use only behind external authentication."
+        );
+    }
 }
 
 #[tokio::main]
@@ -450,6 +530,7 @@ async fn main() {
 
         peers
     };
+    let bootstrap_peer_count = all_bootstrap_peers.len();
 
     // Start P2P networking
     let net_config = NetworkConfig {
@@ -475,8 +556,9 @@ async fn main() {
             None
         }
     };
+    let p2p_peer_id = network.as_ref().map(|net| net.local_peer_id().to_string());
 
-    run_node(config, network).await;
+    run_node(config, network, p2p_peer_id, bootstrap_peer_count).await;
 }
 
 /// Main node loop — runs with or without P2P networking.
@@ -486,13 +568,20 @@ async fn main() {
 /// - Serves block sync requests from peers
 /// - Broadcasts locally-mined blocks via a channel
 /// - Processes sync responses to catch up to the chain tip
-async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
+async fn run_node(
+    config: NodeConfig,
+    network: Option<OpolysNetwork>,
+    p2p_peer_id: Option<String>,
+    bootstrap_peer_count: usize,
+) {
     // Initialize the node — loads persisted state from disk or starts from genesis
     let node = std::sync::Arc::new(OpolysNode::new(config.clone()));
 
     // Log initial chain state
     {
         let chain = node.chain.read().await;
+        let producer_id = node.miner_id.to_hex();
+        let p2p_peer_id = p2p_peer_id.as_deref().unwrap_or("disabled");
         tracing::info!(
             height = chain.current_height,
             difficulty = chain.current_difficulty,
@@ -501,7 +590,28 @@ async fn run_node(config: NodeConfig, network: Option<OpolysNetwork>) {
             hash = %chain.latest_block_hash.to_hex(),
             "Chain state initialized"
         );
+        tracing::info!(
+            chain_id = config.chain_id(),
+            genesis_hash = %chain.genesis_hash.to_hex(),
+            latest_hash = %chain.latest_block_hash.to_hex(),
+            height = chain.current_height,
+            difficulty = chain.current_difficulty,
+            data_dir = %config.chain_data_dir().display(),
+            p2p_peer_id,
+            p2p_port = config.listen_port,
+            bootstrap_mode = bootstrap_mode(&config, bootstrap_peer_count),
+            bootstrap_peers = bootstrap_peer_count,
+            rpc = !config.no_rpc,
+            rpc_listen = %format!("{}:{}", config.rpc_listen_addr, config.rpc_port),
+            rpc_auth = rpc_auth_mode(&config),
+            production_mode = block_production_mode(&config),
+            producer_id,
+            solo_mining = config.allow_solo_mining,
+            dry_run_genesis_allowed = config.allow_dry_run_genesis,
+            "Launch configuration summary"
+        );
     }
+    log_dangerous_operator_flags(&config);
 
     if !config.mine {
         tracing::info!("Mining: disabled (run with --mine to enable block production)");
