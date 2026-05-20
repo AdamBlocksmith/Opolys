@@ -239,8 +239,9 @@ pub struct BlockHeader {
     pub difficulty: u64,
     /// Suggested fee in Flakes for the next block. Computed as an EMA of the
     /// previous block's transaction fees, floored at MIN_FEE (1 Flake).
-    /// Miners/refiners should include this in the block template so wallets
-    /// can estimate appropriate fees, but any fee >= MIN_FEE is valid.
+    /// Miners/refiners should include this in the block template so wallets can
+    /// estimate appropriate fees. Block validation enforces `MIN_FEE`; mempool
+    /// admission can require more when the queue-depth congestion floor rises.
     pub suggested_fee: FlakeAmount,
     /// Optional Merkle root of extension data (e.g., rollup anchors).
     /// `None` for normal blocks. Reserved for future protocol extensions.

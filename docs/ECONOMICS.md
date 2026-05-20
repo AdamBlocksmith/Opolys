@@ -163,6 +163,25 @@ mine_assay = 71.142856 * sqrt(7) / 960
 miner_credit = about 70.946856 OPL
 ```
 
+Difficulty-pressure examples with `vein_yield = 1.000x`:
+
+| Difficulty | Gross Reward | Mine Assay Burn | Assay Rate | Miner Credit |
+|---:|---:|---:|---:|---:|
+| 7 | 47.428571 OPL | 0.148214 OPL | 0.312% | 47.280357 OPL |
+| 25 | 13.280000 OPL | 0.069167 OPL | 0.521% | 13.210833 OPL |
+| 100 | 3.320000 OPL | 0.034583 OPL | 1.042% | 3.285417 OPL |
+| 1,000 | 0.332000 OPL | 0.011067 OPL | 3.333% | 0.320933 OPL |
+| 5,000 | 0.066400 OPL | 0.004911 OPL | 7.396% | 0.061489 OPL |
+
+At difficulty `7`, richer veins scale both gross reward and assay burn:
+
+| Vein Yield | Gross Reward | Mine Assay Burn | Miner Credit |
+|---:|---:|---:|---:|
+| 1.000x | 47.428571 OPL | 0.148214 OPL | 47.280357 OPL |
+| 1.500x | 71.142857 OPL | 0.222321 OPL | 70.920536 OPL |
+| 2.000x | 94.857143 OPL | 0.296429 OPL | 94.560714 OPL |
+| 5.000x | 237.142857 OPL | 0.741071 OPL | 236.401786 OPL |
+
 ## Proof Of Refinement Blocks
 
 Proof of Refinement is a stalled-chain service path. It does not issue new OPL.
@@ -254,6 +273,18 @@ If 100 transactions paid 100,000 total Flakes:
 current_average_fee = 100,000 / 100 = 1,000 Flakes
 suggested_fee = (1,000 + (CAPACITY_RATIO - 1) * 1,000) / CAPACITY_RATIO = 1,000 Flakes
 ```
+
+Queue-depth examples with `suggested_fee = 1,000 Flakes`:
+
+| Pending Block-Sized Work | Effective Minimum Fee |
+|---:|---:|
+| 0.0 blocks | 1,000 Flakes |
+| 0.5 blocks | 1,000 Flakes |
+| 1.0 blocks | 1,000 Flakes |
+| 1.1 blocks | 2,000 Flakes |
+| 2.0 blocks | 2,000 Flakes |
+| 5.0 blocks | 5,000 Flakes |
+| 10.0 blocks | 10,000 Flakes |
 
 ## Bonding
 
@@ -370,6 +401,18 @@ If total bonded is 10,000 OPL and someone unbonds 100 OPL:
 unbond_assay = 100 * sqrt(960 / 10,000) / (6 * sqrt(960))
              = about 0.1667 OPL burned
 ```
+
+System-pressure examples:
+
+| Scenario | Issued Supply | Minimum Bond | Active Limit | Total Bonded | Action | Assay Burn | Assay Rate |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Launch first refiner | 0 OPL | 1 OPL | 960 | 0 OPL | Bond 1 OPL | 0.000174 OPL | 0.0174% |
+| Launch crowded vault | 0 OPL | 1 OPL | 960 | 1,000 OPL | Bond 1 OPL | 0.005493 OPL | 0.5493% |
+| Launch thin withdrawal | 0 OPL | 1 OPL | 960 | 1,000 OPL | Unbond 1 OPL | 0.005270 OPL | 0.5270% |
+| Mature baseline | 25,000,000 OPL | 5,000 OPL | 5,960 | 29,800,000 OPL | Bond 5,000 OPL | 10.795234 OPL | 0.2159% |
+| Mature baseline | 25,000,000 OPL | 5,000 OPL | 5,960 | 29,800,000 OPL | Unbond 5,000 OPL | 10.794328 OPL | 0.2159% |
+| Mature thin security | 25,000,000 OPL | 5,000 OPL | 5,960 | 5,000,000 OPL | Bond 5,000 OPL | 4.423739 OPL | 0.0885% |
+| Mature thin security | 25,000,000 OPL | 5,000 OPL | 5,960 | 5,000,000 OPL | Unbond 5,000 OPL | 26.352314 OPL | 0.5270% |
 
 ## Refiner Active Set
 
