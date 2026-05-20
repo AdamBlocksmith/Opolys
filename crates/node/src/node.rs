@@ -3475,13 +3475,14 @@ mod tests {
     /// Supply accounting invariant: total_issued - total_burned == sum(account balances)
     /// + sum(bonded stake) + sum(pending unbonding stake).
     ///
-    /// At genesis with no blocks, all values are zero.
-    /// After mining a block, total_issued == account balance of miner (fees burned = 0 since no txs).
+    /// Walks through mined issuance, mined fee/assay burns, POR fee routing,
+    /// and a failed transaction that must not burn fees or assays.
     #[tokio::test]
     async fn supply_accounting_invariant() {
         let (config, _dir) = test_config();
         let node = OpolysNode::new(config);
         register_test_miner_account(&node).await;
+        node.chain.write().await.current_difficulty = MIN_DIFFICULTY;
 
         let verify_invariant = |chain: &ChainState,
                                 accounts: &opolys_consensus::account::AccountStore,
@@ -3511,6 +3512,150 @@ mod tests {
             let chain = node.chain.read().await;
             let accounts = node.accounts.read().await;
             let refiners = node.refiners.read().await;
+            verify_invariant(&chain, &accounts, &refiners);
+        }
+
+        let mined_empty = node
+            .mine_block(1_000_000)
+            .await
+            .expect("difficulty-1 block should mine");
+        node.apply_block(&mined_empty)
+            .await
+            .expect("empty mined block should apply");
+        {
+            let chain = node.chain.read().await;
+            let accounts = node.accounts.read().await;
+            let refiners = node.refiners.read().await;
+            assert!(chain.total_issued > 0, "mined blocks mint gross reward");
+            assert!(
+                chain.total_burned > 0,
+                "mined blocks burn mine assay from gross reward"
+            );
+            verify_invariant(&chain, &accounts, &refiners);
+        }
+
+        let miner_key = node
+            .signing_key
+            .as_ref()
+            .expect("test node has signing key")
+            .clone();
+        let bond_amount = {
+            let chain = node.chain.read().await;
+            RefinerSet::minimum_bond_stake(chain.total_issued)
+        };
+        let bond_tx = signed_bond(&miner_key, bond_amount, 1_000, 0);
+        let burned_before_bond = node.chain.read().await.total_burned;
+        node.mempool
+            .write()
+            .await
+            .add_transaction(bond_tx, 1_000, 0, 0, MIN_FEE, MAINNET_CHAIN_ID)
+            .expect("bond tx should enter mempool");
+        let mined_bond = node
+            .mine_block(1_000_000)
+            .await
+            .expect("difficulty-1 bond block should mine");
+        node.apply_block(&mined_bond)
+            .await
+            .expect("mined bond block should apply");
+        {
+            let chain = node.chain.read().await;
+            let accounts = node.accounts.read().await;
+            let refiners = node.refiners.read().await;
+            assert!(
+                chain.total_burned > burned_before_bond,
+                "mined bond block burns ordinary fee, bond assay, and mine assay"
+            );
+            assert!(
+                refiners.total_bonded_stake() >= bond_amount,
+                "bonded stake remains accounted supply"
+            );
+            verify_invariant(&chain, &accounts, &refiners);
+        }
+
+        node.refiners
+            .write()
+            .await
+            .activate(&node.miner_id, 2)
+            .expect("bonded miner can be activated for POR invariant check");
+
+        let recipient = opolys_crypto::hash_to_object_id(b"invariant-por-recipient");
+        let por_fee = 2_000;
+        let por_tx = signed_transfer(&miner_key, recipient.clone(), opl_to_flake(1), por_fee, 1);
+        let mut por_block = produce_test_refiner_block(&node).await;
+        por_block.transactions = vec![por_tx];
+        refresh_body_roots_and_refiner_signature(&node, &mut por_block);
+        let issued_before_por = node.chain.read().await.total_issued;
+        let burned_before_por = node.chain.read().await.total_burned;
+        let producer_balance_before_por = node
+            .accounts
+            .read()
+            .await
+            .get_account(&node.miner_id)
+            .unwrap()
+            .balance;
+        node.apply_block(&por_block)
+            .await
+            .expect("POR transfer block should apply");
+        {
+            let chain = node.chain.read().await;
+            let accounts = node.accounts.read().await;
+            let refiners = node.refiners.read().await;
+            assert_eq!(
+                chain.total_issued, issued_before_por,
+                "POR blocks mint zero OPL"
+            );
+            assert_eq!(
+                chain.total_burned, burned_before_por,
+                "POR ordinary fees are paid to the refiner, not burned"
+            );
+            assert_eq!(
+                accounts.get_account(&recipient).unwrap().balance,
+                opl_to_flake(1)
+            );
+            assert_eq!(
+                accounts.get_account(&node.miner_id).unwrap().balance,
+                producer_balance_before_por - opl_to_flake(1),
+                "same account sent the tx and produced POR, so it gets its ordinary fee back"
+            );
+            verify_invariant(&chain, &accounts, &refiners);
+        }
+
+        let failed_tx = signed_transfer(
+            &miner_key,
+            opolys_crypto::hash_to_object_id(b"invariant-failed-recipient"),
+            opl_to_flake(1),
+            9_999,
+            99,
+        );
+        let mut failed_tx_block = produce_test_refiner_block(&node).await;
+        failed_tx_block.transactions = vec![failed_tx];
+        refresh_body_roots_and_refiner_signature(&node, &mut failed_tx_block);
+        let issued_before_failed = node.chain.read().await.total_issued;
+        let burned_before_failed = node.chain.read().await.total_burned;
+        let producer_balance_before_failed = node
+            .accounts
+            .read()
+            .await
+            .get_account(&node.miner_id)
+            .unwrap()
+            .balance;
+        node.apply_block(&failed_tx_block)
+            .await
+            .expect("block with failed tx should still apply");
+        {
+            let chain = node.chain.read().await;
+            let accounts = node.accounts.read().await;
+            let refiners = node.refiners.read().await;
+            assert_eq!(chain.total_issued, issued_before_failed);
+            assert_eq!(
+                chain.total_burned, burned_before_failed,
+                "failed tx in POR block burns no fee or assay"
+            );
+            assert_eq!(
+                accounts.get_account(&node.miner_id).unwrap().balance,
+                producer_balance_before_failed,
+                "failed tx pays no POR fee income"
+            );
             verify_invariant(&chain, &accounts, &refiners);
         }
     }

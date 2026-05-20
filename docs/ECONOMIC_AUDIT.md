@@ -5,7 +5,8 @@ fee-routing, assay, and dynamic-fee changes.
 
 ## Result
 
-No immediate code change is required from this pass.
+No consensus rule change is required from this pass. The pass strengthened
+economic invariant test coverage.
 
 The current model is internally consistent with the latest direction:
 
@@ -35,6 +36,34 @@ Interpretation:
 - Refined blocks move existing OPL; they do not mint.
 
 Status: clean.
+
+## Economic Invariant Coverage
+
+The node-level invariant test `supply_accounting_invariant` now walks through:
+
+- genesis accounting
+- mined issuance and mine-assay burn
+- mined bond transaction fee and bond-assay burn
+- bonded stake remaining part of accounted supply
+- Proof-of-Refinement fee routing with zero issuance
+- failed transaction handling with no fee or assay burn
+
+Invariant:
+
+```text
+total_issued - total_burned
+    = account_balances + bonded_stake + pending_unbonding_stake
+```
+
+Interpretation:
+
+- Only mined blocks mint new OPL.
+- Refined blocks move existing OPL only.
+- Mined-block ordinary fees are burned.
+- Refined-block ordinary fees are paid to the selected refiner producer.
+- Failed transactions do not pay fees or assays.
+
+Status: covered by tests.
 
 ## Mined Issuance
 
@@ -234,7 +263,8 @@ not split POR out of retarget until a simulation shows actual abuse.
 
 These are not blockers, but they should stay visible:
 
-1. Suggested fee smoothing uses a fixed 90% prior weight.
+1. Suggested fee smoothing is derived from `CAPACITY_RATIO`; keep watching
+   whether the capacity-derived memory feels right under real activity.
 2. Vein yield should be communicated carefully so it reads as ore variance.
 3. Difficulty recovery via POR should be modeled under adversarial cycling.
 4. Hallmarks, Assay Certificates, and Mint Ledger should start as computed
@@ -245,6 +275,6 @@ These are not blockers, but they should stay visible:
 ## Recommendation
 
 Move forward with launch-rehearsal preparation after the observability docs are
-merged. The economics are coherent enough for the next dry run, and the
-remaining questions are modeling and UX/spec work rather than urgent consensus
-fixes.
+merged. The economics are coherent enough for the next launch rehearsal, and
+the remaining questions are modeling and UX/spec work rather than urgent
+consensus fixes.
