@@ -100,6 +100,19 @@ for the recipient balance instead of assuming the next block must contain it.
 The default mining wait is intentionally generous because local EVO-OMAP block
 times vary; a slow run is not a failure unless the timeout is reached.
 
+Proof-of-Refinement has a second focused rehearsal:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\por_rehearsal.ps1
+```
+
+This rehearsal verifies the refined-block path through the node apply-block
+logic: refined blocks mint zero OPL, ordinary fees go to the selected refiner,
+bond/unbond assays burn, attestations are accepted for refiner blocks, mined
+blocks do not receive refiner attestations, and supply accounting remains
+balanced. It does not bypass production activation rules in a live node; a live
+refiner becomes active only after the normal one-epoch bonding delay.
+
 ## 3. Production Ceremony
 
 Use a dedicated operator key file and keep it offline/backed up. The key file contains the ed25519 seed that signs the genesis attestation.

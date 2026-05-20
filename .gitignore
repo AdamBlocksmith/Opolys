@@ -9,6 +9,8 @@
 /artifact-rehearsal-*
 /launch-rehearsal-local
 /launch-rehearsal-*
+/por-rehearsal-local
+/por-rehearsal-*
 /release-smoke-local
 /release-smoke-*
 AGENTS.md
