@@ -47,6 +47,25 @@ mined block: ordinary fees burn
 refined block: ordinary fees go to the selected refiner
 ```
 
+## Short Answer
+
+Opolys has enough deflationary pressure for the mature network, but it is not
+designed to be deflationary at launch.
+
+At launch, difficulty is low, so new ore is still easy to find. Supply grows
+quickly unless fees are extremely high. That is acceptable for the gold analogy:
+early mining should discover new supply.
+
+As difficulty rises, three things change:
+
+- gross mined issuance falls roughly as `1 / difficulty`
+- mine assay takes a larger percentage of each mined reward
+- ordinary fees can exceed new issuance at realistic activity levels
+
+Proof of Refinement strengthens this effect without minting: refined blocks
+move transactions and pay refiners from explicit user fees, but they create no
+new OPL.
+
 ## Scenario Results
 
 | Scenario | Difficulty | Mined Share | Tx / Block | Fee / Tx | Gross Issued / Year | Burned / Year | Circulating Change / Year |
@@ -57,6 +76,15 @@ refined block: ordinary fees go to the selected refiner
 | High difficulty busy PoW | 1,000 | 100% | 1,000 | 0.001 OPL | 219,580 OPL | 357,873 OPL | -138,293 OPL |
 | Miner stress, POR carries half | 1,000 | 50% | 1,000 | 0.001 OPL | 109,790 OPL | 178,937 OPL | -69,146 OPL |
 | Mostly POR, high activity | 1,000 | 10% | 1,000 | 0.001 OPL | 21,958 OPL | 35,787 OPL | -13,829 OPL |
+
+Reading:
+
+- Launch remains strongly inflationary because difficulty is low.
+- At difficulty `100`, the chain is still inflationary with the sample fee
+  pressure.
+- Around difficulty `1,000`, busy mined blocks can become net deflationary.
+- If Proof of Refinement carries part of the chain at high difficulty, new
+  issuance falls further because refined blocks mint nothing.
 
 ## Break-Even Fee Pressure
 
@@ -104,6 +132,28 @@ Reading:
   difficulty.
 - High-difficulty deflation comes from low issuance plus fee burns, not mine
   assay alone.
+
+## Episodic Assay And Slashing Pressure
+
+Bond/unbond assays and slashing are not included in the yearly scenario table
+above because they depend on refiner churn and misbehavior. They are additional
+burn pressure on top of mined-block fees and mine assay.
+
+| Case | Issued | Min Bond | Active Limit | Total Bonded | Action Size | Bond Assay | Unbond Assay | Slash Burn If That Refiner Double-Signs |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Launch first refiner | 0 OPL | 1 OPL | 960 | 0 OPL | 1 OPL | 0.000174 OPL | 0.000000 OPL | 1 OPL |
+| Launch crowded vault | 0 OPL | 1 OPL | 960 | 1,000 OPL | 1 OPL | 0.005493 OPL | 0.005270 OPL | 1 OPL |
+| Mature baseline | 25,000,000 OPL | 5,000 OPL | 5,960 | 29,800,000 OPL | 5,000 OPL | 10.795234 OPL | 10.794328 OPL | 5,000 OPL |
+| Mature thin security | 25,000,000 OPL | 5,000 OPL | 5,960 | 5,000,000 OPL | 5,000 OPL | 4.423739 OPL | 26.352314 OPL | 5,000 OPL |
+| 100M supply baseline | 100,000,000 OPL | 10,000 OPL | 10,960 | 109,600,000 OPL | 10,000 OPL | 15.920741 OPL | 15.920015 OPL | 10,000 OPL |
+
+Reading:
+
+- Bonding is cheap when security is thin and more expensive when the vault is
+  crowded.
+- Unbonding is more expensive when security is thin.
+- Slashing is deliberately rare but severe: a double-sign burns that refiner's
+  full bonded stake.
 
 ## Reading
 

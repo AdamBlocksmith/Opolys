@@ -19,6 +19,45 @@ MEMPOOL_MAX_SIZE_BYTES = 100_000_000
 MAX_BLOCK_SIZE_BYTES = 10_485_760
 CAPACITY_RATIO = math.ceil(MEMPOOL_MAX_SIZE_BYTES / MAX_BLOCK_SIZE_BYTES)
 MIN_FEE_FLAKES = 1
+DECIMAL_PLACES = 6
+
+
+def minimum_bond(total_issued_opl: float) -> float:
+    return max(1.0, math.floor(math.sqrt(total_issued_opl)))
+
+
+def active_refiner_limit(total_issued_opl: float) -> int:
+    return EPOCH + math.floor(math.sqrt(total_issued_opl))
+
+
+def dynamic_assay(
+    amount_opl: float,
+    pressure_numerator: float,
+    pressure_denominator: float,
+    active_limit: int,
+) -> float:
+    if amount_opl == 0 or pressure_numerator == 0 or pressure_denominator == 0:
+        return 0.0
+    return (
+        amount_opl
+        * math.sqrt(pressure_numerator / pressure_denominator)
+        / (DECIMAL_PLACES * math.sqrt(active_limit))
+    )
+
+
+def bond_assay(amount_opl: float, total_issued_opl: float, total_bonded_opl: float) -> float:
+    active_limit = active_refiner_limit(total_issued_opl)
+    baseline = minimum_bond(total_issued_opl) * active_limit
+    bonded_after = total_bonded_opl + amount_opl
+    return dynamic_assay(amount_opl, bonded_after, baseline, active_limit)
+
+
+def unbond_assay(amount_opl: float, total_issued_opl: float, total_bonded_opl: float) -> float:
+    if total_bonded_opl == 0:
+        return 0.0
+    active_limit = active_refiner_limit(total_issued_opl)
+    baseline = minimum_bond(total_issued_opl) * active_limit
+    return dynamic_assay(amount_opl, baseline, total_bonded_opl, active_limit)
 
 
 def mined_block_row(difficulty: float) -> dict[str, float]:
@@ -190,6 +229,46 @@ def main() -> None:
             "Burn/year",
             "Supply delta/year",
             "Refiner fee/year",
+        ],
+        rows,
+    )
+
+    print("\nEpisodic assay and slashing pressure")
+    rows = []
+    burn_cases = [
+        ("Launch first refiner", 0, 0, 1),
+        ("Launch crowded vault", 0, 1_000, 1),
+        ("Mature baseline bond", 25_000_000, 29_800_000, 5_000),
+        ("Mature thin-security unbond", 25_000_000, 5_000_000, 5_000),
+        ("100M supply baseline", 100_000_000, 109_600_000, 10_000),
+    ]
+    for name, issued, bonded, amount in burn_cases:
+        b = bond_assay(amount, issued, bonded)
+        u = unbond_assay(amount, issued, bonded)
+        rows.append(
+            [
+                name,
+                f"{issued:,.0f}",
+                f"{minimum_bond(issued):,.0f}",
+                f"{active_refiner_limit(issued):,}",
+                f"{bonded:,.0f}",
+                f"{amount:,.0f}",
+                f"{b:,.6f}",
+                f"{u:,.6f}" if bonded else "0.000000",
+                f"{amount:,.0f}",
+            ]
+        )
+    print_table(
+        [
+            "Case",
+            "Issued",
+            "Min bond",
+            "Active limit",
+            "Bonded",
+            "Action size",
+            "Bond assay",
+            "Unbond assay",
+            "Slash burn if that refiner double-signs",
         ],
         rows,
     )
