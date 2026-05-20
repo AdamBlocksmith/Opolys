@@ -60,7 +60,8 @@ Interpretation:
 - Only mined blocks mint new OPL.
 - Refined blocks move existing OPL only.
 - Mined-block ordinary fees are burned.
-- Refined-block ordinary fees are paid to the selected refiner producer.
+- Refined-block ordinary fees split between POR fee burn and selected refiner
+  income.
 - Failed transactions do not pay fees or assays.
 
 Status: covered by tests.
@@ -92,13 +93,17 @@ Equation:
 
 ```text
 refined_block_issuance = 0
-refiner_fee_income = ordinary_fees_in_refined_block
+active_refiner_limit = EPOCH + sqrt(total_issued_opl)
+por_fee_burn = ordinary_fees * active_refiners / (active_refiner_limit + active_refiners)
+refiner_fee_income = ordinary_fees - por_fee_burn
 ```
 
 Interpretation:
 
 - Refiners provide service only when miners are absent or slow.
 - Refiners do not earn from time, bonding alone, or attestations alone.
+- POR fees burn a system-derived assay portion before paying the selected
+  refiner producer.
 
 Status: clean.
 
@@ -111,7 +116,7 @@ if block is mined:
     ordinary_fees are burned
 
 if block is refined:
-    ordinary_fees are paid to selected refiner producer
+    ordinary_fees split between POR fee burn and selected refiner income
 ```
 
 Interpretation:
@@ -119,6 +124,8 @@ Interpretation:
 - Activity pays for inclusion.
 - The producer type decides whether the fee is market attrition or service
   income.
+- Refined-block fee burn rises from the active refiner market itself, not from
+  a hand-picked percentage.
 
 Status: clean.
 

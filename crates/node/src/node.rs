@@ -879,6 +879,26 @@ fn compute_mine_assay(gross_reward: FlakeAmount, effective_difficulty: u64) -> F
         .min(FlakeAmount::MAX as u128) as FlakeAmount
 }
 
+fn compute_por_fee_split(
+    ordinary_fees: FlakeAmount,
+    active_refiners: usize,
+    active_refiner_limit: usize,
+) -> (FlakeAmount, FlakeAmount) {
+    if ordinary_fees == 0 || active_refiners == 0 {
+        return (0, ordinary_fees);
+    }
+
+    let active = active_refiners as u128;
+    let denominator = active_refiner_limit as u128 + active;
+    if denominator == 0 {
+        return (0, ordinary_fees);
+    }
+
+    let burned = ((ordinary_fees as u128).saturating_mul(active) / denominator)
+        .min(ordinary_fees as u128) as FlakeAmount;
+    (burned, ordinary_fees.saturating_sub(burned))
+}
+
 fn compute_reward_distribution(
     gross_reward: FlakeAmount,
     _base_reward_amount: FlakeAmount,
@@ -1949,6 +1969,15 @@ impl OpolysNode {
             }
         }
 
+        let por_fee_market = if production_kind == BlockProductionKind::Refined {
+            Some((
+                refiners.total_active_refiners(),
+                RefinerSet::active_refiner_limit(chain.total_issued),
+            ))
+        } else {
+            None
+        };
+
         // Process double-sign evidence embedded in this block.
         // Each item is verified independently; duplicates within the block are skipped.
         let mut processed_evidence_keys: std::collections::HashSet<(String, u64)> =
@@ -2124,6 +2153,18 @@ impl OpolysNode {
             mempool.remove_transaction(&tx.tx_id);
         }
 
+        let (ordinary_fees_burned, refiner_fee_income) =
+            if production_kind == BlockProductionKind::Refined {
+                let (active_refiners, active_refiner_limit) = por_fee_market.unwrap_or((0, 0));
+                compute_por_fee_split(
+                    total_transaction_fees,
+                    active_refiners,
+                    active_refiner_limit,
+                )
+            } else {
+                (total_transaction_fees, 0)
+            };
+
         // FIX 3: evict expired mempool transactions at epoch boundaries
         if block.header.height > 0 && block.header.height.is_multiple_of(opolys_core::EPOCH) {
             let evicted = mempool.evict_expired(now_secs);
@@ -2136,31 +2177,22 @@ impl OpolysNode {
             }
         }
 
-        if production_kind == BlockProductionKind::Refined {
-            if !producer.0.is_zero() && total_transaction_fees > 0 {
-                let mut planned_fee_credit: HashMap<ObjectId, FlakeAmount> = HashMap::new();
-                add_planned_credit(&mut planned_fee_credit, producer, total_transaction_fees)?;
-                ensure_planned_credits_creditable(&accounts, &planned_fee_credit)?;
-                for (account, amount) in planned_fee_credit {
-                    credit_or_create_account(&mut accounts, &account, amount)?;
-                }
+        if production_kind == BlockProductionKind::Refined
+            && !producer.0.is_zero()
+            && refiner_fee_income > 0
+        {
+            let mut planned_fee_credit: HashMap<ObjectId, FlakeAmount> = HashMap::new();
+            add_planned_credit(&mut planned_fee_credit, producer, refiner_fee_income)?;
+            ensure_planned_credits_creditable(&accounts, &planned_fee_credit)?;
+            for (account, amount) in planned_fee_credit {
+                credit_or_create_account(&mut accounts, &account, amount)?;
             }
-        } else {
-            chain.total_burned = chain
-                .total_burned
-                .checked_add(total_transaction_fees)
-                .ok_or_else(|| "Total burned overflow after transaction fees".to_string())?;
         }
-        let ordinary_fees_burned = if production_kind == BlockProductionKind::Mined {
-            total_transaction_fees
-        } else {
-            0
-        };
-        let refiner_fee_income = if production_kind == BlockProductionKind::Refined {
-            total_transaction_fees
-        } else {
-            0
-        };
+
+        chain.total_burned = chain
+            .total_burned
+            .checked_add(ordinary_fees_burned)
+            .ok_or_else(|| "Total burned overflow after transaction fees".to_string())?;
 
         chain.total_burned = chain
             .total_burned
@@ -2693,6 +2725,13 @@ mod tests {
     }
 
     #[test]
+    fn por_fee_split_uses_active_refiner_market_pressure() {
+        assert_eq!(compute_por_fee_split(10_000, 0, 960), (0, 10_000));
+        assert_eq!(compute_por_fee_split(10_000, 1, 960), (10, 9_990));
+        assert_eq!(compute_por_fee_split(10_000, 960, 960), (5_000, 5_000));
+    }
+
+    #[test]
     fn genesis_attestation_loads_and_verifies() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_test_genesis_attestation(&dir, 333 * FLAKES_PER_OPL);
@@ -3209,20 +3248,29 @@ mod tests {
 
         let issued_before = node.chain.read().await.total_issued;
         let burned_before = node.chain.read().await.total_burned;
+        let (expected_burned_fee, expected_refiner_income) = {
+            let chain = node.chain.read().await;
+            let refiners = node.refiners.read().await;
+            compute_por_fee_split(
+                fee,
+                refiners.total_active_refiners(),
+                RefinerSet::active_refiner_limit(chain.total_issued),
+            )
+        };
         node.apply_block(&block)
             .await
             .expect("POR block with fee-paying transfer should apply");
 
         let chain = node.chain.read().await;
         assert_eq!(chain.total_issued, issued_before);
-        assert_eq!(chain.total_burned, burned_before);
+        assert_eq!(chain.total_burned, burned_before + expected_burned_fee);
         drop(chain);
 
         let accounts = node.accounts.read().await;
         assert_eq!(
             accounts.get_account(&node.miner_id).unwrap().balance,
-            fee,
-            "selected refiner producer receives only the ordinary transaction fee"
+            expected_refiner_income,
+            "selected refiner producer receives ordinary fee less POR assay burn"
         );
         assert_eq!(
             accounts.get_account(&recipient).unwrap().balance,
@@ -3321,6 +3369,15 @@ mod tests {
         refresh_body_roots_and_refiner_signature(&node, &mut block);
 
         let burned_before = node.chain.read().await.total_burned;
+        let (expected_burned_fee, expected_refiner_income) = {
+            let chain = node.chain.read().await;
+            let refiners = node.refiners.read().await;
+            compute_por_fee_split(
+                fee,
+                refiners.total_active_refiners(),
+                RefinerSet::active_refiner_limit(chain.total_issued),
+            )
+        };
         node.apply_block(&block)
             .await
             .expect("POR block with bond assay should apply");
@@ -3328,7 +3385,7 @@ mod tests {
         let chain = node.chain.read().await;
         assert_eq!(chain.total_issued, 0, "POR blocks do not issue OPL");
         assert!(
-            chain.total_burned > burned_before,
+            chain.total_burned > burned_before + expected_burned_fee,
             "bond assay burns even inside a POR block"
         );
         drop(chain);
@@ -3336,8 +3393,8 @@ mod tests {
         let accounts = node.accounts.read().await;
         assert_eq!(
             accounts.get_account(&node.miner_id).unwrap().balance,
-            fee,
-            "POR producer receives the ordinary fee, not the assay"
+            expected_refiner_income,
+            "POR producer receives ordinary fee less POR assay burn, not the bond assay"
         );
         assert!(
             accounts.get_account(&user_id).unwrap().balance < opl_to_flake(100) - bond_amount - fee,
@@ -3586,6 +3643,15 @@ mod tests {
         refresh_body_roots_and_refiner_signature(&node, &mut por_block);
         let issued_before_por = node.chain.read().await.total_issued;
         let burned_before_por = node.chain.read().await.total_burned;
+        let (expected_por_fee_burn, expected_por_fee_income) = {
+            let chain = node.chain.read().await;
+            let refiners = node.refiners.read().await;
+            compute_por_fee_split(
+                por_fee,
+                refiners.total_active_refiners(),
+                RefinerSet::active_refiner_limit(chain.total_issued),
+            )
+        };
         let producer_balance_before_por = node
             .accounts
             .read()
@@ -3605,8 +3671,9 @@ mod tests {
                 "POR blocks mint zero OPL"
             );
             assert_eq!(
-                chain.total_burned, burned_before_por,
-                "POR ordinary fees are paid to the refiner, not burned"
+                chain.total_burned,
+                burned_before_por + expected_por_fee_burn,
+                "POR ordinary fees split between burn and refiner income"
             );
             assert_eq!(
                 accounts.get_account(&recipient).unwrap().balance,
@@ -3614,8 +3681,13 @@ mod tests {
             );
             assert_eq!(
                 accounts.get_account(&node.miner_id).unwrap().balance,
-                producer_balance_before_por - opl_to_flake(1),
-                "same account sent the tx and produced POR, so it gets its ordinary fee back"
+                producer_balance_before_por - opl_to_flake(1) - expected_por_fee_burn,
+                "same account sent the tx and produced POR, so it gets fee income minus POR burn"
+            );
+            assert_eq!(
+                por_fee - expected_por_fee_burn,
+                expected_por_fee_income,
+                "POR fee split preserves the user-paid ordinary fee"
             );
             verify_invariant(&chain, &accounts, &refiners);
         }

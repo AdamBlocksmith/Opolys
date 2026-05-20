@@ -44,7 +44,7 @@ Ordinary fee routing:
 
 ```text
 mined block: ordinary fees burn
-refined block: ordinary fees go to the selected refiner
+refined block: ordinary fees split between POR fee burn and selected refiner income
 ```
 
 ## Short Answer
@@ -63,19 +63,19 @@ As difficulty rises, three things change:
 - ordinary fees can exceed new issuance at realistic activity levels
 
 Proof of Refinement strengthens this effect without minting: refined blocks
-move transactions and pay refiners from explicit user fees, but they create no
-new OPL.
+move transactions, burn a system-derived assay slice of ordinary fees, and pay
+refiners from the remaining explicit user fees, but they create no new OPL.
 
 ## Scenario Results
 
-| Scenario | Difficulty | Mined Share | Tx / Block | Fee / Tx | Gross Issued / Year | Burned / Year | Circulating Change / Year |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| Launch quiet, mostly mined | 7 | 100% | 5 | 0.0001 OPL | 31,368,622 OPL | 86,627 OPL | +31,281,995 OPL |
-| Launch active, mostly mined | 7 | 100% | 100 | 0.001 OPL | 31,368,622 OPL | 121,516 OPL | +31,247,106 OPL |
-| Mature busy PoW | 100 | 100% | 1,000 | 0.001 OPL | 2,195,804 OPL | 373,513 OPL | +1,822,291 OPL |
-| High difficulty busy PoW | 1,000 | 100% | 1,000 | 0.001 OPL | 219,580 OPL | 357,873 OPL | -138,293 OPL |
-| Miner stress, POR carries half | 1,000 | 50% | 1,000 | 0.001 OPL | 109,790 OPL | 178,937 OPL | -69,146 OPL |
-| Mostly POR, high activity | 1,000 | 10% | 1,000 | 0.001 OPL | 21,958 OPL | 35,787 OPL | -13,829 OPL |
+| Scenario | Difficulty | Mined Share | Tx / Block | Fee / Tx | Gross Issued / Year | Burned / Year | POR Fee Burn / Year | Refiner Fee / Year | Circulating Change / Year |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Launch quiet, mostly mined | 7 | 100% | 5 | 0.0001 OPL | 31,368,622 OPL | 86,627 OPL | 0 OPL | 0 OPL | +31,281,995 OPL |
+| Launch active, mostly mined | 7 | 100% | 100 | 0.001 OPL | 31,368,622 OPL | 121,516 OPL | 0 OPL | 0 OPL | +31,247,106 OPL |
+| Mature busy PoW | 100 | 100% | 1,000 | 0.001 OPL | 2,195,804 OPL | 373,513 OPL | 0 OPL | 0 OPL | +1,822,291 OPL |
+| High difficulty busy PoW | 1,000 | 100% | 1,000 | 0.001 OPL | 219,580 OPL | 357,873 OPL | 0 OPL | 0 OPL | -138,293 OPL |
+| Miner stress, POR carries half | 1,000 | 50% | 1,000 | 0.001 OPL | 109,790 OPL | 255,462 OPL | 76,526 OPL | 98,794 OPL | -145,672 OPL |
+| Mostly POR, high activity | 1,000 | 10% | 1,000 | 0.001 OPL | 21,958 OPL | 185,491 OPL | 149,704 OPL | 165,872 OPL | -163,533 OPL |
 
 Reading:
 

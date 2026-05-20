@@ -76,6 +76,14 @@ def mined_block_row(difficulty: float) -> dict[str, float]:
     }
 
 
+def por_fee_split(total_fees_opl: float, active_refiners: int, total_issued_opl: float) -> tuple[float, float]:
+    if total_fees_opl == 0 or active_refiners == 0:
+        return 0.0, total_fees_opl
+    limit = active_refiner_limit(total_issued_opl)
+    burn = total_fees_opl * active_refiners / (limit + active_refiners)
+    return burn, total_fees_opl - burn
+
+
 def scenario(
     name: str,
     difficulty: float,
@@ -90,8 +98,10 @@ def scenario(
     gross_issue = mined["gross"] * mined_blocks
     mine_assay = mined["assay"] * mined_blocks
     mined_fee_burn = mined_blocks * tx_per_block * fee_opl
-    refiner_fee_income = refined_blocks * tx_per_block * fee_opl
-    total_burn = mine_assay + mined_fee_burn
+    refined_fees = refined_blocks * tx_per_block * fee_opl
+    active_refiners = min(1_000, active_refiner_limit(gross_issue))
+    por_fee_burn, refiner_fee_income = por_fee_split(refined_fees, active_refiners, gross_issue)
+    total_burn = mine_assay + mined_fee_burn + por_fee_burn
 
     return {
         "name": name,
@@ -102,6 +112,7 @@ def scenario(
         "gross_issue": gross_issue,
         "mine_assay": mine_assay,
         "mined_fee_burn": mined_fee_burn,
+        "por_fee_burn": por_fee_burn,
         "refiner_fee_income": refiner_fee_income,
         "total_burn": total_burn,
         "circulating_delta": gross_issue - total_burn,
@@ -217,6 +228,7 @@ def main() -> None:
                 f"{item['gross_issue']:,.0f}",
                 f"{item['total_burn']:,.0f}",
                 f"{item['circulating_delta']:,.0f}",
+                f"{item['por_fee_burn']:,.0f}",
                 f"{item['refiner_fee_income']:,.0f}",
             ]
         )
@@ -228,6 +240,7 @@ def main() -> None:
             "Gross/year",
             "Burn/year",
             "Supply delta/year",
+            "POR fee burn/year",
             "Refiner fee/year",
         ],
         rows,

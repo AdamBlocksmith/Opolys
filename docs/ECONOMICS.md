@@ -189,13 +189,17 @@ Proof of Refinement is a stalled-chain service path. It does not issue new OPL.
 ```text
 refined_block_issuance = 0
 refined_block_mine_assay = 0
-refiner_fee_income = ordinary_fees_in_that_refined_block
+active_refiner_limit = EPOCH + sqrt(total_issued_opl)
+por_fee_burn = ordinary_fees * active_refiners / (active_refiner_limit + active_refiners)
+refiner_fee_income = ordinary_fees - por_fee_burn
 ```
 
 Gold analogy:
 
 A refiner does not discover new gold. A refiner earns only when it provides
-actual service by moving user activity during miner silence.
+actual service by moving user activity during miner silence. As the active
+refiner market matures, a system-derived portion of POR fees burns as assay
+dust instead of being captured by one producer.
 
 ## Fee Routing
 
@@ -213,13 +217,15 @@ if block is mined:
     ordinary_fees are burned
 
 if block is refined:
-    ordinary_fees are paid to selected refiner producer
+    por_fee_burn = ordinary_fees * active_refiners / (active_refiner_limit + active_refiners)
+    refiner_fee_income = ordinary_fees - por_fee_burn
 ```
 
 Gold analogy:
 
 In mined blocks, fees are market attrition. In refined blocks, fees are payment
-for a real vault/assay service that kept the chain moving.
+for a real vault/assay service that kept the chain moving, minus assay dust
+that rises as the active refiner market fills.
 
 ## Suggested Fee
 

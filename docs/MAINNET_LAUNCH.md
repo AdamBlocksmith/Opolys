@@ -107,11 +107,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\por_rehearsal.ps1
 ```
 
 This rehearsal verifies the refined-block path through the node apply-block
-logic: refined blocks mint zero OPL, ordinary fees go to the selected refiner,
-bond/unbond assays burn, attestations are accepted for refiner blocks, mined
-blocks do not receive refiner attestations, and supply accounting remains
-balanced. It does not bypass production activation rules in a live node; a live
-refiner becomes active only after the normal one-epoch bonding delay.
+logic: refined blocks mint zero OPL, ordinary fees split between POR fee burn
+and selected refiner income, bond/unbond assays burn, attestations are accepted
+for refiner blocks, mined blocks do not receive refiner attestations, and supply
+accounting remains balanced. It does not bypass production activation rules in
+a live node; a live refiner becomes active only after the normal one-epoch
+bonding delay.
 
 ## 3. Production Ceremony
 

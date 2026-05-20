@@ -124,8 +124,8 @@ Refined block example:
 ```text
 gross_mined_reward = 0
 mine_assay_burned = 0
-ordinary_fees_burned = 0
-ordinary_fees_paid_to_refiner = 0.040000 OPL
+ordinary_fees_burned = 0.000041 OPL
+ordinary_fees_paid_to_refiner = 0.039959 OPL
 net_new_issuance = 0
 ```
 

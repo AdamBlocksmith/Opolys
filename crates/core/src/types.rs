@@ -330,8 +330,8 @@ pub struct Transaction {
     pub sender: ObjectId,
     /// The action this transaction performs (transfer, bond, or unbond).
     pub action: TransactionAction,
-    /// Fee in Flakes. Burned in mined blocks; paid to the selected refiner
-    /// producer in refiner-produced blocks.
+    /// Fee in Flakes. Burned in mined blocks; split between POR fee burn and
+    /// selected refiner income in refiner-produced blocks.
     pub fee: FlakeAmount,
     /// Cryptographic signature over the transaction body by the sender.
     pub signature: Vec<u8>,
@@ -470,9 +470,9 @@ pub struct BlockEconomicReceipt {
     pub successful_transaction_count: u64,
     /// Ordinary transaction fees charged by successful transactions.
     pub ordinary_fees: FlakeAmount,
-    /// Ordinary fees burned by mined blocks.
+    /// Ordinary fees burned by mined blocks plus POR fee assay burns.
     pub ordinary_fees_burned: FlakeAmount,
-    /// Ordinary fees paid to the refiner producer in POR blocks.
+    /// Ordinary fees paid to the refiner producer after POR fee assay burns.
     pub refiner_fee_income: FlakeAmount,
     /// Dynamic bond/unbond assay burns charged by successful transactions.
     pub bond_unbond_assay_burned: FlakeAmount,
@@ -497,13 +497,13 @@ pub struct MintLedgerTotals {
     pub total_mined_gross_reward: FlakeAmount,
     /// Mine assay burned from gross mined reward.
     pub total_mine_assay_burned: FlakeAmount,
-    /// Ordinary fees burned by mined blocks.
+    /// Ordinary fees burned by mined blocks plus POR fee assay burns.
     pub total_ordinary_fees_burned: FlakeAmount,
     /// Bond/unbond assay burns.
     pub total_bond_unbond_assay_burned: FlakeAmount,
     /// Slashed refiner stake burned.
     pub total_slashed_stake_burned: FlakeAmount,
-    /// Ordinary fees paid to POR refiner producers.
+    /// Ordinary fees paid to POR refiner producers after POR fee assay burns.
     pub total_refiner_fee_income: FlakeAmount,
     /// Number of mined blocks applied, excluding genesis.
     pub total_mined_blocks: u64,
