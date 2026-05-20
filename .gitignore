@@ -6,6 +6,9 @@
 /data
 /dist
 /artifact-rehearsal-local
+/artifact-rehearsal-*
 /launch-rehearsal-local
+/launch-rehearsal-*
 /release-smoke-local
+/release-smoke-*
 AGENTS.md
